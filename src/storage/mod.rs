@@ -19,6 +19,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use tokio::sync::oneshot;
 
 use crate::logger::LOGGER;
+use crate::search::TextIndex;
 use crate::types::{CommandEnvelope, PartitionCommand, PartitionResult};
 
 /// A collection of documents stored by a single partition.
@@ -33,15 +34,59 @@ pub struct PartitionWorker {
     id: usize,
     collections: HashMap<String, Collection>,
     receiver: Receiver<CommandEnvelope>,
+    /// Full-text index mirroring this partition's documents.
+    ///
+    /// `None` only when tantivy fails to allocate its writer (e.g. out
+    /// of memory): the partition keeps serving indexed lookups by
+    /// equality while `$text` searches report an error instead of
+    /// panicking the worker.
+    index: Option<TextIndex>,
 }
 
 impl PartitionWorker {
     /// Creates a new worker with the given id and command receiver.
     fn new(id: usize, receiver: Receiver<CommandEnvelope>) -> Self {
+        let index = match TextIndex::new() {
+            Ok(index) => Some(index),
+            Err(err) => {
+                LOGGER.error(format!(
+                    "Partition {}: full-text index unavailable: {}",
+                    id, err
+                ));
+                None
+            }
+        };
+
         Self {
             id,
             collections: HashMap::new(),
             receiver,
+            index,
+        }
+    }
+
+    /// Builds the search index entry for one document and adds it.
+    ///
+    /// Indexing failures are logged, never propagated: a document that
+    /// cannot be tokenized must still be stored and returned by normal
+    /// queries.
+    fn index_document(&mut self, collection: &str, document: &Document) {
+        let id = document_id_string(document);
+        let text = extract_text(document);
+        if let Some(index) = self.index.as_mut() {
+            if let Err(err) = index.add(collection, &id, &text) {
+                LOGGER.warn(format!("Failed to index document {}: {}", id, err));
+            }
+        }
+    }
+
+    /// Removes one document from the search index (best effort).
+    fn unindex_document(&mut self, collection: &str, document: &Document) {
+        let id = document_id_string(document);
+        if let Some(index) = self.index.as_mut() {
+            if let Err(err) = index.remove(collection, &id) {
+                LOGGER.warn(format!("Failed to unindex document {}: {}", id, err));
+            }
         }
     }
 
@@ -69,11 +114,15 @@ impl PartitionWorker {
         match command {
             PartitionCommand::Insert {
                 collection,
-                document,
+                documents,
             } => {
+                let inserted_count = documents.len() as u32;
+                for document in &documents {
+                    self.index_document(&collection, document);
+                }
                 let docs = self.collections.entry(collection).or_default();
-                docs.push(document);
-                PartitionResult::Inserted { inserted_count: 1 }
+                docs.extend(documents);
+                PartitionResult::Inserted { inserted_count }
             }
 
             PartitionCommand::Find { collection, filter } => {
@@ -100,9 +149,8 @@ impl PartitionWorker {
                             .count()
                     })
                     .unwrap_or(0);
-                // Count reuses Found so the caller gets a single shape.
-                PartitionResult::Found {
-                    documents: vec![doc! { "n": count as i64 }],
+                PartitionResult::Counted {
+                    count: count as u64,
                 }
             }
 
@@ -110,36 +158,248 @@ impl PartitionWorker {
                 collection,
                 filter,
                 update,
+                multi,
             } => {
                 let Some(docs) = self.collections.get_mut(&collection) else {
-                    return PartitionResult::Modified { modified_count: 0 };
+                    return PartitionResult::Modified {
+                        matched_count: 0,
+                        modified_count: 0,
+                    };
                 };
 
-                let mut modified = 0u32;
+                let mut matched_count = 0u32;
+                let mut modified_count = 0u32;
+                // The index needs the pre-update id to remove the old
+                // entry, so collect it while iterating.
+                let mut updated_ids: Vec<String> = Vec::new();
                 for doc in docs.iter_mut() {
                     if document_matches(doc, &filter) {
+                        matched_count += 1;
+                        let id = document_id_string(doc);
                         apply_update(doc, &update);
-                        modified += 1;
+                        updated_ids.push(id);
+                        modified_count += 1;
+                        if !multi {
+                            break;
+                        }
                     }
                 }
+                drop(docs);
+
+                // Re-index the modified documents so search reflects
+                // the new text (`_id` survives updates). The documents
+                // are cloned out of the map so the index methods can
+                // borrow `self` mutably.
+                let updated_docs: Vec<Document> = self
+                    .collections
+                    .get(&collection)
+                    .map(|docs| {
+                        updated_ids
+                            .iter()
+                            .filter_map(|id| {
+                                docs.iter()
+                                    .find(|doc| document_id_string(doc) == *id)
+                                    .cloned()
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                for doc in &updated_docs {
+                    self.unindex_document(&collection, doc);
+                    self.index_document(&collection, doc);
+                }
+
                 PartitionResult::Modified {
-                    modified_count: modified,
+                    matched_count,
+                    modified_count,
                 }
             }
 
-            PartitionCommand::Delete { collection, filter } => {
+            PartitionCommand::Drop { collection } => {
+                self.collections.remove(&collection);
+                if let Some(index) = self.index.as_mut() {
+                    if let Err(err) = index.remove_collection(&collection) {
+                        LOGGER.warn(format!(
+                            "Failed to drop collection {} from index: {}",
+                            collection, err
+                        ));
+                    }
+                }
+                PartitionResult::Dropped { collection }
+            }
+
+            PartitionCommand::ListCollections { filter } => {
+                // One entry per collection this partition owns, shaped
+                // like a real MongoDB listCollections document (the
+                // server-generated `uuid` is omitted). The filter uses
+                // the same equality matcher as every other command.
+                let mut collections: Vec<Document> = self
+                    .collections
+                    .keys()
+                    .map(|name| {
+                        doc! {
+                            "name": name,
+                            "type": "collection",
+                            "options": {},
+                            "info": { "readOnly": false },
+                            "idIndex": {
+                                "v": 2i32,
+                                "key": { "_id": 1i32 },
+                                "name": "_id_",
+                            },
+                        }
+                    })
+                    .filter(|info| document_matches(info, &filter))
+                    .collect();
+                // Sorting keeps the merged reply stable regardless of
+                // which worker answers first.
+                collections.sort_by(|a, b| {
+                    a.get_str("name")
+                        .unwrap_or("")
+                        .cmp(b.get_str("name").unwrap_or(""))
+                });
+                PartitionResult::ListedCollections { collections }
+            }
+
+            PartitionCommand::Search {
+                collection,
+                query,
+                filter,
+            } => {
+                let Some(index) = self.index.as_mut() else {
+                    return PartitionResult::Error {
+                        message: "full-text search is unavailable".into(),
+                    };
+                };
+
+                let hits = match index.search(&collection, &query) {
+                    Ok(hits) => hits,
+                    Err(err) => return PartitionResult::Error { message: err },
+                };
+
+                // The index stores ids, not documents: look each hit up
+                // in the map and apply any non-`$text` predicates the
+                // client also sent.
+                let Some(docs) = self.collections.get(&collection) else {
+                    return PartitionResult::Found {
+                        documents: Vec::new(),
+                    };
+                };
+
+                let mut documents = Vec::with_capacity(hits.len());
+                for hit in hits {
+                    if let Some(doc) = docs.iter().find(|doc| document_id_string(doc) == hit.id) {
+                        if document_matches(doc, &filter) {
+                            documents.push(doc.clone());
+                        }
+                    }
+                }
+                PartitionResult::Found { documents }
+            }
+
+            PartitionCommand::Delete {
+                collection,
+                filter,
+                limit,
+            } => {
                 let Some(docs) = self.collections.get_mut(&collection) else {
                     return PartitionResult::Deleted { deleted_count: 0 };
                 };
 
+                // Snapshot the documents about to be removed so they
+                // can be unindexed after the borrow ends.
+                let mut removed_docs: Vec<Document> = Vec::new();
                 let before = docs.len();
-                docs.retain(|doc| !document_matches(doc, &filter));
-                PartitionResult::Deleted {
-                    deleted_count: (before - docs.len()) as u32,
+                if limit == 0 {
+                    // deleteMany: drop every match.
+                    docs.retain(|doc| {
+                        let matches = document_matches(doc, &filter);
+                        if matches {
+                            removed_docs.push(doc.clone());
+                        }
+                        !matches
+                    });
+                } else {
+                    // deleteOne (or a bounded delete): stop after `limit`.
+                    let mut removed = 0u32;
+                    docs.retain(|doc| {
+                        let matches = document_matches(doc, &filter) && removed < limit;
+                        if matches {
+                            removed_docs.push(doc.clone());
+                            removed += 1;
+                        }
+                        !matches
+                    });
                 }
+                let deleted_count = (before - docs.len()) as u32;
+                drop(docs);
+
+                for doc in &removed_docs {
+                    self.unindex_document(&collection, doc);
+                }
+
+                PartitionResult::Deleted { deleted_count }
             }
         }
     }
+}
+
+/// Returns the storage-side id of a document as a string.
+///
+/// Uses the `_id` field when present (MongoDB guarantees it is unique
+/// within a collection). Documents inserted through internals that
+/// skipped `_id` fall back to a content hash, which keeps the id
+/// stable across index rebuilds.
+fn document_id_string(doc: &Document) -> String {
+    use bson::Bson;
+
+    match doc.get("_id") {
+        Some(Bson::String(s)) => s.clone(),
+        Some(Bson::ObjectId(oid)) => oid.to_hex(),
+        Some(Bson::Int32(n)) => n.to_string(),
+        Some(Bson::Int64(n)) => n.to_string(),
+        _ => {
+            let bytes = bson::to_vec(doc).unwrap_or_default();
+            format!("h{:016x}", fnv1a(&bytes))
+        }
+    }
+}
+
+/// Concatenates every string value in a document into one blob of text.
+///
+/// This is what the search index tokenizes: nested documents and arrays
+/// are walked so fields at any depth become searchable. Non-string
+/// values are skipped — BM25 over numbers adds noise, not signal.
+fn extract_text(doc: &Document) -> String {
+    fn walk(value: &bson::Bson, out: &mut String) {
+        use bson::Bson;
+        match value {
+            Bson::String(s) => {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(s);
+            }
+            Bson::Array(values) => {
+                for value in values {
+                    walk(value, out);
+                }
+            }
+            Bson::Document(nested) => {
+                for value in nested.values() {
+                    walk(value, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = String::new();
+    for value in doc.values() {
+        walk(value, &mut out);
+    }
+    out
 }
 
 /// Returns `true` when every field in `filter` is present and equal in `doc`.
@@ -256,6 +516,30 @@ impl PartitionRouter {
         }
     }
 
+    /// Sends a command to **every** partition and returns one reply
+    /// channel per worker.
+    ///
+    /// Used by commands that must see all shards of the data set
+    /// (`listCollections`), since collection names hash to different
+    /// workers. The caller awaits each receiver and merges the results.
+    pub fn broadcast(&self, command: PartitionCommand) -> Vec<oneshot::Receiver<PartitionResult>> {
+        self.inner
+            .senders
+            .iter()
+            .map(|sender| {
+                let (tx, rx) = oneshot::channel();
+                let envelope = CommandEnvelope {
+                    command: command.clone(),
+                    respond_to: tx,
+                };
+                if sender.send(envelope).is_err() {
+                    LOGGER.error("Partition worker is not reachable during broadcast");
+                }
+                rx
+            })
+            .collect()
+    }
+
     /// Computes the partition index for a collection name.
     ///
     /// Uses a stable FNV-1a hash so routing is deterministic across
@@ -320,7 +604,7 @@ mod tests {
         let rx = router
             .dispatch(PartitionCommand::Insert {
                 collection: "users".into(),
-                document: doc! { "name": "Ada", "age": 36 },
+                documents: vec![doc! { "name": "Ada", "age": 36 }],
             })
             .expect("worker reachable");
         let result = rx.await.expect("worker replied");
@@ -371,7 +655,7 @@ mod tests {
         router
             .dispatch(PartitionCommand::Insert {
                 collection: "users".into(),
-                document: doc! { "name": "Ada", "age": 36 },
+                documents: vec![doc! { "name": "Ada", "age": 36 }],
             })
             .expect("worker reachable")
             .await
@@ -382,12 +666,19 @@ mod tests {
                 collection: "users".into(),
                 filter: doc! { "name": "Ada" },
                 update: doc! { "$set": { "age": 37 } },
+                multi: false,
             })
             .expect("worker reachable");
         let result = rx.await.expect("worker replied");
 
         assert!(
-            matches!(result, PartitionResult::Modified { modified_count: 1 }),
+            matches!(
+                result,
+                PartitionResult::Modified {
+                    matched_count: 1,
+                    modified_count: 1
+                }
+            ),
             "expected one modified document, got {:?}",
             result
         );
@@ -411,7 +702,7 @@ mod tests {
         router
             .dispatch(PartitionCommand::Insert {
                 collection: "todos".into(),
-                document: doc! { "task": "write tests", "done": false },
+                documents: vec![doc! { "task": "write tests", "done": false }],
             })
             .expect("worker reachable")
             .await
@@ -420,7 +711,7 @@ mod tests {
         router
             .dispatch(PartitionCommand::Insert {
                 collection: "todos".into(),
-                document: doc! { "task": "ship phase 2", "done": false },
+                documents: vec![doc! { "task": "ship phase 2", "done": false }],
             })
             .expect("worker reachable")
             .await
@@ -430,6 +721,7 @@ mod tests {
             .dispatch(PartitionCommand::Delete {
                 collection: "todos".into(),
                 filter: doc! { "task": "write tests" },
+                limit: 0,
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
@@ -444,11 +736,232 @@ mod tests {
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
+            PartitionResult::Counted { count } => {
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected Counted, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_returns_documents_by_relevance() {
+        let router = router();
+
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "articles".into(),
+                documents: vec![
+                    doc! { "_id": "a", "title": "Rust for database engines" },
+                    doc! { "_id": "b", "title": "Cooking pasta" },
+                ],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let rx = router
+            .dispatch(PartitionCommand::Search {
+                collection: "articles".into(),
+                query: "database".into(),
+                filter: doc! {},
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
             PartitionResult::Found { documents } => {
-                assert_eq!(documents[0].get_i64("n").unwrap(), 1);
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0].get_str("_id").unwrap(), "a");
             }
             other => panic!("expected Found, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_search_applies_post_filter() {
+        let router = router();
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "posts".into(),
+                documents: vec![
+                    doc! { "_id": 1, "tag": "rust", "body": "rust is fast" },
+                    doc! { "_id": 2, "tag": "cooking", "body": "rust of the pan" },
+                ],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let rx = router
+            .dispatch(PartitionCommand::Search {
+                collection: "posts".into(),
+                query: "rust".into(),
+                filter: doc! { "tag": "rust" },
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1, "post filter must drop the pan");
+                assert_eq!(documents[0].get_i32("_id").unwrap(), 1);
+            }
+            other => panic!("expected Found, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_reflects_update_and_delete() {
+        let router = router();
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "notes".into(),
+                documents: vec![doc! { "_id": "n1", "text": "alpha" }],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        // The word changes; the old one must stop matching.
+        router
+            .dispatch(PartitionCommand::Update {
+                collection: "notes".into(),
+                filter: doc! { "_id": "n1" },
+                update: doc! { "$set": { "text": "omega" } },
+                multi: false,
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let search = |query: String| {
+            let router = router.clone();
+            async move {
+                let rx = router
+                    .dispatch(PartitionCommand::Search {
+                        collection: "notes".into(),
+                        query,
+                        filter: doc! {},
+                    })
+                    .expect("worker reachable");
+                match rx.await.expect("worker replied") {
+                    PartitionResult::Found { documents } => documents,
+                    other => panic!("expected Found, got {:?}", other),
+                }
+            }
+        };
+
+        assert!(search("alpha".into()).await.is_empty(), "stale text");
+        assert_eq!(search("omega".into()).await.len(), 1, "fresh text");
+
+        // Deleting the document must hide it too.
+        router
+            .dispatch(PartitionCommand::Delete {
+                collection: "notes".into(),
+                filter: doc! { "_id": "n1" },
+                limit: 0,
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        assert!(search("omega".into()).await.is_empty(), "deleted doc");
+    }
+
+    #[tokio::test]
+    async fn test_drop_collection_clears_index() {
+        let router = router();
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "tmp".into(),
+                documents: vec![doc! { "_id": "t", "text": "vanish" }],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        router
+            .dispatch(PartitionCommand::Drop {
+                collection: "tmp".into(),
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        // Re-creating the collection must not resurrect old hits.
+        let rx = router
+            .dispatch(PartitionCommand::Search {
+                collection: "tmp".into(),
+                query: "vanish".into(),
+                filter: doc! {},
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Found { documents } => {
+                assert!(documents.is_empty(), "dropped doc leaked: {:?}", documents);
+            }
+            other => panic!("expected Found, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_collections_broadcast_merges_all_partitions() {
+        let router = router();
+
+        // "alpha" and "zeta" hash to different partitions, so only a
+        // broadcast can see both.
+        for name in ["alpha", "zeta"] {
+            router
+                .dispatch(PartitionCommand::Insert {
+                    collection: name.into(),
+                    documents: vec![doc! { "n": 1 }],
+                })
+                .expect("worker reachable")
+                .await
+                .expect("worker replied");
+        }
+
+        let mut names = Vec::new();
+        for rx in router.broadcast(PartitionCommand::ListCollections { filter: doc! {} }) {
+            match rx.await.expect("worker replied") {
+                PartitionResult::ListedCollections { collections } => {
+                    names.extend(
+                        collections
+                            .into_iter()
+                            .filter_map(|info| info.get_str("name").ok().map(String::from)),
+                    );
+                }
+                other => panic!("expected ListedCollections, got {:?}", other),
+            }
+        }
+
+        names.sort();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+    }
+
+    #[tokio::test]
+    async fn test_list_collections_honors_name_filter() {
+        let router = router();
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "users".into(),
+                documents: vec![doc! { "n": 1 }],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let mut matched = Vec::new();
+        for rx in router.broadcast(PartitionCommand::ListCollections {
+            filter: doc! { "name": "users" },
+        }) {
+            match rx.await.expect("worker replied") {
+                PartitionResult::ListedCollections { collections } => {
+                    matched.extend(collections);
+                }
+                other => panic!("expected ListedCollections, got {:?}", other),
+            }
+        }
+
+        assert_eq!(matched.len(), 1, "filter must match exactly one");
+        assert_eq!(matched[0].get_str("name").unwrap(), "users");
+        assert_eq!(matched[0].get_str("type").unwrap(), "collection");
     }
 
     #[tokio::test]
@@ -463,7 +976,7 @@ mod tests {
             router
                 .dispatch(PartitionCommand::Insert {
                     collection: "kova".into(),
-                    document: doc! { "seq": i },
+                    documents: vec![doc! { "seq": i }],
                 })
                 .expect("worker reachable")
                 .await
@@ -477,10 +990,10 @@ mod tests {
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
-            PartitionResult::Found { documents } => {
-                assert_eq!(documents[0].get_i64("n").unwrap(), 5);
+            PartitionResult::Counted { count } => {
+                assert_eq!(count, 5);
             }
-            other => panic!("expected Found, got {:?}", other),
+            other => panic!("expected Counted, got {:?}", other),
         }
     }
 

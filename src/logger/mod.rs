@@ -9,6 +9,7 @@
 //!   to files, syslog, or any custom consumer.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,6 +30,33 @@ impl Level {
             Level::Info => "INFO",
             Level::Warn => "WARN",
             Level::Error => "ERROR",
+        }
+    }
+
+    /// Parses a level from a case-insensitive configuration string.
+    ///
+    /// Returns `None` for unknown values so the caller can warn and
+    /// fall back to the previous/default level.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "debug" => Some(Level::Debug),
+            "info" => Some(Level::Info),
+            "warn" => Some(Level::Warn),
+            "error" => Some(Level::Error),
+            _ => None,
+        }
+    }
+
+    /// Returns the ordering rank of the level (higher = more severe).
+    ///
+    /// Used by the minimum-level filter: a record is emitted when its
+    /// rank is greater than or equal to the configured minimum.
+    fn rank(self) -> u8 {
+        match self {
+            Level::Debug => 0,
+            Level::Info => 1,
+            Level::Warn => 2,
+            Level::Error => 3,
         }
     }
 }
@@ -90,16 +118,34 @@ impl LogSink for StderrSink {
 /// The global logger facade.
 pub struct Logger {
     sink: Arc<dyn LogSink>,
+    /// Minimum level a record must reach to be emitted. Configured
+    /// once at startup from `log_level` (defaults to `Debug`, i.e.
+    /// everything is emitted).
+    min_level: AtomicU8,
 }
 
 impl Logger {
     /// Creates a new logger backed by the given sink.
     pub fn new(sink: Arc<dyn LogSink>) -> Self {
-        Self { sink }
+        Self {
+            sink,
+            min_level: AtomicU8::new(Level::Debug.rank()),
+        }
+    }
+
+    /// Sets the minimum level a record must reach to be emitted.
+    pub fn set_min_level(&self, level: Level) {
+        self.min_level.store(level.rank(), Ordering::Relaxed);
     }
 
     /// Logs a record at the given level.
+    ///
+    /// Records below the configured minimum level are dropped before
+    /// touching the sink, so a quiet server never pays for formatting.
     pub fn log(&self, level: Level, message: impl Into<String>) {
+        if level.rank() < self.min_level.load(Ordering::Relaxed) {
+            return;
+        }
         let record = LogRecord::new(level, message);
         self.sink.emit(&record);
     }

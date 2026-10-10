@@ -1,0 +1,29 @@
+# Kova engine configuration.
+#
+# Every key below can also be set through an environment variable.
+# Precedence: environment variable > this file > built-in default.
+# Point KOVA_CONFIG at another file to load a different profile.
+
+# TCP port for the MongoDB wire protocol listener.
+# Env: KOVA_PORT
+port = 27017
+
+# Minimum log level: "debug" | "info" | "warn" | "error".
+# Env: KOVA_LOG_LEVEL
+log_level = "info"
+
+# Emit a WARN log when a query uses operators MongoDB does not define:
+# Kova extensions such as $text.$boost / $text.$decay, or operators the
+# engine does not implement yet. Set to false to silence them.
+# Env: KOVA_WARN_NON_MONGO_QUERIES
+warn_on_non_mongo_queries = true
+
+[search]
+# Token pipeline for indexed text fields (fixed at index creation):
+#   "default" - split on punctuation/whitespace, lowercase
+#   "en_stem" - default plus English stemming (better recall)
+analyzer = "default"
+
+# Extra stop words removed at index and query time, e.g. ["the", "a"].
+# Empty by default: stop-word removal is language-dependent.
+stopwords = []

@@ -12,11 +12,24 @@ use crate::types::{PartitionCommand, PartitionResult};
 /// OP_MSG operation code.
 pub const OP_MSG: i32 = 2013;
 
+/// OP_REPLY operation code (the response to an OP_QUERY).
+///
+/// Drivers open the connection with a legacy OP_QUERY handshake, and
+/// the wire protocol requires the answer to carry this opcode.
+pub const OP_REPLY: i32 = 1;
+
 /// Size of the fixed 16-byte message header.
 pub const HEADER_SIZE: usize = 16;
 
 /// Size of the 4-byte `flagBits` field that follows the header in OP_MSG.
 pub const FLAG_BITS_SIZE: usize = 4;
+
+/// Largest message the server accepts from a client.
+///
+/// Matches `maxMessageSizeBytes` announced in the `hello` reply, so a
+/// frame claiming more is a protocol violation rather than a size we
+/// should allocate for.
+pub const MAX_MESSAGE_SIZE: usize = 48_000_000;
 
 /// A decoded OP_MSG payload: the command document a client sent us.
 #[derive(Debug, Clone)]
@@ -39,7 +52,8 @@ pub fn decode_op_msg(body: &[u8]) -> Result<OpMsg, String> {
         ));
     }
 
-    let flag_bits = u32::from_be_bytes(
+    // Every integer in the wire protocol is little-endian.
+    let flag_bits = u32::from_le_bytes(
         body[0..4]
             .try_into()
             .map_err(|_| "flagBits must be 4 bytes".to_string())?,
@@ -64,6 +78,82 @@ pub fn decode_op_msg(body: &[u8]) -> Result<OpMsg, String> {
     }
 }
 
+/// Decodes an OP_QUERY body (everything after the 16-byte header).
+///
+/// Layout: `flagBits` (4 bytes), `fullCollectionName` (cstring),
+/// `numberToSkip` (4 bytes), `numberToReturn` (4 bytes) and the query
+/// BSON document. Modern drivers use OP_QUERY only for the very first
+/// handshake message (`isMaster` on `admin.$cmd`); everything after
+/// the handshake uses OP_MSG.
+pub fn decode_op_query(body: &[u8]) -> Result<OpMsg, String> {
+    if body.len() < FLAG_BITS_SIZE {
+        return Err(format!(
+            "OP_QUERY body too short: {} bytes (need at least {})",
+            body.len(),
+            FLAG_BITS_SIZE
+        ));
+    }
+
+    let flag_bits = u32::from_le_bytes(
+        body[0..4]
+            .try_into()
+            .map_err(|_| "flagBits must be 4 bytes".to_string())?,
+    );
+
+    let rest = &body[FLAG_BITS_SIZE..];
+
+    // fullCollectionName: NUL-terminated string (e.g. "admin.$cmd").
+    let nul = rest
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or_else(|| "OP_QUERY is missing fullCollectionName".to_string())?;
+    let _full_collection_name = std::str::from_utf8(&rest[..nul])
+        .map_err(|_| "OP_QUERY fullCollectionName is not UTF-8".to_string())?;
+
+    let after_name = &rest[nul + 1..];
+    if after_name.len() < 8 {
+        return Err(format!(
+            "OP_QUERY missing skip/return fields: {} bytes left",
+            after_name.len()
+        ));
+    }
+
+    let command: Document =
+        from_slice(&after_name[8..]).map_err(|err| format!("invalid BSON in OP_QUERY: {}", err))?;
+
+    Ok(OpMsg { flag_bits, command })
+}
+
+/// Builds a full OP_REPLY frame ready to be written to the socket.
+///
+/// OP_REPLY is the response to a legacy OP_QUERY: header, then
+/// `responseFlags` (4), `cursorID` (8), `startingFrom` (4),
+/// `numberReturned` (4) and one or more documents.
+pub fn encode_op_reply(
+    request_id: i32,
+    response_to: i32,
+    body: &Document,
+) -> Result<Vec<u8>, String> {
+    let document = to_vec(body).map_err(|err| format!("BSON encode failed: {}", err))?;
+
+    // header (16) + flags (4) + cursorID (8) + startingFrom (4) +
+    // numberReturned (4) + document
+    let message_length = (HEADER_SIZE + 4 + 8 + 4 + 4 + document.len()) as u32;
+
+    let mut frame = Vec::with_capacity(message_length as usize);
+    frame.extend_from_slice(&message_length.to_le_bytes());
+    frame.extend_from_slice(&request_id.to_le_bytes());
+    frame.extend_from_slice(&response_to.to_le_bytes());
+    frame.extend_from_slice(&OP_REPLY.to_le_bytes());
+    frame.extend_from_slice(&0i32.to_le_bytes()); // responseFlags
+    frame.extend_from_slice(&0i64.to_le_bytes()); // cursorID (dead)
+    frame.extend_from_slice(&0i32.to_le_bytes()); // startingFrom
+    frame.extend_from_slice(&1i32.to_le_bytes()); // numberReturned
+    frame.extend_from_slice(&document);
+
+    Ok(frame)
+}
+
 /// Translates a decoded command document into a [`PartitionCommand`].
 ///
 /// Supports the commands Phase 2 can execute: `insert`, `find`, `update`,
@@ -71,19 +161,26 @@ pub fn decode_op_msg(body: &[u8]) -> Result<OpMsg, String> {
 /// surfaced to the client as a Mongo error reply.
 pub fn command_from_document(command: &Document) -> Result<PartitionCommand, String> {
     if let Some(collection) = command.get_str("insert").ok() {
-        let documents = command
+        let values = command
             .get_array("documents")
             .map_err(|_| "insert requires a 'documents' array")?;
 
-        let document = documents
-            .first()
-            .and_then(|value| value.as_document())
-            .ok_or_else(|| "insert requires at least one document".to_string())?
-            .clone();
+        let mut documents = Vec::with_capacity(values.len());
+        for value in values {
+            let document = value
+                .as_document()
+                .ok_or_else(|| "insert requires documents to be objects".to_string())?
+                .clone();
+            documents.push(document);
+        }
+
+        if documents.is_empty() {
+            return Err("insert requires at least one document".to_string());
+        }
 
         return Ok(PartitionCommand::Insert {
             collection: collection.to_string(),
-            document,
+            documents,
         });
     }
 
@@ -92,6 +189,26 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .get_document("filter")
             .cloned()
             .unwrap_or_else(|_| doc! {});
+
+        // `{ $text: { $search: "..." } }` is MongoDB's full-text
+        // operator; route it to the search index instead of the
+        // equality matcher.
+        if let Ok(text) = filter.get_document("$text") {
+            let search_query = text
+                .get_str("$search")
+                .map_err(|_| "$text requires a '$search' string")?
+                .to_string();
+
+            // Keep the client's other predicates as a post-filter.
+            let mut rest = filter.clone();
+            rest.remove("$text");
+
+            return Ok(PartitionCommand::Search {
+                collection: collection.to_string(),
+                query: search_query,
+                filter: rest,
+            });
+        }
 
         return Ok(PartitionCommand::Find {
             collection: collection.to_string(),
@@ -114,11 +231,15 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .get_document("u")
             .map_err(|_| "update entry requires a 'u' document")?
             .clone();
+        // The MongoDB `update` command defaults to single-document
+        // updates; `multi: true` is required for updateMany.
+        let multi = entry.get_bool("multi").unwrap_or(false);
 
         return Ok(PartitionCommand::Update {
             collection: collection.to_string(),
             filter,
             update,
+            multi,
         });
     }
 
@@ -133,10 +254,18 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .ok_or_else(|| "delete requires at least one entry".to_string())?;
 
         let filter = entry.get_document("q").cloned().unwrap_or_else(|_| doc! {});
+        // `limit` 0 means "delete all matches" (deleteMany); deleteOne
+        // sends 1.
+        let limit = entry
+            .get_i32("limit")
+            .or_else(|_| entry.get_i64("limit").map(|v| v as i32))
+            .unwrap_or(0)
+            .max(0) as u32;
 
         return Ok(PartitionCommand::Delete {
             collection: collection.to_string(),
             filter,
+            limit,
         });
     }
 
@@ -150,6 +279,21 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             collection: collection.to_string(),
             filter,
         });
+    }
+
+    if let Some(collection) = command.get_str("drop").ok() {
+        return Ok(PartitionCommand::Drop {
+            collection: collection.to_string(),
+        });
+    }
+
+    if command.contains_key("listCollections") {
+        let filter = command
+            .get_document("filter")
+            .cloned()
+            .unwrap_or_else(|_| doc! {});
+
+        return Ok(PartitionCommand::ListCollections { filter });
     }
 
     let name = command
@@ -180,7 +324,66 @@ pub fn special_command(command: &Document) -> Option<Document> {
         return Some(hello_reply());
     }
 
+    // Metadata commands every driver/tool issues at startup. They carry
+    // no data-plane meaning, so answering them here keeps the mongosh
+    // startup sequence quiet without teaching storage anything.
+    if command.contains_key("buildInfo") {
+        return Some(build_info_reply());
+    }
+
+    if command.contains_key("getParameter") {
+        return Some(get_parameter_reply(command));
+    }
+
+    // Sessions are not implemented; acknowledging `endSessions` is the
+    // correct answer because the server owns no session state to drop.
+    if command.contains_key("endSessions") {
+        return Some(doc! { "ok": 1.0 });
+    }
+
     None
+}
+
+/// Builds the reply to a `buildInfo` request.
+///
+/// The version mirrors the wire version advertised in [`hello_reply`]
+/// so a client comparing both sees a consistent server.
+fn build_info_reply() -> Document {
+    doc! {
+        "ok": 1.0,
+        "version": "7.0.14",
+        "versionArray": [7, 0, 14, 0],
+        "gitVersion": "kova",
+        "modules": [],
+        "allocator": "system",
+        "javascriptEngine": "none",
+        "sysInfo": "Kova in-memory engine",
+    }
+}
+
+/// Builds the reply to a `getParameter` request.
+///
+/// Only `featureCompatibilityVersion` is answered (drivers read it to
+/// detect server capabilities); any other requested parameter is
+/// reported as unknown, matching a real server's behavior.
+fn get_parameter_reply(command: &Document) -> Document {
+    if command.get_i32("featureCompatibilityVersion").is_ok()
+        || command.get_i64("featureCompatibilityVersion").is_ok()
+    {
+        return doc! {
+            "ok": 1.0,
+            "featureCompatibilityVersion": {
+                "version": "7.0.14",
+                "apiVersion": "1",
+            },
+        };
+    }
+
+    // `getParameter: "<name>"` for a parameter we do not model.
+    doc! {
+        "ok": 0.0,
+        "errmsg": "no such parameter",
+    }
 }
 
 /// Builds the reply to a `hello`/`isMaster` handshake.
@@ -229,8 +432,34 @@ pub fn reply_document(result: &PartitionResult) -> Document {
             );
             reply
         }
-        PartitionResult::Modified { modified_count } => doc! {
+        PartitionResult::Counted { count } => doc! {
             "ok": 1.0,
+            "n": *count as i64,
+        },
+        PartitionResult::Dropped { collection } => doc! {
+            "ok": 1.0,
+            "dropped": collection.clone(),
+        },
+        PartitionResult::ListedCollections { collections } => {
+            let mut reply = doc! { "ok": 1.0 };
+            reply.insert(
+                "cursor",
+                doc! {
+                    "id": 0i64,
+                    // The namespace is filled in by the network layer,
+                    // which knows the requesting database.
+                    "ns": "",
+                    "firstBatch": collections.clone(),
+                },
+            );
+            reply
+        }
+        PartitionResult::Modified {
+            matched_count,
+            modified_count,
+        } => doc! {
+            "ok": 1.0,
+            "n": *matched_count as i64,
             "nModified": *modified_count as i64,
         },
         PartitionResult::Deleted { deleted_count } => doc! {
@@ -257,11 +486,12 @@ pub fn encode_reply(request_id: i32, response_to: i32, body: &Document) -> Resul
     let message_length = (HEADER_SIZE + FLAG_BITS_SIZE + payload.len()) as u32;
 
     let mut frame = Vec::with_capacity(message_length as usize);
-    frame.extend_from_slice(&message_length.to_be_bytes());
-    frame.extend_from_slice(&request_id.to_be_bytes());
-    frame.extend_from_slice(&response_to.to_be_bytes());
-    frame.extend_from_slice(&OP_MSG.to_be_bytes());
-    frame.extend_from_slice(&0u32.to_be_bytes()); // flagBits
+    // The wire protocol is little-endian (BSON and all integers).
+    frame.extend_from_slice(&message_length.to_le_bytes());
+    frame.extend_from_slice(&request_id.to_le_bytes());
+    frame.extend_from_slice(&response_to.to_le_bytes());
+    frame.extend_from_slice(&OP_MSG.to_le_bytes());
+    frame.extend_from_slice(&0u32.to_le_bytes()); // flagBits
     frame.extend_from_slice(&payload);
 
     Ok(frame)
@@ -274,7 +504,7 @@ mod tests {
     #[test]
     fn test_decode_op_msg_body_with_insert() {
         let command = doc! { "insert": "users", "documents": [{ "name": "Ada" }] };
-        let mut body = 0u32.to_be_bytes().to_vec(); // flagBits = 0
+        let mut body = 0u32.to_le_bytes().to_vec(); // flagBits = 0
         body.push(0u8); // section kind 0
         body.extend(to_vec(&command).expect("encode"));
 
@@ -303,13 +533,77 @@ mod tests {
         match parsed {
             PartitionCommand::Insert {
                 collection,
-                document,
+                documents,
             } => {
                 assert_eq!(collection, "users");
-                assert_eq!(document.get_str("name").unwrap(), "Ada");
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0].get_str("name").unwrap(), "Ada");
             }
             other => panic!("expected Insert, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_command_insert_many_keeps_all_documents() {
+        let command = doc! {
+            "insert": "users",
+            "documents": [{ "name": "Ada" }, { "name": "Grace" }],
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Insert { documents, .. } => {
+                assert_eq!(documents.len(), 2, "insertMany must keep every document");
+            }
+            other => panic!("expected Insert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_find_with_text_becomes_search() {
+        let command = doc! {
+            "find": "articles",
+            "filter": { "$text": { "$search": "rust engine" } },
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Search {
+                collection,
+                query,
+                filter,
+            } => {
+                assert_eq!(collection, "articles");
+                assert_eq!(query, "rust engine");
+                assert!(filter.is_empty(), "$text must be stripped: {:?}", filter);
+            }
+            other => panic!("expected Search, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_find_with_text_keeps_other_predicates() {
+        let command = doc! {
+            "find": "articles",
+            "filter": { "author": "Ada", "$text": { "$search": "rust" } },
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Search { filter, query, .. } => {
+                assert_eq!(query, "rust");
+                assert_eq!(filter.get_str("author").unwrap(), "Ada");
+                assert!(!filter.contains_key("$text"), "$text must be stripped");
+            }
+            other => panic!("expected Search, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_find_with_text_requires_search_string() {
+        let command = doc! {
+            "find": "articles",
+            "filter": { "$text": {} },
+        };
+        let err = command_from_document(&command).expect_err("must fail");
+        assert!(err.contains("$search"), "got: {}", err);
     }
 
     #[test]
@@ -337,10 +631,12 @@ mod tests {
                 collection,
                 filter,
                 update,
+                multi,
             } => {
                 assert_eq!(collection, "users");
                 assert_eq!(filter.get_str("name").unwrap(), "Ada");
                 assert!(update.contains_key("$set"));
+                assert!(!multi, "update must default to single-document");
             }
             other => panic!("expected Update, got {:?}", other),
         }
@@ -354,9 +650,14 @@ mod tests {
         };
         let parsed = command_from_document(&command).expect("parse");
         match parsed {
-            PartitionCommand::Delete { collection, filter } => {
+            PartitionCommand::Delete {
+                collection,
+                filter,
+                limit,
+            } => {
                 assert_eq!(collection, "todos");
                 assert_eq!(filter.get_bool("done").unwrap(), true);
+                assert_eq!(limit, 0, "limit 0 means delete all matches");
             }
             other => panic!("expected Delete, got {:?}", other),
         }
@@ -411,13 +712,28 @@ mod tests {
         assert!(special_command(&doc! { "insert": "users", "documents": [] }).is_none());
         assert!(special_command(&doc! { "find": "users" }).is_none());
         assert!(special_command(&doc! { "drop": "users" }).is_none());
+        assert!(
+            special_command(&doc! { "buildInfo": 1 }).is_some(),
+            "buildInfo is metadata"
+        );
+        assert!(special_command(&doc! { "endSessions": [] }).is_some());
     }
 
     #[test]
     fn test_command_rejects_unknown() {
-        let command = doc! { "drop": "users" };
+        let command = doc! { "createIndexes": "users", "indexes": [] };
         let err = command_from_document(&command).expect_err("must fail");
-        assert!(err.contains("drop"), "got: {}", err);
+        assert!(err.contains("createIndexes"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_command_drop() {
+        let command = doc! { "drop": "users" };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Drop { collection } => assert_eq!(collection, "users"),
+            other => panic!("expected Drop, got {:?}", other),
+        }
     }
 
     #[test]
@@ -450,15 +766,66 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_op_query_handshake_from_real_frame() {
+        // Body of the OP_QUERY a real mongosh sends on connect:
+        // flagBits=0, fullCollectionName="admin.$cmd", numberToSkip=0,
+        // numberToReturn=-1, then the BSON command document.
+        let mut body = 0u32.to_le_bytes().to_vec(); // flagBits
+        body.extend_from_slice(b"admin.$cmd\0");
+        body.extend_from_slice(&0i32.to_le_bytes()); // numberToSkip
+        body.extend_from_slice(&(-1i32).to_le_bytes()); // numberToReturn
+        body.extend(to_vec(&doc! { "ismaster": 1i32 }).expect("bson"));
+
+        let query = decode_op_query(&body).expect("decode OP_QUERY");
+        assert_eq!(query.flag_bits, 0);
+        assert_eq!(query.command.get_i32("ismaster").unwrap(), 1);
+
+        // The decoded command must hit the handshake path.
+        assert!(special_command(&query.command).is_some());
+    }
+
+    #[test]
+    fn test_decode_op_query_rejects_missing_namespace() {
+        let mut body = 0u32.to_le_bytes().to_vec();
+        // Non-zero bytes only: no NUL terminator for fullCollectionName.
+        body.extend_from_slice(b"admin.$cmd");
+        let err = decode_op_query(&body).expect_err("must fail");
+        assert!(err.contains("fullCollectionName"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_encode_op_reply_layout() {
+        let body = doc! { "ok": 1.0, "ismaster": true };
+        let frame = encode_op_reply(5, 9, &body).expect("encode");
+
+        let message_length = u32::from_le_bytes(frame[0..4].try_into().unwrap());
+        let request_id = i32::from_le_bytes(frame[4..8].try_into().unwrap());
+        let response_to = i32::from_le_bytes(frame[8..12].try_into().unwrap());
+        let op_code = i32::from_le_bytes(frame[12..16].try_into().unwrap());
+        let cursor_id = i64::from_le_bytes(frame[20..28].try_into().unwrap());
+        let number_returned = i32::from_le_bytes(frame[32..36].try_into().unwrap());
+
+        assert_eq!(frame.len(), message_length as usize);
+        assert_eq!(request_id, 5);
+        assert_eq!(response_to, 9, "reply must echo the request id");
+        assert_eq!(op_code, OP_REPLY, "OP_QUERY is answered with OP_REPLY");
+        assert_eq!(cursor_id, 0, "no live cursor");
+        assert_eq!(number_returned, 1);
+
+        let decoded: Document = from_slice(&frame[36..]).expect("decode reply");
+        assert_eq!(decoded.get_bool("ismaster").unwrap(), true);
+    }
+
+    #[test]
     fn test_encode_reply_layout() {
         let body = doc! { "ok": 1.0 };
         let frame = encode_reply(7, 42, &body).expect("encode");
 
-        let message_length = u32::from_be_bytes(frame[0..4].try_into().unwrap());
-        let request_id = i32::from_be_bytes(frame[4..8].try_into().unwrap());
-        let response_to = i32::from_be_bytes(frame[8..12].try_into().unwrap());
-        let op_code = i32::from_be_bytes(frame[12..16].try_into().unwrap());
-        let flag_bits = u32::from_be_bytes(frame[16..20].try_into().unwrap());
+        let message_length = u32::from_le_bytes(frame[0..4].try_into().unwrap());
+        let request_id = i32::from_le_bytes(frame[4..8].try_into().unwrap());
+        let response_to = i32::from_le_bytes(frame[8..12].try_into().unwrap());
+        let op_code = i32::from_le_bytes(frame[12..16].try_into().unwrap());
+        let flag_bits = u32::from_le_bytes(frame[16..20].try_into().unwrap());
 
         assert_eq!(frame.len(), message_length as usize);
         assert_eq!(request_id, 7);

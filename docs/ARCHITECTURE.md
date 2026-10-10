@@ -99,7 +99,7 @@ memory management.
 
 ## 6. Message Contract (Wire Protocol)
 
-### 6.1 Header (16 bytes, big-endian)
+### 6.1 Header (16 bytes, little-endian)
 
 | Offset | Size | Field            | Type  |
 |--------|------|------------------|-------|
@@ -110,9 +110,18 @@ memory management.
 
 ### 6.2 OpCodes
 
-| Opcode | Name   | Constant     |
-|--------|--------|--------------|
-| 2013   | OP_MSG | `wire::OP_MSG` |
+| Opcode | Name     | Constant       |
+|--------|----------|----------------|
+| 2013   | OP_MSG   | `wire::OP_MSG`   |
+| 2004   | OP_QUERY | `wire::OP_QUERY` |
+| 1      | OP_REPLY | `protocol::OP_REPLY` |
+
+All integers in the wire protocol (header, `flagBits`, OP_REPLY fields)
+are little-endian, matching the official MongoDB Wire Protocol
+specification. OP_QUERY is used by drivers only for the initial
+`isMaster`/`hello` handshake; it is answered with an OP_REPLY frame.
+Every message length is validated against `MAX_MESSAGE_SIZE` (48 MB)
+before any buffer is allocated.
 
 ## 7. Partitioning Strategy
 
@@ -123,10 +132,19 @@ memory management.
 
 ## 8. Search Subsystem
 
-- Tantivy inverted indexes are built per partition.
+- Tantivy inverted indexes are built per partition, each in a RAM
+  directory (no disk I/O) and owned exclusively by its worker thread.
 - Text fields are tokenized into terms; BM25 relevance scoring is used.
 - Indexing is a hot, incremental process: as a document arrives, its text
-  fields are indexed immediately.
+  fields are indexed immediately. Update, delete and drop keep the index
+  consistent with the transactional map.
+- The query surface is MongoDB's native `$text` operator
+  (`{ $text: { $search: "..." } }`); extra predicates in the same
+  filter are applied as an equality post-filter over the hits.
+- When the exact query scores zero hits, the search retries with a
+  fuzzy (distance-1) query so a one-character typo still matches.
+- `src/search/mod.rs` never reads raw BSON: the storage layer hands it
+  plain strings and receives document ids, per `docs/CONTRACT.md` §4.
 
 ## 9. Phases
 

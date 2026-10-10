@@ -15,7 +15,7 @@ use tokio::spawn;
 use crate::logger::LOGGER;
 use crate::protocol;
 use crate::storage::PartitionRouter;
-use crate::types::PartitionResult;
+use crate::types::{PartitionCommand, PartitionResult};
 
 mod wire {
     //! Fixed offsets of the 16-byte MongoDB Wire Protocol header.
@@ -35,6 +35,9 @@ mod wire {
     /// OP_MSG operation code of the MongoDB Wire Protocol.
     pub const OP_MSG: i32 = 2013;
 
+    /// OP_QUERY operation code (legacy handshake).
+    pub const OP_QUERY: i32 = 2004;
+
     #[derive(Debug, Clone, Copy)]
     pub struct MessageHeader {
         /// Total header length in bytes (includes the header).
@@ -50,26 +53,25 @@ mod wire {
     impl MessageHeader {
         /// Parses a 16-byte header read from the TCP stream.
         ///
-        /// The fields are read in big-endian, as specified by the
-        /// MongoDB Wire Protocol.
+        /// Every integer in the MongoDB Wire Protocol is little-endian.
         pub fn parse(bytes: &[u8; HEADER_SIZE]) -> Self {
             Self {
-                message_length: u32::from_be_bytes(
+                message_length: u32::from_le_bytes(
                     bytes[MESSAGE_LENGTH_OFFSET..MESSAGE_LENGTH_OFFSET + 4]
                         .try_into()
                         .expect("4 bytes at MESSAGE_LENGTH_OFFSET"),
                 ),
-                request_id: i32::from_be_bytes(
+                request_id: i32::from_le_bytes(
                     bytes[REQUEST_ID_OFFSET..REQUEST_ID_OFFSET + 4]
                         .try_into()
                         .expect("4 bytes at REQUEST_ID_OFFSET"),
                 ),
-                response_to: i32::from_be_bytes(
+                response_to: i32::from_le_bytes(
                     bytes[RESPONSE_TO_OFFSET..RESPONSE_TO_OFFSET + 4]
                         .try_into()
                         .expect("4 bytes at RESPONSE_TO_OFFSET"),
                 ),
-                op_code: i32::from_be_bytes(
+                op_code: i32::from_le_bytes(
                     bytes[OP_CODE_OFFSET..OP_CODE_OFFSET + 4]
                         .try_into()
                         .expect("4 bytes at OP_CODE_OFFSET"),
@@ -79,7 +81,14 @@ mod wire {
     }
 }
 
-const KOVA_PORT: u16 = 27017;
+/// Resolves the listening port from the global configuration.
+///
+/// The port comes from `kova.toml`, overridable with `KOVA_PORT`; an
+/// invalid environment value was already warned about and discarded
+/// during configuration load, so this never fails.
+fn resolve_port() -> u16 {
+    crate::config::CONFIG.port
+}
 
 /// Monotonic counter used for the `requestId` of our own replies.
 static REPLY_REQUEST_ID: AtomicI32 = AtomicI32::new(1);
@@ -89,13 +98,15 @@ static REPLY_REQUEST_ID: AtomicI32 = AtomicI32::new(1);
 /// Connections are accepted asynchronously; each client runs on its own
 /// Tokio task. Commands are forwarded to `router`, whose partition
 /// workers execute them on dedicated OS threads.
+////// ## Port
 ///
-/// ## Port
-///
-/// The default port is `27017` (the standard MongoDB port).
+/// The default port is `27017` (the standard MongoDB port). It can be
+/// changed in `kova.toml` or overridden with the `KOVA_PORT`
+/// environment variable (environment wins over file).
 pub async fn start_server(router: PartitionRouter) -> std::io::Result<()> {
-    let listener = TcpListener::bind(("0.0.0.0", KOVA_PORT)).await?;
-    LOGGER.info(format!("Network server started on port {}", KOVA_PORT));
+    let port = resolve_port();
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    LOGGER.info(format!("Network server started on port {}", port));
 
     loop {
         let (mut socket, addr) = listener.accept().await?;
@@ -148,6 +159,24 @@ async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std:
                 .expect("exactly 16 bytes were read"),
         );
 
+        // ---- sanity check -------------------------------------------
+        // `messageLength` must cover at least the header itself and can
+        // never exceed the 48 MB limit announced in the `hello` reply.
+        // Rejecting a bogus length here keeps the loop aligned instead
+        // of allocating a multi-gigabyte buffer for a garbage value.
+        if header.message_length < wire::HEADER_SIZE as u32
+            || header.message_length > protocol::MAX_MESSAGE_SIZE as u32
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid messageLength {} (raw header {:02x?})",
+                    header.message_length,
+                    &header_buf[..]
+                ),
+            ));
+        }
+
         // ---- body --------------------------------------------------
         let body_len = header
             .message_length
@@ -167,9 +196,20 @@ async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std:
                 if let Err(err) = process_op_msg(&header, &body_buf, router, socket).await {
                     LOGGER.warn(format!("Failed to process OP_MSG: {}", err));
                 }
+            } else if header.op_code == wire::OP_QUERY {
+                // Pre-4.2 handshake path: drivers open with a legacy
+                // `isMaster` OP_QUERY and expect an OP_REPLY back.
+                LOGGER.debug(format!(
+                    "OP_QUERY received (requestId={}, {} bytes)",
+                    header.request_id, header.message_length
+                ));
+
+                if let Err(err) = process_op_query(&header, &body_buf, router, socket).await {
+                    LOGGER.warn(format!("Failed to process OP_QUERY: {}", err));
+                }
             } else {
                 LOGGER.warn(format!(
-                    "Unsupported opCode {} (only OP_MSG is handled)",
+                    "Unsupported opCode {} (OP_MSG and OP_QUERY are handled)",
                     header.op_code
                 ));
             }
@@ -185,34 +225,7 @@ async fn process_op_msg(
     socket: &mut TcpStream,
 ) -> Result<(), String> {
     let msg = protocol::decode_op_msg(body)?;
-
-    // Handshake commands (`ping`, `hello`, `isMaster`) are answered
-    // here without touching storage.
-    let reply_body = if let Some(direct) = protocol::special_command(&msg.command) {
-        LOGGER.debug(format!(
-            "Handshake command answered directly: {:?}",
-            msg.command.keys().collect::<Vec<_>>()
-        ));
-        direct
-    } else {
-        match protocol::command_from_document(&msg.command) {
-            Ok(command) => match router.dispatch(command) {
-                Some(rx) => match rx.await {
-                    Ok(result) => protocol::reply_document(&result),
-                    Err(_) => protocol::reply_document(&PartitionResult::Error {
-                        message: "partition worker dropped the request".into(),
-                    }),
-                },
-                None => protocol::reply_document(&PartitionResult::Error {
-                    message: "storage partition unavailable".into(),
-                }),
-            },
-            Err(message) => {
-                LOGGER.warn(format!("Command rejected: {}", message));
-                bson::doc! { "ok": 0.0, "errmsg": message }
-            }
-        }
-    };
+    let reply_body = execute_command(&msg.command, router).await;
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_reply(request_id, header.request_id, &reply_body)?;
@@ -230,12 +243,149 @@ async fn process_op_msg(
     Ok(())
 }
 
+/// Decodes, executes and replies to a single legacy OP_QUERY.
+///
+/// Drivers open the connection with an `isMaster`/`hello` OP_QUERY and
+/// expect an OP_REPLY frame back, so this path mirrors
+/// [`process_op_msg`] but speaks the legacy reply opcode.
+async fn process_op_query(
+    header: &wire::MessageHeader,
+    body: &[u8],
+    router: &PartitionRouter,
+    socket: &mut TcpStream,
+) -> Result<(), String> {
+    let query = protocol::decode_op_query(body)?;
+    let reply_body = execute_command(&query.command, router).await;
+
+    let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let frame = protocol::encode_op_reply(request_id, header.request_id, &reply_body)?;
+
+    socket
+        .write_all(&frame)
+        .await
+        .map_err(|err| format!("failed to write reply: {}", err))?;
+
+    LOGGER.info(format!(
+        "Replied to OP_QUERY requestId {} (reply requestId {})",
+        header.request_id, request_id
+    ));
+
+    Ok(())
+}
+
+/// Runs one decoded command and returns the reply document.
+///
+/// Handshake commands (`ping`, `hello`, `isMaster`) are answered here
+/// without touching storage; everything else is routed to its
+/// partition worker.
+async fn execute_command(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+    if let Some(direct) = protocol::special_command(command) {
+        LOGGER.debug(format!(
+            "Handshake command answered directly: {:?}",
+            command.keys().collect::<Vec<_>>()
+        ));
+        return direct;
+    }
+
+    match protocol::command_from_document(command) {
+        // Collection names hash across partitions, so this command goes
+        // to every worker and the replies are merged here.
+        Ok(PartitionCommand::ListCollections { .. }) => list_collections(command, router).await,
+        Ok(partition_command) => match router.dispatch(partition_command) {
+            Some(rx) => match rx.await {
+                Ok(result) => cursor_ns(command, protocol::reply_document(&result)),
+                Err(_) => protocol::reply_document(&PartitionResult::Error {
+                    message: "partition worker dropped the request".into(),
+                }),
+            },
+            None => protocol::reply_document(&PartitionResult::Error {
+                message: "storage partition unavailable".into(),
+            }),
+        },
+        Err(message) => {
+            LOGGER.warn(format!(
+                "Command rejected: {} (raw: {:?})",
+                message, command
+            ));
+            bson::doc! { "ok": 0.0, "errmsg": message }
+        }
+    }
+}
+
+/// Broadcasts `listCollections` to every partition and merges the
+/// collection descriptions into a single cursor reply.
+///
+/// The reply namespace follows MongoDB's own format,
+/// `<db>.$cmd.listCollections`.
+async fn list_collections(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+    let partition_command = match protocol::command_from_document(command) {
+        Ok(partition_command) => partition_command,
+        Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+    };
+
+    let mut collections: Vec<bson::Document> = Vec::new();
+    for rx in router.broadcast(partition_command) {
+        match rx.await {
+            Ok(PartitionResult::ListedCollections {
+                collections: mut listed,
+            }) => collections.append(&mut listed),
+            Ok(PartitionResult::Error { message }) => {
+                return protocol::reply_document(&PartitionResult::Error { message });
+            }
+            Ok(_) | Err(_) => {
+                return protocol::reply_document(&PartitionResult::Error {
+                    message: "partition worker returned no collections".into(),
+                });
+            }
+        }
+    }
+
+    collections.sort_by(|a, b| {
+        a.get_str("name")
+            .unwrap_or("")
+            .cmp(b.get_str("name").unwrap_or(""))
+    });
+
+    let db = command.get_str("$db").unwrap_or("admin");
+    bson::doc! {
+        "ok": 1.0,
+        "cursor": {
+            "id": 0i64,
+            "ns": format!("{}.$cmd.listCollections", db),
+            "firstBatch": collections,
+        },
+    }
+}
+
+/// Fills `cursor.ns` with the `db.collection` namespace.
+///
+/// Drivers (mongosh included) refuse a cursor whose namespace is empty,
+/// so the reply must name the database from `$db` and the collection
+/// from the command's first field (`find`, `count`, ...).
+fn cursor_ns(command: &bson::Document, mut reply: bson::Document) -> bson::Document {
+    let db = command.get_str("$db").unwrap_or("admin");
+    let collection = command
+        .get_str("find")
+        .or_else(|_| command.get_str("count"))
+        .unwrap_or("");
+
+    if collection.is_empty() {
+        return reply;
+    }
+
+    if let Some(bson::Bson::Document(cursor)) = reply.get_mut("cursor") {
+        cursor.insert("ns", format!("{}.{}", db, collection));
+    }
+
+    reply
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wire::{MessageHeader, HEADER_SIZE, OP_MSG};
 
-    /// Builds a 16-byte big-endian header with the given fields.
+    /// Builds a 16-byte little-endian header with the given fields.
     fn build_header(
         message_length: u32,
         request_id: i32,
@@ -243,10 +393,10 @@ mod tests {
         op_code: i32,
     ) -> [u8; HEADER_SIZE] {
         let mut bytes = [0u8; HEADER_SIZE];
-        bytes[0..4].copy_from_slice(&message_length.to_be_bytes());
-        bytes[4..8].copy_from_slice(&request_id.to_be_bytes());
-        bytes[8..12].copy_from_slice(&response_to.to_be_bytes());
-        bytes[12..16].copy_from_slice(&op_code.to_be_bytes());
+        bytes[0..4].copy_from_slice(&message_length.to_le_bytes());
+        bytes[4..8].copy_from_slice(&request_id.to_le_bytes());
+        bytes[8..12].copy_from_slice(&response_to.to_le_bytes());
+        bytes[12..16].copy_from_slice(&op_code.to_le_bytes());
         bytes
     }
 
@@ -263,22 +413,40 @@ mod tests {
 
     #[test]
     fn test_parse_unknown_opcode() {
-        let bytes = build_header(16, 42, 7, 2004); // OP_REPLY
+        let bytes = build_header(16, 42, 7, 2012); // OP_COMPRESSED (unsupported)
         let header = MessageHeader::parse(&bytes);
 
-        assert_eq!(header.op_code, 2004);
+        assert_eq!(header.op_code, 2012);
         assert_ne!(header.op_code, OP_MSG);
         assert_eq!(header.request_id, 42);
         assert_eq!(header.response_to, 7);
     }
 
     #[test]
-    fn test_parse_preserves_big_endian_layout() {
+    fn test_parse_preserves_little_endian_layout() {
         let bytes = build_header(256, 0, 0, OP_MSG);
-        assert_eq!(&bytes[0..4], &[0x00, 0x00, 0x01, 0x00]);
+        assert_eq!(&bytes[0..4], &[0x00, 0x01, 0x00, 0x00]);
 
         let header = MessageHeader::parse(&bytes);
         assert_eq!(header.message_length, 256);
+    }
+
+    #[test]
+    fn test_parse_real_mongosh_handshake_header() {
+        // First 16 bytes captured from a real `mongosh` connection:
+        // messageLength=406, requestId=1, responseTo=0, opCode=2004.
+        let captured: [u8; HEADER_SIZE] = [
+            0x96, 0x01, 0x00, 0x00, // 406, little-endian
+            0x01, 0x00, 0x00, 0x00, // requestId = 1
+            0x00, 0x00, 0x00, 0x00, // responseTo = 0
+            0xd4, 0x07, 0x00, 0x00, // opCode = 2004 (OP_QUERY)
+        ];
+
+        let header = MessageHeader::parse(&captured);
+        assert_eq!(header.message_length, 406);
+        assert_eq!(header.request_id, 1);
+        assert_eq!(header.response_to, 0);
+        assert_eq!(header.op_code, wire::OP_QUERY);
     }
 
     #[test]
@@ -422,6 +590,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_server_answers_legacy_op_query_handshake() {
+        let router = PartitionRouter::new(1);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test port");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server_router = router.clone();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let _ = handle_client(&mut socket, &server_router).await;
+        });
+
+        // Legacy OP_QUERY body, exactly as a real driver sends it.
+        let mut body = 0u32.to_le_bytes().to_vec(); // flagBits
+        body.extend_from_slice(b"admin.$cmd\0");
+        body.extend_from_slice(&0i32.to_le_bytes()); // numberToSkip
+        body.extend_from_slice(&(-1i32).to_le_bytes()); // numberToReturn
+        body.extend(bson::to_vec(&bson::doc! { "isMaster": 1i32 }).expect("bson"));
+
+        // Build the full frame: little-endian 16-byte header + body.
+        let message_length = (wire::HEADER_SIZE + body.len()) as u32;
+        let mut frame = Vec::from(message_length.to_le_bytes());
+        frame.extend_from_slice(&1i32.to_le_bytes()); // requestId
+        frame.extend_from_slice(&0i32.to_le_bytes()); // responseTo
+        frame.extend_from_slice(&wire::OP_QUERY.to_le_bytes());
+        frame.extend_from_slice(&body);
+
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        client.write_all(&frame).await.expect("write request");
+
+        let mut header_buf = [0u8; wire::HEADER_SIZE];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_exact(&mut header_buf),
+        )
+        .await
+        .expect("reply timed out")
+        .expect("reply header read");
+
+        let reply_header = MessageHeader::parse(&header_buf);
+        assert_eq!(
+            reply_header.op_code,
+            protocol::OP_REPLY,
+            "OP_QUERY must be answered with OP_REPLY"
+        );
+        assert_eq!(reply_header.response_to, 1, "reply must echo requestId");
+        assert!(reply_header.message_length > wire::HEADER_SIZE as u32);
+
+        // OP_REPLY body: flags(4) + cursorId(8) + startingFrom(4) +
+        // numberReturned(4) + documents.
+        let body_len = reply_header.message_length as usize - wire::HEADER_SIZE;
+        let mut body_buf = vec![0u8; body_len];
+        client.read_exact(&mut body_buf).await.expect("reply body");
+
+        let number_returned = i32::from_le_bytes(body_buf[16..20].try_into().unwrap());
+        assert_eq!(number_returned, 1);
+
+        let doc: bson::Document = bson::from_slice(&body_buf[20..]).expect("decode reply doc");
+        assert_eq!(doc.get_f64("ok").expect("ok"), 1.0);
+        assert_eq!(doc.get_bool("ismaster").expect("ismaster"), true);
+    }
+
+    #[tokio::test]
+    async fn test_server_searches_with_text_operator() {
+        let router = PartitionRouter::new(1);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test port");
+        let addr = listener.local_addr().expect("local addr");
+
+        // This test opens one connection per request, so the server
+        // must keep accepting (the single-accept pattern used by the
+        // other tests would reset the second connection).
+        let server_router = router.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let client_router = server_router.clone();
+                tokio::spawn(async move {
+                    let _ = handle_client(&mut socket, &client_router).await;
+                });
+            }
+        });
+
+        // Seed two documents over the wire.
+        let command = bson::doc! {
+            "insert": "articles",
+            "documents": [
+                { "_id": "a", "title": "Rust database internals" },
+                { "_id": "b", "title": "Sourdough baking basics" },
+            ],
+        };
+        let frame = protocol::encode_reply(1, 0, &command).expect("encode");
+        let _ = send_and_read_reply(addr, frame).await;
+
+        // $text must route to the search index and hit only "a".
+        let search = bson::doc! {
+            "find": "articles",
+            "filter": { "$text": { "$search": "database" } },
+        };
+        let frame = protocol::encode_reply(2, 0, &search).expect("encode");
+        let (reply, _) = send_and_read_reply(addr, frame).await;
+
+        let cursor = reply.command.get_document("cursor").expect("cursor");
+        let batch = cursor.get_array("firstBatch").expect("firstBatch");
+        assert_eq!(
+            batch.len(),
+            1,
+            "only the rust doc must match: {:?}",
+            reply.command
+        );
+        let hit = batch[0].as_document().expect("document");
+        assert_eq!(hit.get_str("_id").unwrap(), "a");
+    }
+
+    #[tokio::test]
     async fn test_server_reports_unknown_command() {
         let router = PartitionRouter::new(1);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -435,7 +722,7 @@ mod tests {
             let _ = handle_client(&mut socket, &server_router).await;
         });
 
-        let command = bson::doc! { "drop": "users" };
+        let command = bson::doc! { "createIndexes": "users", "indexes": [] };
         let frame = protocol::encode_reply(1, 0, &command).expect("encode");
 
         let mut client = TcpStream::connect(addr).await.expect("connect");
@@ -461,7 +748,7 @@ mod tests {
             msg.command
                 .get_str("errmsg")
                 .expect("errmsg")
-                .contains("drop"),
+                .contains("createIndexes"),
             "error must name the command: {:?}",
             msg.command
         );
