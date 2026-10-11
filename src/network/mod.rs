@@ -325,17 +325,15 @@ async fn execute_command(
     }
 
     // Phase 4: SQL text arrives as an OP_MSG command with the key
-    // "sql". The value is the SQL string; we parse it with DataFusion
-    // and return the logical plan description as a BSON document.
-    // This is intentionally thin: real execution over storage
-    // partitions comes with multi-partition DataFusion tests.
+    // "sql". The value is the SQL string; we execute it with DataFusion
+    // and return the result set as a BSON document (or an error).
+    // This is the entry point for SQL queries against in-memory collections.
+    // Real execution over disk-backed storage (Phase 5+) swaps in a different
+    // table provider without changing this path.
     if let Ok(sql) = command.get_str("sql") {
-        match query_engine::parse_sql(sql).await {
-            Ok(pq) => {
-                return bson::doc! {
-                    "ok": 1.0,
-                    "plan": query_engine::plan_description(&pq.plan),
-                };
+        match query_engine::execute_sql(&router.session(), sql).await {
+            Ok(result) => {
+                return result;
             }
             Err(err) => {
                 return bson::doc! {
