@@ -4,6 +4,9 @@
 //! Tokio task, read OP_MSG frames, hand them to the storage router and
 //! write the reply back. Raw protocol parsing lives in
 //! [`crate::protocol`]; this file only handles I/O.
+//!
+//! Phase 4 (DataFusion) is wired in through [`crate::query_engine`];
+//! SQL text arriving as an OP_MSG command is parsed and planned there.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -14,6 +17,7 @@ use tokio::spawn;
 
 use crate::logger::LOGGER;
 use crate::protocol;
+use crate::query_engine;
 use crate::storage::PartitionRouter;
 use crate::types::{PartitionCommand, PartitionResult};
 
@@ -194,7 +198,20 @@ async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std:
                 ));
 
                 if let Err(err) = process_op_msg(&header, &body_buf, router, socket).await {
-                    LOGGER.warn(format!("Failed to process OP_MSG: {}", err));
+                    // A bounded hex prefix turns "section kind 189"
+                    // into an actionable diagnosis of what the client
+                    // actually put on the wire.
+                    let preview: Vec<String> = body_buf
+                        .iter()
+                        .take(32)
+                        .map(|byte| format!("{:02x}", byte))
+                        .collect();
+                    LOGGER.warn(format!(
+                        "Failed to process OP_MSG ({} bytes, prefix {}): {}",
+                        body_buf.len(),
+                        preview.join(" "),
+                        err
+                    ));
                 }
             } else if header.op_code == wire::OP_QUERY {
                 // Pre-4.2 handshake path: drivers open with a legacy
@@ -225,7 +242,10 @@ async fn process_op_msg(
     socket: &mut TcpStream,
 ) -> Result<(), String> {
     let msg = protocol::decode_op_msg(body)?;
-    let reply_body = execute_command(&msg.command, router).await;
+    let local_addr = socket
+        .local_addr()
+        .map_err(|err| format!("failed to read local address: {}", err))?;
+    let reply_body = execute_command(&msg.command, router, local_addr).await;
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_reply(request_id, header.request_id, &reply_body)?;
@@ -255,7 +275,10 @@ async fn process_op_query(
     socket: &mut TcpStream,
 ) -> Result<(), String> {
     let query = protocol::decode_op_query(body)?;
-    let reply_body = execute_command(&query.command, router).await;
+    let local_addr = socket
+        .local_addr()
+        .map_err(|err| format!("failed to read local address: {}", err))?;
+    let reply_body = execute_command(&query.command, router, local_addr).await;
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_op_reply(request_id, header.request_id, &reply_body)?;
@@ -275,10 +298,17 @@ async fn process_op_query(
 
 /// Runs one decoded command and returns the reply document.
 ///
-/// Handshake commands (`ping`, `hello`, `isMaster`) are answered here
-/// without touching storage; everything else is routed to its
-/// partition worker.
-async fn execute_command(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+/// Handshake commands (`ping`, `hello`, `isMaster`, `whatsmyuri`) are
+/// answered here without touching storage; everything else is routed
+/// to its partition worker.
+///
+/// `local_addr` is the socket's own address, which `whatsmyuri`
+/// reports back so a client can learn where it is connected.
+async fn execute_command(
+    command: &bson::Document,
+    router: &PartitionRouter,
+    local_addr: std::net::SocketAddr,
+) -> bson::Document {
     if let Some(direct) = protocol::special_command(command) {
         LOGGER.debug(format!(
             "Handshake command answered directly: {:?}",
@@ -287,10 +317,42 @@ async fn execute_command(command: &bson::Document, router: &PartitionRouter) -> 
         return direct;
     }
 
+    // The Java driver (Studio 3T, Spring Data) asks `whatsmyuri` on
+    // every new connection to learn the server address it reached.
+    // A real mongod answers with the socket's local address.
+    if command.contains_key("whatsmyuri") {
+        return bson::doc! { "ok": 1.0, "me": local_addr.to_string() };
+    }
+
+    // Phase 4: SQL text arrives as an OP_MSG command with the key
+    // "sql". The value is the SQL string; we parse it with DataFusion
+    // and return the logical plan description as a BSON document.
+    // This is intentionally thin: real execution over storage
+    // partitions comes with multi-partition DataFusion tests.
+    if let Ok(sql) = command.get_str("sql") {
+        match query_engine::parse_sql(sql).await {
+            Ok(pq) => {
+                return bson::doc! {
+                    "ok": 1.0,
+                    "plan": query_engine::plan_description(&pq.plan),
+                };
+            }
+            Err(err) => {
+                return bson::doc! {
+                    "ok": 0.0,
+                    "errmsg": err.to_string(),
+                };
+            }
+        }
+    }
+
     match protocol::command_from_document(command) {
-        // Collection names hash across partitions, so this command goes
-        // to every worker and the replies are merged here.
+        // Collection names hash across partitions, so these commands
+        // go to every worker and the replies are merged here.
         Ok(PartitionCommand::ListCollections { .. }) => list_collections(command, router).await,
+        Ok(PartitionCommand::ListDatabases { .. }) => list_databases(command, router).await,
+        Ok(PartitionCommand::DropDatabase { .. }) => drop_database(command, router).await,
+        Ok(PartitionCommand::DatabaseStats { .. }) => database_stats(command, router).await,
         Ok(partition_command) => match router.dispatch(partition_command) {
             Some(rx) => match rx.await {
                 Ok(result) => cursor_ns(command, protocol::reply_document(&result)),
@@ -357,6 +419,164 @@ async fn list_collections(command: &bson::Document, router: &PartitionRouter) ->
     }
 }
 
+/// Broadcasts `dropDatabase` to every partition.
+///
+/// Every worker drops the share of the database it owns; the reply
+/// names the database like MongoDB's own `{dropped: "<db>"}`.
+async fn drop_database(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+    let partition_command = match protocol::command_from_document(command) {
+        Ok(partition_command) => partition_command,
+        Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+    };
+    let database = match &partition_command {
+        PartitionCommand::DropDatabase { database } => database.clone(),
+        _ => {
+            return bson::doc! {
+                "ok": 0.0,
+                "errmsg": "expected a dropDatabase command",
+            }
+        }
+    };
+
+    for rx in router.broadcast(partition_command) {
+        match rx.await {
+            Ok(PartitionResult::DroppedDatabase { .. }) => {}
+            Ok(PartitionResult::Error { message }) => {
+                return protocol::reply_document(&PartitionResult::Error { message });
+            }
+            Ok(_) | Err(_) => {
+                return protocol::reply_document(&PartitionResult::Error {
+                    message: "partition worker failed to drop the database".into(),
+                });
+            }
+        }
+    }
+
+    bson::doc! { "ok": 1.0, "dropped": database }
+}
+
+/// Broadcasts `dbStats` to every partition and sums the counters.
+///
+/// One database's collections hash across partitions, so no single
+/// worker knows the whole picture; the totals are summed here.
+async fn database_stats(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+    let partition_command = match protocol::command_from_document(command) {
+        Ok(partition_command) => partition_command,
+        Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+    };
+
+    let database = match &partition_command {
+        PartitionCommand::DatabaseStats { database } => database.clone(),
+        _ => {
+            return bson::doc! {
+                "ok": 0.0,
+                "errmsg": "expected a dbStats command",
+            }
+        }
+    };
+
+    let mut collections = 0u64;
+    let mut objects = 0u64;
+    let mut data_size = 0u64;
+    let mut indexes = 0u64;
+
+    for rx in router.broadcast(partition_command) {
+        match rx.await {
+            Ok(PartitionResult::DatabaseStats {
+                collections: c,
+                objects: o,
+                data_size: s,
+                indexes: i,
+            }) => {
+                collections += c;
+                objects += o;
+                data_size += s;
+                indexes += i;
+            }
+            Ok(PartitionResult::Error { message }) => {
+                return protocol::reply_document(&PartitionResult::Error { message });
+            }
+            Ok(_) | Err(_) => {
+                return protocol::reply_document(&PartitionResult::Error {
+                    message: "partition worker returned no statistics".into(),
+                });
+            }
+        }
+    }
+
+    let mut reply = protocol::reply_document(&PartitionResult::DatabaseStats {
+        collections,
+        objects,
+        data_size,
+        indexes,
+    });
+    reply.insert("db", database);
+    reply
+}
+
+/// Broadcasts `listDatabases` to every partition and merges the
+/// database descriptions into one reply.
+///
+/// A database may live on several partitions (its collections hash
+/// across workers); the merged entry is `empty` only when every
+/// partition reported it empty.
+async fn list_databases(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+    let partition_command = match protocol::command_from_document(command) {
+        Ok(partition_command) => partition_command,
+        Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+    };
+
+    // name -> empty; a database is non-empty once any partition says
+    // it holds documents.
+    let mut emptiness: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    for rx in router.broadcast(partition_command) {
+        match rx.await {
+            Ok(PartitionResult::ListedDatabases { databases }) => {
+                for database in databases {
+                    let Some(name) = database.get_str("name").ok().map(str::to_string) else {
+                        continue;
+                    };
+                    let empty = database.get_bool("empty").unwrap_or(false);
+                    let entry = emptiness.entry(name).or_insert(true);
+                    *entry &= empty;
+                }
+            }
+            Ok(PartitionResult::Error { message }) => {
+                return protocol::reply_document(&PartitionResult::Error { message });
+            }
+            Ok(_) | Err(_) => {
+                return protocol::reply_document(&PartitionResult::Error {
+                    message: "partition worker returned no databases".into(),
+                });
+            }
+        }
+    }
+
+    let mut databases: Vec<bson::Document> = emptiness
+        .into_iter()
+        .map(|(name, empty)| {
+            bson::doc! {
+                "name": name,
+                "sizeOnDisk": 0i64,
+                "empty": empty,
+            }
+        })
+        .collect();
+
+    // The optional filter (e.g. `{name: "shop"}`) is applied once on
+    // the merged list so a database split across partitions cannot
+    // half-match.
+    if let Ok(filter) = command.get_document("filter") {
+        databases.retain(|database| crate::storage::document_matches(database, filter));
+    }
+
+    bson::doc! {
+        "databases": databases,
+        "totalSize": 0i64,
+        "ok": 1.0,
+    }
+}
+
 /// Fills `cursor.ns` with the `db.collection` namespace.
 ///
 /// Drivers (mongosh included) refuse a cursor whose namespace is empty,
@@ -364,17 +584,24 @@ async fn list_collections(command: &bson::Document, router: &PartitionRouter) ->
 /// from the command's first field (`find`, `count`, ...).
 fn cursor_ns(command: &bson::Document, mut reply: bson::Document) -> bson::Document {
     let db = command.get_str("$db").unwrap_or("admin");
-    let collection = command
-        .get_str("find")
-        .or_else(|_| command.get_str("count"))
-        .unwrap_or("");
 
-    if collection.is_empty() {
-        return reply;
-    }
+    // `listIndexes` uses MongoDB's own command namespace
+    // (`<db>.$cmd.listIndexes`), not the collection namespace.
+    let ns = if command.contains_key("listIndexes") {
+        format!("{}.$cmd.listIndexes", db)
+    } else {
+        let collection = command
+            .get_str("find")
+            .or_else(|_| command.get_str("count"))
+            .unwrap_or("");
+        if collection.is_empty() {
+            return reply;
+        }
+        format!("{}.{}", db, collection)
+    };
 
     if let Some(bson::Bson::Document(cursor)) = reply.get_mut("cursor") {
-        cursor.insert("ns", format!("{}.{}", db, collection));
+        cursor.insert("ns", ns);
     }
 
     reply
@@ -586,7 +813,7 @@ mod tests {
                 .expect("primary"),
             true
         );
-        assert_eq!(reply.command.get_bool("helloOk").expect("helloOk"), true);
+        assert!(reply.command.get_bool("helloOk").expect("helloOk"));
     }
 
     #[tokio::test]
@@ -650,7 +877,7 @@ mod tests {
 
         let doc: bson::Document = bson::from_slice(&body_buf[20..]).expect("decode reply doc");
         assert_eq!(doc.get_f64("ok").expect("ok"), 1.0);
-        assert_eq!(doc.get_bool("ismaster").expect("ismaster"), true);
+        assert!(doc.get_bool("ismaster").expect("ismaster"));
     }
 
     #[tokio::test]
@@ -722,7 +949,7 @@ mod tests {
             let _ = handle_client(&mut socket, &server_router).await;
         });
 
-        let command = bson::doc! { "createIndexes": "users", "indexes": [] };
+        let command = bson::doc! { "reIndex": "users" };
         let frame = protocol::encode_reply(1, 0, &command).expect("encode");
 
         let mut client = TcpStream::connect(addr).await.expect("connect");
@@ -748,9 +975,60 @@ mod tests {
             msg.command
                 .get_str("errmsg")
                 .expect("errmsg")
-                .contains("createIndexes"),
+                .contains("reIndex"),
             "error must name the command: {:?}",
             msg.command
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_databases_merges_partitions_and_filters() {
+        let router = PartitionRouter::new(4);
+
+        // "shop" gets a document and "empty" an empty collection;
+        // the two namespaces hash to different partitions.
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "shop.orders".into(),
+                documents: vec![bson::doc! { "n": 1 }],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+        router
+            .dispatch(PartitionCommand::CreateCollection {
+                collection: "empty.logs".into(),
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let command = bson::doc! { "listDatabases": 1 };
+        let reply = list_databases(&command, &router).await;
+        assert_eq!(reply.get_f64("ok"), Ok(1.0));
+
+        let databases = reply.get_array("databases").expect("databases");
+        let entry = |name: &str| {
+            databases
+                .iter()
+                .filter_map(|value| value.as_document())
+                .find(|db| db.get_str("name") == Ok(name))
+                .unwrap_or_else(|| panic!("{} must be listed", name))
+        };
+        assert!(!entry("shop").get_bool("empty").unwrap());
+        assert!(entry("empty").get_bool("empty").unwrap());
+
+        // The optional filter narrows the merged list.
+        let filtered = list_databases(
+            &bson::doc! { "listDatabases": 1, "filter": { "name": "shop" } },
+            &router,
+        )
+        .await;
+        let databases = filtered.get_array("databases").expect("databases");
+        assert_eq!(databases.len(), 1);
+        assert_eq!(
+            databases[0].as_document().unwrap().get_str("name"),
+            Ok("shop")
         );
     }
 }

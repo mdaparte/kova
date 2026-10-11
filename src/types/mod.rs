@@ -21,6 +21,8 @@ pub enum PartitionResult {
     Counted { count: u64 },
     /// The collection was removed.
     Dropped { collection: String },
+    /// The database was removed with all of its collections.
+    DroppedDatabase { database: String },
     /// Collection descriptions held by one partition.
     ListedCollections { collections: Vec<Document> },
     /// Documents were modified.
@@ -35,6 +37,42 @@ pub enum PartitionResult {
     },
     /// Documents were removed.
     Deleted { deleted_count: u32 },
+    /// The collection was created empty (`create`).
+    ///
+    /// No payload: MongoDB's reply is just `{ok: 1}`, and the target
+    /// namespace is already known to the caller.
+    Created,
+    /// Index declarations were accepted (`createIndexes`).
+    ///
+    /// Carries the before/after counts MongoDB reports so drivers can
+    /// detect a no-op re-declaration. `created_collection` is true
+    /// when the declaration brought a new collection into existence,
+    /// which is how Spring Data bootstraps indexes before any insert.
+    IndexesCreated {
+        num_indexes_before: u32,
+        num_indexes_after: u32,
+        created_collection: bool,
+    },
+    /// A collection's indexes (`listIndexes`).
+    ListedIndexes { indexes: Vec<Document> },
+    /// Storage statistics for one collection (`collStats`).
+    ///
+    /// `size`/`avgObjSize` come from actually serializing the stored
+    /// documents, so the numbers are real rather than a guess.
+    CollectionStats { stats: Document },
+    /// Database descriptions merged from every partition
+    /// (`listDatabases`).
+    ListedDatabases { databases: Vec<Document> },
+    /// Raw per-partition statistics for one database (`dbStats`).
+    ///
+    /// Carries counters, not a document, because the network layer
+    /// sums them across partitions before shaping MongoDB's reply.
+    DatabaseStats {
+        collections: u64,
+        objects: u64,
+        data_size: u64,
+        indexes: u64,
+    },
     /// The command could not be executed.
     Error { message: String },
 }
@@ -79,12 +117,51 @@ pub enum PartitionCommand {
     },
     /// Remove a collection and all of its documents (`drop`).
     Drop { collection: String },
+    /// Remove every collection of the requesting database
+    /// (`dropDatabase`). Broadcast: one database's collections hash
+    /// across partitions, so every worker drops its own share.
+    DropDatabase { database: String },
+    /// Create an empty collection without inserting documents
+    /// (`create`). Clients such as Compass issue this command from
+    /// their "create collection" dialog; MongoDB itself creates
+    /// collections implicitly on first insert, but GUI tools expect
+    /// the explicit command to exist.
+    CreateCollection { collection: String },
+    /// Declare secondary indexes on a collection (`createIndexes`).
+    ///
+    /// Kova records the declarations so `listIndexes` reports them
+    /// back consistently, but does not yet build inverted structures
+    /// for them: BM25 search covers text, and equality lookups scan
+    /// the in-memory map. Declarations are metadata until Phase 4.
+    CreateIndexes {
+        collection: String,
+        indexes: Vec<Document>,
+    },
+    /// List a collection's indexes (`listIndexes`).
+    ///
+    /// Routed by collection name, like [`PartitionCommand::Find`]:
+    /// one partition owns the namespace and answers alone.
+    ListIndexes { collection: String },
+    /// Storage statistics for one collection (`collStats`).
+    ///
+    /// Routed by collection name; one partition owns the namespace.
+    CollectionStats { collection: String },
+    /// Storage statistics for one database (`dbStats`).
+    ///
+    /// Broadcast: one database's collections hash across partitions,
+    /// so the network layer sums every worker's counters.
+    DatabaseStats { database: String },
     /// List the collections known to every partition (`listCollections`).
     ///
     /// The routing key is empty on purpose: collection names are hashed
     /// across partitions, so the network layer broadcasts this command
-    /// to all workers and merges their replies.
-    ListCollections { filter: Document },
+    /// to all workers and merges their replies. `database` restricts
+    /// the listing to one database's namespace (empty lists all).
+    ListCollections { database: String, filter: Document },
+    /// List the databases that own collections on any partition
+    /// (`listDatabases`). Broadcast like [`PartitionCommand::ListCollections`];
+    /// GUI clients need it to render their database tree.
+    ListDatabases { filter: Document },
     /// Full-text search within one collection (`$text` query operator).
     ///
     /// The filter carries the remaining (non-`$text`) predicates so a
@@ -95,7 +172,32 @@ pub enum PartitionCommand {
         collection: String,
         query: String,
         filter: Document,
+        options: SearchOptions,
     },
+}
+
+/// Phase 3.5 ranking options carried by a [`PartitionCommand::Search`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SearchOptions {
+    /// Per-field BM25 multipliers (`$text.$boost`), mirroring MongoDB
+    /// text index weights. Fields absent from the list weigh 1.0.
+    pub boosts: Vec<(String, f32)>,
+    /// Optional recency decay (`$text.$decay`), applied by the worker
+    /// as a re-rank over the BM25 ordering.
+    pub decay: Option<DecaySpec>,
+}
+
+/// Exponential half-life decay over a date field.
+///
+/// A document whose date is one `half_life_secs` in the past keeps
+/// half of its BM25 score, two half-lives keep a quarter, and so on.
+/// Documents without a usable date are not penalized.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecaySpec {
+    /// Document field carrying the date (`Bson::DateTime`).
+    pub field: String,
+    /// Half-life duration in seconds; must be greater than zero.
+    pub half_life_secs: f64,
 }
 
 impl PartitionCommand {
@@ -111,9 +213,15 @@ impl PartitionCommand {
             | PartitionCommand::Delete { collection, .. }
             | PartitionCommand::Count { collection, .. }
             | PartitionCommand::Drop { collection }
-            | PartitionCommand::Search { collection, .. } => collection,
-            // Broadcast command: no single partition owns it.
-            PartitionCommand::ListCollections { .. } => "",
+            | PartitionCommand::CreateCollection { collection }
+            | PartitionCommand::CreateIndexes { collection, .. }
+            | PartitionCommand::ListIndexes { collection }
+            | PartitionCommand::CollectionStats { collection }
+            | PartitionCommand::Search { collection, .. } => collection, // Broadcast commands: no single partition owns them.
+            PartitionCommand::ListCollections { .. }
+            | PartitionCommand::ListDatabases { .. }
+            | PartitionCommand::DatabaseStats { .. }
+            | PartitionCommand::DropDatabase { .. } => "",
         }
     }
 }
@@ -129,15 +237,17 @@ pub struct CommandEnvelope {
     pub respond_to: oneshot::Sender<PartitionResult>,
 }
 
-/// One full-text search hit: the storage-side document id.
+/// One full-text search hit: the storage-side document id and score.
 ///
-/// Hits arrive already ordered by BM25 relevance, so the lookup order
-/// in the worker reproduces the ranking. The search module returns
+/// Hits arrive ordered by combined BM25 relevance (boosts applied), so
+/// the lookup order in the worker reproduces the ranking; the score
+/// lets the worker apply a `$decay` re-rank. The search module returns
 /// ids; the worker looks up the actual documents and replies with
 /// them, so raw index internals never cross the module boundary.
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub id: String,
+    pub score: f32,
 }
 
 #[cfg(test)]

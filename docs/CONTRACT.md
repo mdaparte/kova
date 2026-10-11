@@ -29,9 +29,11 @@ how to produce a change that fits the project.
 | `src/protocol.rs` | Message types, opcodes, payload parsing, BSON |
 | `src/types.rs` | `PartitionCommand`, document model, query model, shared types |
 | `src/storage.rs` | Partition worker, in-memory storage, channel routing |
-| `src/search.rs` | Tantivy indexes, tokenizers, relevance queries |
+| `src/search/` | Tantivy per-field indexes, tokenizers, relevance queries |
+| `src/config/` | `kova.toml` + environment overrides (port, log level, search) |
 | `src/query_engine.rs` | DataFusion integration, SQL parser, optimizer |
-| `src/logger.rs` *(novo)* | Structured logging, log capture, external sinks |
+| `kova.toml` | Engine configuration file (env vars override it) |
+| `src/logger/` | Structured logging, log capture, external sinks |
 | `tests/` | Integration tests for network, storage, search |
 | `tests/unit/` *(novo)* | Unit tests for parsing, types, channel routing |
 | `tests/integration/` *(novo)* | Integration tests for end-to-end flows |

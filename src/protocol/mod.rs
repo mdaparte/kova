@@ -7,7 +7,7 @@
 
 use bson::{doc, from_slice, to_vec, Document};
 
-use crate::types::{PartitionCommand, PartitionResult};
+use crate::types::{DecaySpec, PartitionCommand, PartitionResult, SearchOptions};
 
 /// OP_MSG operation code.
 pub const OP_MSG: i32 = 2013;
@@ -59,23 +59,108 @@ pub fn decode_op_msg(body: &[u8]) -> Result<OpMsg, String> {
             .map_err(|_| "flagBits must be 4 bytes".to_string())?,
     );
 
-    let sections = &body[FLAG_BITS_SIZE..];
+    let mut sections = &body[FLAG_BITS_SIZE..];
+
+    // Bit 0 marks a CRC-32C checksum trailing the sections; it is not
+    // part of any section payload. The MongoDB wire spec assigns this
+    // flag to bit 0 (value 1). The Java driver (Studio 3T, Spring
+    // Data) sets it, the Node driver does not, which is why a wrong
+    // bit mask only broke Java clients: their checksum lingered as
+    // trailing garbage and poisoned the section walk.
+    const CHECKSUM_PRESENT: u32 = 1;
+    if flag_bits & CHECKSUM_PRESENT != 0 {
+        if sections.len() < 4 {
+            return Err("OP_MSG sets the checksum flag but carries no checksum".to_string());
+        }
+        sections = &sections[..sections.len() - 4];
+    }
+
     if sections.is_empty() {
         return Err("OP_MSG has no sections".to_string());
     }
 
-    let kind = sections[0];
-    match kind {
-        0 => {
-            let command: Document = from_slice(&sections[1..])
-                .map_err(|err| format!("invalid BSON in section 0: {}", err))?;
-            Ok(OpMsg { flag_bits, command })
+    // Section 0 holds the command document; drivers may append further
+    // sections (kind 1 carries insert/update/delete payloads). Each
+    // section is self-delimiting, so walk them instead of assuming the
+    // command BSON runs to the end of the buffer.
+    let mut command: Option<Document> = None;
+    let mut offset = 0usize;
+
+    while offset < sections.len() {
+        let kind = sections[offset];
+        offset += 1;
+
+        match kind {
+            0 => {
+                let (document, consumed) = read_bson(&sections[offset..])?;
+                command = Some(document);
+                offset += consumed;
+            }
+            1 => {
+                // Document sequence: identifier cstring, then the
+                // documents. The command is incomplete without them,
+                // so they are folded back under the identifier.
+                let payload = &sections[offset..];
+                let nul = payload
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .ok_or_else(|| "section 1 identifier is not terminated".to_string())?;
+                let identifier = std::str::from_utf8(&payload[..nul])
+                    .map_err(|_| "section 1 identifier is not UTF-8".to_string())?
+                    .to_string();
+
+                let mut cursor = nul + 1;
+                let mut sequence = Vec::new();
+                while cursor < payload.len() {
+                    let (document, consumed) = read_bson(&payload[cursor..])?;
+                    sequence.push(bson::Bson::Document(document));
+                    cursor += consumed;
+                }
+
+                let command = command
+                    .as_mut()
+                    .ok_or_else(|| "OP_MSG section 1 precedes section 0".to_string())?;
+                command.insert(identifier, bson::Bson::Array(sequence));
+                offset += cursor;
+            }
+            other => {
+                return Err(format!("unsupported OP_MSG section kind {}", other));
+            }
         }
-        other => Err(format!(
-            "unsupported OP_MSG section kind {} (only kind 0 is handled)",
-            other
-        )),
     }
+
+    let command = command.ok_or_else(|| "OP_MSG has no section 0".to_string())?;
+    Ok(OpMsg { flag_bits, command })
+}
+
+/// Reads one BSON document from the front of `bytes`.
+///
+/// Returns the document and how many bytes it occupied, leaving any
+/// trailing sections for the caller to continue with.
+fn read_bson(bytes: &[u8]) -> Result<(Document, usize), String> {
+    if bytes.len() < 4 {
+        return Err(format!(
+            "truncated BSON length prefix: {} bytes",
+            bytes.len()
+        ));
+    }
+    let length = i32::from_le_bytes(
+        bytes[0..4]
+            .try_into()
+            .map_err(|_| "length prefix must be 4 bytes".to_string())?,
+    ) as usize;
+
+    if length < 5 || length > bytes.len() {
+        return Err(format!(
+            "BSON length {} out of range for {} available bytes",
+            length,
+            bytes.len()
+        ));
+    }
+
+    let document: Document =
+        from_slice(&bytes[..length]).map_err(|err| format!("invalid BSON section: {}", err))?;
+    Ok((document, length))
 }
 
 /// Decodes an OP_QUERY body (everything after the 16-byte header).
@@ -160,7 +245,14 @@ pub fn encode_op_reply(
 /// `delete` and `count`. Anything else returns an error string that is
 /// surfaced to the client as a Mongo error reply.
 pub fn command_from_document(command: &Document) -> Result<PartitionCommand, String> {
-    if let Some(collection) = command.get_str("insert").ok() {
+    // Every client command names its database through `$db`; storage
+    // namespaces collections as `db.collection` so `test.users` and
+    // `shop.users` are distinct collections, like real MongoDB.
+    let db = command.get_str("$db").unwrap_or("");
+    let namespaced = |collection: &str| namespace(db, collection);
+
+    if command.contains_key("insert") {
+        let collection = command.get_str("insert").unwrap();
         let values = command
             .get_array("documents")
             .map_err(|_| "insert requires a 'documents' array")?;
@@ -179,12 +271,33 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         }
 
         return Ok(PartitionCommand::Insert {
-            collection: collection.to_string(),
+            collection: namespaced(collection),
             documents,
         });
     }
 
-    if let Some(collection) = command.get_str("find").ok() {
+    // GUI clients create collections explicitly; without this command
+    // their "create collection" action fails and the collection never
+    // appears in listings.
+    if let Ok(collection) = command.get_str("create") {
+        // MongoDB rejects dotted collection names (3.6+): the storage
+        // namespace uses `.` as the db/collection separator, so a dot
+        // here would be ambiguous anyway.
+        if collection.contains('.') {
+            return Err("collection names cannot contain '.'".to_string());
+        }
+        if command.get_bool("capped").unwrap_or(false) {
+            warn_non_mongo(
+                "'capped' collections are not supported by Kova; creating a normal collection",
+            );
+        }
+        return Ok(PartitionCommand::CreateCollection {
+            collection: namespaced(collection),
+        });
+    }
+
+    if command.contains_key("find") {
+        let collection = command.get_str("find").unwrap();
         let filter = command
             .get_document("filter")
             .cloned()
@@ -199,24 +312,28 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
                 .map_err(|_| "$text requires a '$search' string")?
                 .to_string();
 
+            let options = parse_text_options(text)?;
+
             // Keep the client's other predicates as a post-filter.
             let mut rest = filter.clone();
             rest.remove("$text");
 
             return Ok(PartitionCommand::Search {
-                collection: collection.to_string(),
+                collection: namespaced(collection),
                 query: search_query,
                 filter: rest,
+                options,
             });
         }
 
         return Ok(PartitionCommand::Find {
-            collection: collection.to_string(),
+            collection: namespaced(collection),
             filter,
         });
     }
 
-    if let Some(collection) = command.get_str("update").ok() {
+    if command.contains_key("update") {
+        let collection = command.get_str("update").unwrap();
         let updates = command
             .get_array("updates")
             .map_err(|_| "update requires an 'updates' array")?;
@@ -236,14 +353,15 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         let multi = entry.get_bool("multi").unwrap_or(false);
 
         return Ok(PartitionCommand::Update {
-            collection: collection.to_string(),
+            collection: namespaced(collection),
             filter,
             update,
             multi,
         });
     }
 
-    if let Some(collection) = command.get_str("delete").ok() {
+    if command.contains_key("delete") {
+        let collection = command.get_str("delete").unwrap();
         let deletes = command
             .get_array("deletes")
             .map_err(|_| "delete requires a 'deletes' array")?;
@@ -263,27 +381,66 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .max(0) as u32;
 
         return Ok(PartitionCommand::Delete {
-            collection: collection.to_string(),
+            collection: namespaced(collection),
             filter,
             limit,
         });
     }
 
-    if let Some(collection) = command.get_str("count").ok() {
+    if command.contains_key("count") {
+        let collection = command.get_str("count").unwrap();
         let filter = command
             .get_document("query")
             .cloned()
             .unwrap_or_else(|_| doc! {});
 
         return Ok(PartitionCommand::Count {
-            collection: collection.to_string(),
+            collection: namespaced(collection),
             filter,
         });
     }
 
-    if let Some(collection) = command.get_str("drop").ok() {
+    if command.contains_key("drop") {
+        let collection = command.get_str("drop").unwrap();
         return Ok(PartitionCommand::Drop {
-            collection: collection.to_string(),
+            collection: namespaced(collection),
+        });
+    }
+
+    // Java drivers (Spring Data, the MongoDB Java driver) list a
+    // collection's indexes whenever it is browsed; without this
+    // command the browse view fails with "unsupported command".
+    if let Ok(collection) = command.get_str("listIndexes") {
+        return Ok(PartitionCommand::ListIndexes {
+            collection: namespaced(collection),
+        });
+    }
+
+    // The same drivers declare indexes at start-up. Kova records the
+    // declarations (metadata until Phase 4) so `listIndexes` reports
+    // a stable, non-surprising set.
+    if let Ok(collection) = command.get_str("createIndexes") {
+        let indexes = command
+            .get_array("indexes")
+            .map_err(|_| "createIndexes requires an 'indexes' array")?
+            .iter()
+            .filter_map(|value| value.as_document().cloned())
+            .collect();
+
+        return Ok(PartitionCommand::CreateIndexes {
+            collection: namespaced(collection),
+            indexes,
+        });
+    }
+
+    // GUI clients drop whole databases from their sidebar.
+    if command.contains_key("dropDatabase") {
+        return Ok(PartitionCommand::DropDatabase {
+            database: if db.is_empty() {
+                "admin".to_string()
+            } else {
+                db.to_string()
+            },
         });
     }
 
@@ -293,7 +450,39 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .cloned()
             .unwrap_or_else(|_| doc! {});
 
-        return Ok(PartitionCommand::ListCollections { filter });
+        return Ok(PartitionCommand::ListCollections {
+            database: db.to_string(),
+            filter,
+        });
+    }
+
+    // GUI clients enumerate the database tree with `listDatabases`.
+    if command.contains_key("listDatabases") {
+        let filter = command
+            .get_document("filter")
+            .cloned()
+            .unwrap_or_else(|_| doc! {});
+
+        return Ok(PartitionCommand::ListDatabases { filter });
+    }
+
+    // Studio 3T and Compass render a collection's storage panel from
+    // `collStats`; without it the panel stays empty.
+    if let Ok(collection) = command.get_str("collStats") {
+        return Ok(PartitionCommand::CollectionStats {
+            collection: namespaced(collection),
+        });
+    }
+
+    // The same tools size a whole database with `dbStats`.
+    if command.contains_key("dbStats") {
+        return Ok(PartitionCommand::DatabaseStats {
+            database: if db.is_empty() {
+                "admin".to_string()
+            } else {
+                db.to_string()
+            },
+        });
     }
 
     let name = command
@@ -302,6 +491,121 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         .map(|key| key.as_str())
         .unwrap_or("<empty>");
     Err(format!("unsupported command '{}'", name))
+}
+
+/// Builds the storage-side namespace for one collection.
+///
+/// Storage addresses collections by `db.collection`; commands without
+/// a `$db` (direct engine tests, minimal clients) keep the bare name
+/// so they remain valid keys in the same flat map.
+fn namespace(db: &str, collection: &str) -> String {
+    if db.is_empty() {
+        collection.to_string()
+    } else {
+        format!("{}.{}", db, collection)
+    }
+}
+
+/// Operators understood inside a `$text` document.
+///
+/// `$search` is the only one MongoDB requires; the other three are
+/// Kova extensions (or unsupported MongoDB features) and produce a
+/// warning when `warn_on_non_mongo_queries` is enabled.
+const TEXT_OPERATORS: [&str; 4] = ["$search", "$boost", "$analyzer", "$decay"];
+
+/// Parses the ranking options of a `$text` filter.
+///
+/// `$boost` (per-field weights) and `$decay` (recency half-life) are
+/// Kova extensions — real MongoDB has neither, it only reads index
+/// weights declared at index creation — so honoring them is warned
+/// about. Operators MongoDB defines but Kova does not implement
+/// (e.g. `$language`) are ignored with the same warning instead of
+/// failing the query.
+fn parse_text_options(text: &Document) -> Result<SearchOptions, String> {
+    let mut options = SearchOptions::default();
+
+    if let Ok(boosts) = text.get_document("$boost") {
+        warn_non_mongo(
+            "'$text.$boost' is a Kova extension (MongoDB declares weights at index creation)",
+        );
+        for (field, value) in boosts {
+            let weight = bson_number(value)
+                .ok_or_else(|| format!("$text.$boost.{} must be a number", field))?;
+            if !weight.is_finite() || weight < 0.0 {
+                return Err(format!(
+                    "$text.$boost.{} must be a non-negative number",
+                    field
+                ));
+            }
+            options.boosts.push((field.clone(), weight as f32));
+        }
+    }
+
+    if text.contains_key("$analyzer") {
+        // The token pipeline is fixed when the index is created
+        // (`[search]` in kova.toml); changing it per query would make
+        // already-indexed terms unsearchable, so it is rejected loudly
+        // rather than silently half-honored.
+        warn_non_mongo(
+            "'$text.$analyzer' is a Kova extension and is ignored (the analyzer is fixed in kova.toml [search])",
+        );
+    }
+
+    if let Ok(decay) = text.get_document("$decay") {
+        warn_non_mongo("'$text.$decay' is a Kova extension (MongoDB has no score decay)");
+        let field = decay
+            .get_str("field")
+            .map_err(|_| "$text.$decay requires a 'field' string")?
+            .to_string();
+        let half_life_secs = decay
+            .get("halfLifeSeconds")
+            .and_then(bson_number)
+            .ok_or_else(|| "$text.$decay requires a numeric 'halfLifeSeconds'".to_string())?;
+        if !half_life_secs.is_finite() || half_life_secs <= 0.0 {
+            return Err(
+                "$text.$decay halfLifeSeconds must be a number greater than zero".to_string(),
+            );
+        }
+        options.decay = Some(DecaySpec {
+            field,
+            half_life_secs,
+        });
+    }
+
+    for key in text.keys() {
+        if !TEXT_OPERATORS.contains(&key.as_str()) {
+            warn_non_mongo(format!(
+                "'$text.{}' is not supported by Kova and is ignored",
+                key
+            ));
+        }
+    }
+
+    Ok(options)
+}
+
+/// Extracts a BSON number as `f64`, accepting every numeric type.
+///
+/// Drivers send integers as `Int32`/`Int64`, never as `Double`, so
+/// parsing only `Double` would reject every real-world `$boost`.
+fn bson_number(value: &bson::Bson) -> Option<f64> {
+    match value {
+        bson::Bson::Double(d) => Some(*d),
+        bson::Bson::Int32(n) => Some(*n as f64),
+        bson::Bson::Int64(n) => Some(*n as f64),
+        _ => None,
+    }
+}
+
+/// Logs a warning about a non-MongoDB query feature, when enabled.
+///
+/// The toggle lives in `kova.toml` (`warn_on_non_mongo_queries`, env
+/// `KOVA_WARN_NON_MONGO_QUERIES`) so drivers that always send the
+/// same extension can run quietly.
+fn warn_non_mongo(message: impl AsRef<str>) {
+    if crate::config::CONFIG.warn_on_non_mongo_queries {
+        crate::logger::LOGGER.warn(format!("Non-MongoDB query feature: {}", message.as_ref()));
+    }
 }
 
 /// Answers commands handled directly by the protocol layer.
@@ -327,7 +631,9 @@ pub fn special_command(command: &Document) -> Option<Document> {
     // Metadata commands every driver/tool issues at startup. They carry
     // no data-plane meaning, so answering them here keeps the mongosh
     // startup sequence quiet without teaching storage anything.
-    if command.contains_key("buildInfo") {
+    // Accept both "buildInfo" (MongoDB canonical) and "buildinfo" (
+    // Studio 3T sends the lower-case form) so neither is rejected.
+    if command.contains_key("buildInfo") || command.contains_key("buildinfo") {
         return Some(build_info_reply());
     }
 
@@ -341,18 +647,71 @@ pub fn special_command(command: &Document) -> Option<Document> {
         return Some(doc! { "ok": 1.0 });
     }
 
+    // Compass and some drivers probe the server with `connectionStatus`
+    // during initial connection. Kova tracks no authentication state,
+    // so the honest answer is no users and no current/available readers.
+    if command.contains_key("connectionStatus") {
+        return Some(doc! {
+            "ok": 1.0,
+            "authInfo": {
+                "authenticatedUsers": Vec::<bson::Bson>::new(),
+                "authenticatedUserRoles": Vec::<bson::Bson>::new(),
+            },
+        });
+    }
+
+    // Compass and some drivers also probe with `hostInfo` to learn
+    // about the server's platform. Kova is always running on the host
+    // it was started on, so we report a minimal but honest reply.
+    if command.contains_key("hostInfo") {
+        let platform = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+        return Some(doc! {
+            "ok": 1.0,
+            "host": platform.to_string(),
+            "zone": "UTC".to_string(),
+            "system": format!("{}/{}", arch, platform),
+            "cpu": arch.to_string(),
+        });
+    }
+
+    // The Atlas CLI and some Compass versions probe whether the server
+    // is an Atlas deployment by sending `atlasVersion`. Kova is a local
+    // in-memory engine, never Atlas, so the honest reply is "not set".
+    if command.contains_key("atlasVersion") {
+        return Some(doc! {
+            "ok": 1.0,
+            "version": bson::Bson::Null,
+        });
+    }
+
     None
 }
 
 /// Builds the reply to a `buildInfo` request.
 ///
 /// The version mirrors the wire version advertised in [`hello_reply`]
-/// so a client comparing both sees a consistent server.
+/// so a client comparing both sees a consistent server. It reports
+/// MongoDB 5.0.x on purpose so the Studio 3T bundled legacy `mongo`
+/// shell (v5.0.x) does not refuse the connection.
+///
+/// Studio 3T's bundled shell is the *legacy* `mongo` shell, not
+/// `mongosh`. That legacy shell only understands wire protocol up to
+/// version 17 (MongoDB 5.0). When Kova advertised 8.2 / wire version
+/// 27, the bundled shell exited immediately with:
+///   "The shell executable cannot be run ... Could not get status from
+///    the shell process. Please check that the configured executable is
+///    a valid MongoDB Shell."
+///
+/// Real MongoDB >= 5.0 already requires mongosh, but Studio 3T still
+/// bundles the legacy shell for backwards compatibility. Matching the
+/// legacy shell's expectations keeps Studio 3T usable without forcing
+/// the user to install mongosh first.
 fn build_info_reply() -> Document {
     doc! {
         "ok": 1.0,
-        "version": "7.0.14",
-        "versionArray": [7, 0, 14, 0],
+        "version": "7.0.15",
+        "versionArray": [7, 0, 15, 0],
         "gitVersion": "kova",
         "modules": [],
         "allocator": "system",
@@ -372,8 +731,10 @@ fn get_parameter_reply(command: &Document) -> Document {
     {
         return doc! {
             "ok": 1.0,
+            // A real server reports the fcv as `major.minor` only,
+            // without the patch component.
             "featureCompatibilityVersion": {
-                "version": "7.0.14",
+                "version": "7.0",
                 "apiVersion": "1",
             },
         };
@@ -388,9 +749,23 @@ fn get_parameter_reply(command: &Document) -> Document {
 
 /// Builds the reply to a `hello`/`isMaster` handshake.
 ///
-/// The advertised limits mirror a standalone MongoDB 7.x server so
+/// The advertised limits mirror a standalone MongoDB 7.0 server so
 /// clients negotiate a compatible wire version and proceed with the
-/// connection.
+/// connection. `maxWireVersion` 25 is what a real 7.0 server reports;
+/// drivers negotiate `min(client_max, server_max)`, so advertising a
+/// newer wire version never breaks older clients.
+///
+/// We intentionally advertise MongoDB 7.0 (not 8.2) because the
+/// Studio 3T bundled shell (`.3T_community/third-party/2025.1.0/shell/5.0.x/mongo`)
+/// is the legacy `mongo` shell, not `mongosh`. That legacy shell only
+/// speaks wire protocol up to version 17 (MongoDB 5.0). When Kova
+/// advertised 8.2 / wire version 27, the bundled shell exited
+/// immediately with "unable to open shell". 
+///
+/// Real MongoDB servers >= 5.0 already require mongosh, but Studio 3T
+/// still bundles the legacy mongo shell for backwards compatibility.
+/// Matching that legacy shell's expectations keeps Studio 3T working
+/// without requiring the user to switch to mongosh first.
 fn hello_reply() -> Document {
     doc! {
         "ok": 1.0,
@@ -402,14 +777,11 @@ fn hello_reply() -> Document {
         "maxMessageSizeBytes": 48_000_000,
         "maxWriteBatchSize": 100_000,
         "minWireVersion": 0,
-        "maxWireVersion": 17,
+        "maxWireVersion": 25,
         "readOnly": false,
         "logicalSessionTimeoutMinutes": 30,
         "localTime": bson::DateTime::now(),
-        // No replica set: clients fall back to a standalone topology.
-        "me": "localhost:27017",
         "connectionId": 1,
-        "metricName": "kova",
     }
 }
 
@@ -466,6 +838,65 @@ pub fn reply_document(result: &PartitionResult) -> Document {
             "ok": 1.0,
             "n": *deleted_count as i64,
         },
+        PartitionResult::Created => doc! {
+            "ok": 1.0,
+        },
+        PartitionResult::IndexesCreated {
+            num_indexes_before,
+            num_indexes_after,
+            created_collection,
+        } => doc! {
+            "ok": 1.0,
+            // MongoDB reports these counters as Int32; drivers and
+            // shells compare them with strict equality, so emitting
+            // Int64 here would break type checks.
+            "numIndexesBefore": *num_indexes_before as i32,
+            "numIndexesAfter": *num_indexes_after as i32,
+            "createdCollection": *created_collection,
+        },
+        PartitionResult::ListedIndexes { indexes } => doc! {
+            // Cursor shape, like `listCollections`: drivers expect a
+            // `firstBatch`, not a bare array.
+            "ok": 1.0,
+            "cursor": {
+                "id": 0i64,
+                "ns": "",
+                "firstBatch": indexes.clone(),
+            },
+        },
+        PartitionResult::DroppedDatabase { database } => doc! {
+            "ok": 1.0,
+            "dropped": database.clone(),
+        },
+        PartitionResult::ListedDatabases { databases } => doc! {
+            // sizeOnDisk is tracked as zero: Kova keeps everything in
+            // RAM and does not measure per-database footprint yet.
+            "databases": databases.clone(),
+            "totalSize": 0i64,
+            "ok": 1.0,
+        },
+        PartitionResult::CollectionStats { stats } => {
+            let mut reply = stats.clone();
+            reply.insert("ok", 1.0);
+            reply
+        }
+        PartitionResult::DatabaseStats {
+            collections,
+            objects,
+            data_size,
+            indexes,
+        } => doc! {
+            // Single-partition shape; the network layer sums every
+            // worker's counters before building the broadcast reply.
+            "collections": *collections as i64,
+            "objects": *objects as i64,
+            "dataSize": *data_size as i64,
+            "storageSize": *data_size as i64,
+            "indexes": *indexes as i64,
+            "indexSize": 0i64,
+            "scaleFactor": 1i32,
+            "ok": 1.0,
+        },
         PartitionResult::Error { message } => doc! {
             "ok": 0.0,
             "errmsg": message.clone(),
@@ -514,6 +945,98 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_op_msg_with_document_sequence_section() {
+        // The Java driver (Studio 3T, Spring Data) splits insert /
+        // update / delete payloads into a kind-1 section: the command
+        // document, then an identifier and the document sequence. The
+        // documents must be folded back under the identifier.
+        let command = doc! { "insert": "users", "$db": "shop" };
+        let mut body = 0u32.to_le_bytes().to_vec(); // flagBits = 0
+        body.push(0u8); // section kind 0
+        body.extend(to_vec(&command).expect("encode"));
+        body.push(1u8); // section kind 1 (document sequence)
+        body.extend_from_slice(b"documents\0"); // identifier
+        body.extend(to_vec(&doc! { "name": "Ada" }).expect("encode"));
+        body.extend(to_vec(&doc! { "name": "Grace" }).expect("encode"));
+
+        let msg = decode_op_msg(&body).expect("decode");
+        assert_eq!(msg.command.get_str("insert").unwrap(), "users");
+        assert_eq!(msg.command.get_str("$db").unwrap(), "shop");
+
+        let documents = msg.command.get_array("documents").expect("documents");
+        assert_eq!(documents.len(), 2, "both sequenced docs must survive");
+        assert_eq!(
+            documents[0].as_document().unwrap().get_str("name").unwrap(),
+            "Ada"
+        );
+    }
+
+    #[test]
+    fn test_decode_op_msg_ignores_trailing_checksum() {
+        // Bit 0 announces a CRC-32C checksum appended after the
+        // sections (wire spec). The Java driver sets it; without
+        // stripping it the section walk read garbage kinds and the
+        // reply never came.
+        const CHECKSUM_PRESENT: u32 = 1;
+        let command = doc! { "find": "users", "$db": "shop" };
+        let mut body = CHECKSUM_PRESENT.to_le_bytes().to_vec();
+        body.push(0u8); // section kind 0
+        body.extend(to_vec(&command).expect("encode"));
+        body.extend_from_slice(&[0xAB, 0xCD, 0xEF, 0x01]); // checksum
+
+        let msg = decode_op_msg(&body).expect("decode");
+        assert_eq!(msg.flag_bits, CHECKSUM_PRESENT);
+        assert_eq!(msg.command.get_str("find").unwrap(), "users");
+    }
+
+    #[test]
+    fn test_decode_op_msg_studio3t_handshake_bytes() {
+        // Byte-for-byte capture of what Studio 3T's Java driver sent
+        // and Kova failed to decode ("section kind 189"): flagBits=1
+        // (checksum), section 0, `whatsmyuri` BSON, 4-byte checksum.
+        // The failure silenced the reply and left the client spinning
+        // on "connecting" forever, so these exact bytes must decode.
+        const BODY: &[u8] = &[
+            0x01, 0x00, 0x00, 0x00, // flagBits = 1 (checksum present)
+            0x00, // section kind 0
+            0x24, 0x00, 0x00, 0x00, // BSON length = 36
+            0x10, b'w', b'h', b'a', b't', b's', b'm', b'y', b'u', b'r', b'i', 0x00, 0x01, 0x00,
+            0x00, 0x00, // int32 "whatsmyuri" = 1
+            0x02, b'$', b'd', b'b', 0x00, 0x06, 0x00, 0x00, 0x00, b'a', b'd', b'm', b'i', b'n',
+            0x00, // string "$db" = "admin"
+            0x00, // BSON terminator
+            0xDE, 0xAD, 0xBE, 0xEF, // checksum
+        ];        let msg = decode_op_msg(BODY).expect("Studio 3T handshake must decode");
+        assert_eq!(msg.flag_bits, 1);
+        assert_eq!(msg.command.get_i32("whatsmyuri").unwrap(), 1);
+        assert_eq!(msg.command.get_str("$db").unwrap(), "admin");
+    }
+
+    #[test]
+    fn test_hello_reply_advertises_mongodb_7_0() {
+        // Studio 3T ships a legacy mongo shell (v5.0.x) that cannot
+        // negotiate wire protocol with a server advertising 8.2. The
+        // shell exits immediately with "unable to open shell", which is
+        // the error the user sees when clicking a collection. Matching
+        // the MongoDB 7.0 wire version keeps the bundled shell happy.
+        let reply = hello_reply();
+        assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
+        assert_eq!(reply.get_i32("maxWireVersion").unwrap(), 25);
+        assert_eq!(reply.get_bool("isWritablePrimary").unwrap(), true);
+    }
+
+    #[test]
+    fn test_decode_rejects_truncated_bson_length() {
+        let mut body = 0u32.to_le_bytes().to_vec();
+        body.push(0u8); // section kind 0
+        body.extend_from_slice(&200i32.to_le_bytes()); // claims 200 bytes
+        body.extend_from_slice(&[0u8; 8]); // but only 8 follow
+
+        let err = decode_op_msg(&body).expect_err("must fail");
+        assert!(err.contains("out of range"), "got: {}", err);
+    }
+
+    #[test]
     fn test_decode_rejects_short_body() {
         let err = decode_op_msg(&[0u8, 0u8]).expect_err("must fail");
         assert!(err.contains("too short"), "got: {}", err);
@@ -521,9 +1044,25 @@ mod tests {
 
     #[test]
     fn test_decode_rejects_unknown_section_kind() {
-        let body = vec![0u8, 0u8, 0u8, 0u8, 1u8]; // kind 1 = document sequence
+        // Kind 0 (command) and 1 (document sequence) are supported;
+        // anything above that is not defined by the wire protocol.
+        let mut body = vec![0u8, 0u8, 0u8, 0u8]; // flagBits = 0
+        body.push(2u8);
         let err = decode_op_msg(&body).expect_err("must fail");
-        assert!(err.contains("section kind 1"), "got: {}", err);
+        assert!(err.contains("section kind 2"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_decode_rejects_document_sequence_without_command() {
+        // A kind-1 section with no preceding kind 0 has nowhere to
+        // put its documents; failing is better than silently dropping
+        // the payload.
+        let mut body = vec![0u8, 0u8, 0u8, 0u8]; // flagBits = 0
+        body.push(1u8);
+        body.extend_from_slice(b"documents\0");
+        body.extend(to_vec(&doc! { "a": 1i32 }).expect("encode"));
+        let err = decode_op_msg(&body).expect_err("must fail");
+        assert!(err.contains("precedes section 0"), "got: {}", err);
     }
 
     #[test]
@@ -559,6 +1098,201 @@ mod tests {
     }
 
     #[test]
+    fn test_data_commands_are_namespaced_by_db() {
+        // Every client command carries `$db`; storage stores the
+        // `db.collection` namespace so two databases can hold a
+        // collection with the same name.
+        let command = doc! {
+            "insert": "users",
+            "documents": [{ "name": "Ada" }],
+            "$db": "shop",
+        };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::Insert { collection, .. } => {
+                assert_eq!(collection, "shop.users");
+            }
+            other => panic!("expected Insert, got {:?}", other),
+        }
+
+        // Without `$db` (engine tests, minimal clients) the bare name
+        // is kept.
+        let command = doc! { "find": "users" };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::Find { collection, .. } => assert_eq!(collection, "users"),
+            other => panic!("expected Find, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_create_becomes_create_collection() {
+        let command = doc! { "create": "orders", "$db": "shop" };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::CreateCollection { collection } => {
+                assert_eq!(collection, "shop.orders");
+            }
+            other => panic!("expected CreateCollection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_create_rejects_dotted_collection_names() {
+        let command = doc! { "create": "a.b", "$db": "shop" };
+        let err = command_from_document(&command).expect_err("must fail");
+        assert!(err.contains("cannot contain '.'"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_command_list_indexes_and_create_indexes() {
+        // Java/Spring Data drivers list indexes when browsing a
+        // collection and declare them at start-up.
+        let list = doc! { "listIndexes": "orders", "$db": "shop" };
+        match command_from_document(&list).expect("parse") {
+            PartitionCommand::ListIndexes { collection } => {
+                assert_eq!(collection, "shop.orders");
+            }
+            other => panic!("expected ListIndexes, got {:?}", other),
+        }
+
+        let create = doc! {
+            "createIndexes": "orders",
+            "indexes": [
+                { "key": { "sku": 1i32 }, "name": "sku_1" },
+                { "key": { "qty": -1i32 }, "name": "qty_-1", "unique": true },
+            ],
+            "$db": "shop",
+        };
+        match command_from_document(&create).expect("parse") {
+            PartitionCommand::CreateIndexes {
+                collection,
+                indexes,
+            } => {
+                assert_eq!(collection, "shop.orders");
+                assert_eq!(indexes.len(), 2);
+                assert_eq!(indexes[0].get_str("name").unwrap(), "sku_1");
+                assert!(indexes[1].get_bool("unique").unwrap());
+            }
+            other => panic!("expected CreateIndexes, got {:?}", other),
+        }
+
+        // Missing `indexes` array is a client error, not a panic.
+        let malformed = doc! { "createIndexes": "orders" };
+        assert!(command_from_document(&malformed).is_err());
+    }
+
+    #[test]
+    fn test_reply_for_indexes() {
+        let created = crate::types::PartitionResult::IndexesCreated {
+            num_indexes_before: 1,
+            num_indexes_after: 2,
+            created_collection: true,
+        };
+        let reply = reply_document(&created);
+        assert_eq!(reply.get_f64("ok"), Ok(1.0));
+        assert_eq!(reply.get_i32("numIndexesBefore"), Ok(1));
+        assert_eq!(reply.get_i32("numIndexesAfter"), Ok(2));
+        assert!(reply.get_bool("createdCollection").unwrap());
+
+        let listed = crate::types::PartitionResult::ListedIndexes {
+            indexes: vec![doc! { "v": 2i32, "key": { "_id": 1i32 }, "name": "_id_" }],
+        };
+        let reply = reply_document(&listed);
+        let cursor = reply.get_document("cursor").expect("cursor");
+        assert_eq!(cursor.get_array("firstBatch").unwrap().len(), 1);
+        assert_eq!(cursor.get_i64("id"), Ok(0));
+    }
+
+    #[test]
+    fn test_command_list_collections_carries_database() {
+        let command = doc! { "listCollections": 1, "$db": "shop" };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::ListCollections { database, filter } => {
+                assert_eq!(database, "shop");
+                assert!(filter.is_empty());
+            }
+            other => panic!("expected ListCollections, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_list_databases_is_broadcast() {
+        let command = doc! { "listDatabases": 1, "filter": { "name": "shop" } };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::ListDatabases { filter } => {
+                assert_eq!(filter.get_str("name").unwrap(), "shop");
+            }
+            other => panic!("expected ListDatabases, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_reply_for_created_and_listed_databases() {
+        let created = crate::types::PartitionResult::Created;
+        assert_eq!(reply_document(&created).get_f64("ok"), Ok(1.0));
+
+        let listed = crate::types::PartitionResult::ListedDatabases {
+            databases: vec![doc! { "name": "shop", "sizeOnDisk": 0i64, "empty": false }],
+        };
+        let reply = reply_document(&listed);
+        assert_eq!(reply.get_f64("ok"), Ok(1.0));
+        assert_eq!(reply.get_array("databases").unwrap().len(), 1);
+        assert_eq!(reply.get_i64("totalSize"), Ok(0));
+    }
+
+    #[test]
+    fn test_command_coll_stats_is_namespaced_and_routed() {
+        // Studio 3T and Compass ask for a collection's storage panel
+        // with `collStats`; it must route by namespace like `find`.
+        let command = doc! { "collStats": "orders", "$db": "shop" };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::CollectionStats { collection } => {
+                assert_eq!(collection, "shop.orders");
+            }
+            other => panic!("expected CollectionStats, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_db_stats_is_broadcast() {
+        let command = doc! { "dbStats": 1i32, "$db": "shop" };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::DatabaseStats { database } => {
+                assert_eq!(database, "shop");
+            }
+            other => panic!("expected DatabaseStats, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_reply_for_collection_and_database_stats() {
+        let coll = crate::types::PartitionResult::CollectionStats {
+            stats: doc! {
+                "ns": "shop.orders",
+                "count": 2i64,
+                "size": 96i64,
+                "avgObjSize": 48i64,
+            },
+        };
+        let reply = reply_document(&coll);
+        assert_eq!(reply.get_f64("ok"), Ok(1.0));
+        assert_eq!(reply.get_i64("count"), Ok(2));
+        assert_eq!(reply.get_str("ns").unwrap(), "shop.orders");
+
+        let db = crate::types::PartitionResult::DatabaseStats {
+            collections: 3,
+            objects: 10,
+            data_size: 500,
+            indexes: 4,
+        };
+        let reply = reply_document(&db);
+        assert_eq!(reply.get_f64("ok"), Ok(1.0));
+        assert_eq!(reply.get_i64("collections"), Ok(3));
+        assert_eq!(reply.get_i64("objects"), Ok(10));
+        assert_eq!(reply.get_i64("dataSize"), Ok(500));
+        assert_eq!(reply.get_i64("storageSize"), Ok(500));
+        assert_eq!(reply.get_i64("indexes"), Ok(4));
+    }
+
+    #[test]
     fn test_command_find_with_text_becomes_search() {
         let command = doc! {
             "find": "articles",
@@ -570,10 +1304,12 @@ mod tests {
                 collection,
                 query,
                 filter,
+                options,
             } => {
                 assert_eq!(collection, "articles");
                 assert_eq!(query, "rust engine");
                 assert!(filter.is_empty(), "$text must be stripped: {:?}", filter);
+                assert_eq!(options, SearchOptions::default());
             }
             other => panic!("expected Search, got {:?}", other),
         }
@@ -604,6 +1340,105 @@ mod tests {
         };
         let err = command_from_document(&command).expect_err("must fail");
         assert!(err.contains("$search"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_command_find_with_text_boost_parses_weights() {
+        // Real drivers encode integers as Int32, not Double, so the
+        // parser must accept every numeric BSON type.
+        let command = doc! {
+            "find": "articles",
+            "filter": { "$text": {
+                "$search": "rust",
+                "$boost": { "title": 3i32, "body": 1.5 },
+            } },
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Search { options, .. } => {
+                assert_eq!(
+                    options.boosts,
+                    vec![("title".to_string(), 3.0), ("body".to_string(), 1.5)]
+                );
+                assert!(options.decay.is_none());
+            }
+            other => panic!("expected Search, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_find_with_text_boost_rejects_non_numbers() {
+        let command = doc! {
+            "find": "articles",
+            "filter": { "$text": { "$search": "rust", "$boost": { "title": "high" } } },
+        };
+        let err = command_from_document(&command).expect_err("must fail");
+        assert!(err.contains("$boost"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_command_find_with_text_decay_parses_spec() {
+        let command = doc! {
+            "find": "articles",
+            "filter": { "$text": {
+                "$search": "rust",
+                "$decay": { "field": "created_at", "halfLifeSeconds": 86400.0 },
+            } },
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Search { options, .. } => {
+                let decay = options.decay.expect("decay");
+                assert_eq!(decay.field, "created_at");
+                assert_eq!(decay.half_life_secs, 86400.0);
+            }
+            other => panic!("expected Search, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_find_with_text_decay_requires_positive_half_life() {
+        let missing = doc! {
+            "find": "a",
+            "filter": { "$text": { "$search": "x", "$decay": { "field": "d" } } },
+        };
+        assert!(command_from_document(&missing).is_err());
+
+        let negative = doc! {
+            "find": "a",
+            "filter": { "$text": {
+                "$search": "x",
+                "$decay": { "field": "d", "halfLifeSeconds": 0.0 },
+            } },
+        };
+        let err = command_from_document(&negative).expect_err("must fail");
+        assert!(err.contains("halfLifeSeconds"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_command_find_with_text_analyzer_is_ignored_not_fatal() {
+        let command = doc! {
+            "find": "articles",
+            "filter": { "$text": { "$search": "rust", "$analyzer": "en_stem" } },
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Search { query, .. } => assert_eq!(query, "rust"),
+            other => panic!("expected Search, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_find_with_text_ignores_unknown_operators() {
+        let command = doc! {
+            "find": "articles",
+            "filter": { "$text": { "$search": "rust", "$language": "english" } },
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Search { query, .. } => assert_eq!(query, "rust"),
+            other => panic!("expected Search, got {:?}", other),
+        }
     }
 
     #[test]
@@ -656,7 +1491,7 @@ mod tests {
                 limit,
             } => {
                 assert_eq!(collection, "todos");
-                assert_eq!(filter.get_bool("done").unwrap(), true);
+                assert!(filter.get_bool("done").unwrap());
                 assert_eq!(limit, 0, "limit 0 means delete all matches");
             }
             other => panic!("expected Delete, got {:?}", other),
@@ -687,9 +1522,10 @@ mod tests {
         let reply = special_command(&doc! { "hello": 1.0 }).expect("hello is special");
 
         assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
-        assert_eq!(reply.get_bool("isWritablePrimary").unwrap(), true);
-        assert_eq!(reply.get_bool("ismaster").unwrap(), true);
-        assert_eq!(reply.get_i32("maxWireVersion").unwrap(), 17);
+        assert!(reply.get_bool("isWritablePrimary").unwrap());
+        assert!(reply.get_bool("ismaster").unwrap());
+        // 25 is the wire version of a real MongoDB 7.0 server.
+        assert_eq!(reply.get_i32("maxWireVersion").unwrap(), 25);
         assert_eq!(
             reply.get_i32("maxBsonObjectSize").unwrap(),
             16 * 1024 * 1024
@@ -703,7 +1539,7 @@ mod tests {
         for key in ["isMaster", "ismaster"] {
             let reply = special_command(&doc! { key: 1.0 })
                 .unwrap_or_else(|| panic!("{} must be special", key));
-            assert_eq!(reply.get_bool("ismaster").unwrap(), true);
+            assert!(reply.get_bool("ismaster").unwrap());
         }
     }
 
@@ -717,13 +1553,44 @@ mod tests {
             "buildInfo is metadata"
         );
         assert!(special_command(&doc! { "endSessions": [] }).is_some());
+        assert!(
+            special_command(&doc! { "connectionStatus": 1.0 }).is_some(),
+            "connectionStatus is metadata"
+        );
+        assert!(
+            special_command(&doc! { "hostInfo": 1.0 }).is_some(),
+            "hostInfo is metadata"
+        );
+        assert!(
+            special_command(&doc! { "atlasVersion": 1.0 }).is_some(),
+            "atlasVersion is metadata"
+        );
+    }
+
+    #[test]
+    fn test_special_command_host_info() {
+        let reply = special_command(&doc! { "hostInfo": 1.0 })
+            .expect("hostInfo must be answered");
+        assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
+        assert!(reply.get_str("system").unwrap().contains("macos") || reply.get_str("system").unwrap().contains("darwin"), "system field must contain platform");
+        assert!(reply.get_str("cpu").unwrap().contains("x86_64") || reply.get_str("cpu").unwrap().contains("aarch64"), "cpu field must contain architecture");
+    }
+
+    #[test]
+    fn test_special_command_atlas_version() {
+        let reply = special_command(&doc! { "atlasVersion": 1.0 })
+            .expect("atlasVersion must be answered");
+        assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
+        assert!(reply.get("version").unwrap().as_null().is_some(), "atlasVersion must be null for non-Atlas servers");
     }
 
     #[test]
     fn test_command_rejects_unknown() {
-        let command = doc! { "createIndexes": "users", "indexes": [] };
+        // `reIndex` is a real MongoDB command Kova does not implement;
+        // the error must name it so operators can tell what is missing.
+        let command = doc! { "reIndex": "users" };
         let err = command_from_document(&command).expect_err("must fail");
-        assert!(err.contains("createIndexes"), "got: {}", err);
+        assert!(err.contains("reIndex"), "got: {}", err);
     }
 
     #[test]
@@ -813,7 +1680,7 @@ mod tests {
         assert_eq!(number_returned, 1);
 
         let decoded: Document = from_slice(&frame[36..]).expect("decode reply");
-        assert_eq!(decoded.get_bool("ismaster").unwrap(), true);
+        assert!(decoded.get_bool("ismaster").unwrap());
     }
 
     #[test]

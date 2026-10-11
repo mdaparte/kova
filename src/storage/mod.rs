@@ -19,8 +19,8 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use tokio::sync::oneshot;
 
 use crate::logger::LOGGER;
-use crate::search::TextIndex;
-use crate::types::{CommandEnvelope, PartitionCommand, PartitionResult};
+use crate::search::SearchIndex;
+use crate::types::{CommandEnvelope, DecaySpec, PartitionCommand, PartitionResult};
 
 /// A collection of documents stored by a single partition.
 type Collection = Vec<Document>;
@@ -36,57 +36,50 @@ pub struct PartitionWorker {
     receiver: Receiver<CommandEnvelope>,
     /// Full-text index mirroring this partition's documents.
     ///
-    /// `None` only when tantivy fails to allocate its writer (e.g. out
-    /// of memory): the partition keeps serving indexed lookups by
-    /// equality while `$text` searches report an error instead of
-    /// panicking the worker.
-    index: Option<TextIndex>,
+    /// Field indexes are created lazily on first insert; a failure to
+    /// allocate one is logged and that field is skipped, never fatal.
+    index: SearchIndex,
+    /// Secondary index *declarations* per collection (`createIndexes`).
+    ///
+    /// Metadata only: it keeps `listIndexes` honest and stable for
+    /// drivers that create an index then list it, but nothing is built
+    /// from it yet — lookups still scan the in-memory map. Real index
+    /// construction is Phase 4.
+    declared_indexes: HashMap<String, Vec<Document>>,
 }
 
 impl PartitionWorker {
     /// Creates a new worker with the given id and command receiver.
     fn new(id: usize, receiver: Receiver<CommandEnvelope>) -> Self {
-        let index = match TextIndex::new() {
-            Ok(index) => Some(index),
-            Err(err) => {
-                LOGGER.error(format!(
-                    "Partition {}: full-text index unavailable: {}",
-                    id, err
-                ));
-                None
-            }
-        };
-
         Self {
             id,
             collections: HashMap::new(),
             receiver,
-            index,
+            index: SearchIndex::new(),
+            declared_indexes: HashMap::new(),
         }
     }
 
     /// Builds the search index entry for one document and adds it.
     ///
-    /// Indexing failures are logged, never propagated: a document that
-    /// cannot be tokenized must still be stored and returned by normal
+    /// Each top-level field becomes its own index entry (Phase 3.5),
+    /// which is what makes per-field boosts possible. Indexing
+    /// failures are logged, never propagated: a document that cannot
+    /// be tokenized must still be stored and returned by normal
     /// queries.
     fn index_document(&mut self, collection: &str, document: &Document) {
         let id = document_id_string(document);
-        let text = extract_text(document);
-        if let Some(index) = self.index.as_mut() {
-            if let Err(err) = index.add(collection, &id, &text) {
-                LOGGER.warn(format!("Failed to index document {}: {}", id, err));
-            }
+        let fields = extract_field_values(document);
+        if let Err(err) = self.index.add(collection, &id, &fields) {
+            LOGGER.warn(format!("Failed to index document {}: {}", id, err));
         }
     }
 
     /// Removes one document from the search index (best effort).
     fn unindex_document(&mut self, collection: &str, document: &Document) {
         let id = document_id_string(document);
-        if let Some(index) = self.index.as_mut() {
-            if let Err(err) = index.remove(collection, &id) {
-                LOGGER.warn(format!("Failed to unindex document {}: {}", id, err));
-            }
+        if let Err(err) = self.index.remove(collection, &id) {
+            LOGGER.warn(format!("Failed to unindex document {}: {}", id, err));
         }
     }
 
@@ -184,7 +177,8 @@ impl PartitionWorker {
                         }
                     }
                 }
-                drop(docs);
+                // `docs` borrow ends here (NLL); the re-index below
+                // needs `&mut self` again.
 
                 // Re-index the modified documents so search reflects
                 // the new text (`_id` survives updates). The documents
@@ -218,18 +212,137 @@ impl PartitionWorker {
 
             PartitionCommand::Drop { collection } => {
                 self.collections.remove(&collection);
-                if let Some(index) = self.index.as_mut() {
-                    if let Err(err) = index.remove_collection(&collection) {
-                        LOGGER.warn(format!(
-                            "Failed to drop collection {} from index: {}",
-                            collection, err
-                        ));
-                    }
+                self.declared_indexes.remove(&collection);
+                if let Err(err) = self.index.remove_collection(&collection) {
+                    LOGGER.warn(format!(
+                        "Failed to drop collection {} from index: {}",
+                        collection, err
+                    ));
                 }
                 PartitionResult::Dropped { collection }
             }
 
-            PartitionCommand::ListCollections { filter } => {
+            PartitionCommand::DropDatabase { database } => {
+                // One database's collections hash across partitions:
+                // this worker drops only the namespaces it owns, plus
+                // their search index entries. Bare namespaces belong
+                // to the "test" database by convention.
+                let prefix = format!("{}.", database);
+                let doomed: Vec<String> = self
+                    .collections
+                    .keys()
+                    .filter(|key| {
+                        key.starts_with(&prefix) || (database == "test" && !key.contains('.'))
+                    })
+                    .cloned()
+                    .collect();
+
+                for key in &doomed {
+                    self.collections.remove(key);
+                    self.declared_indexes.remove(key);
+                    if let Err(err) = self.index.remove_collection(key) {
+                        LOGGER.warn(format!(
+                            "Failed to drop collection {} from index: {}",
+                            key, err
+                        ));
+                    }
+                }
+                PartitionResult::DroppedDatabase { database }
+            }
+
+            PartitionCommand::CreateCollection { collection } => {
+                // MongoDB reports NamespaceExists for a duplicate
+                // create; erroring (instead of a silent no-op) keeps
+                // the operation idempotent for the data: an existing
+                // collection is never recreated or cleared.
+                if self.collections.contains_key(&collection) {
+                    return PartitionResult::Error {
+                        message: format!("collection already exists: {}", collection),
+                    };
+                }
+                self.collections.insert(collection, Vec::new());
+                PartitionResult::Created
+            }
+
+            PartitionCommand::ListIndexes { collection } => {
+                // MongoDB answers NamespaceExists ("ns not found") for
+                // a collection it does not know; matching that keeps
+                // drivers from rendering a phantom empty collection.
+                if !self.collections.contains_key(&collection) {
+                    return PartitionResult::Error {
+                        message: format!("ns not found: {}", collection),
+                    };
+                }
+
+                // Every collection carries the mandatory `_id_` index,
+                // followed by whatever `createIndexes` declared.
+                let mut indexes = vec![default_id_index()];
+                if let Some(declared) = self.declared_indexes.get(&collection) {
+                    indexes.extend(declared.iter().cloned());
+                }
+                PartitionResult::ListedIndexes { indexes }
+            }
+
+            PartitionCommand::CreateIndexes {
+                collection,
+                indexes,
+            } => {
+                // MongoDB's `createIndexes` implicitly creates the
+                // collection when it is missing. Spring Data relies on
+                // this: it declares indexes at start-up, long before
+                // the first insert.
+                let created_collection = !self.collections.contains_key(&collection);
+                if created_collection {
+                    self.collections.insert(collection.clone(), Vec::new());
+                }
+
+                let declared = self.declared_indexes.entry(collection).or_default();
+                let num_indexes_before = declared.len() as u32 + 1;
+
+                for index in indexes {
+                    // MongoDB keys declarations by name; re-declaring
+                    // an existing name replaces it *in place* so the
+                    // listing keeps a stable order.
+                    let name = index
+                        .get_str("name")
+                        .ok()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("kova_index_{}", declared.len()));
+
+                    let mut spec = index;
+                    spec.insert("name", name.clone());
+                    // Version 2 is what modern MongoDB reports for
+                    // freshly created indexes; drivers check it.
+                    spec.entry("v".to_string()).or_insert(bson::Bson::Int32(2));
+
+                    match declared
+                        .iter()
+                        .position(|existing| existing.get_str("name") == Ok(name.as_str()))
+                    {
+                        Some(position) => declared[position] = spec,
+                        None => declared.push(spec),
+                    }
+                }
+
+                PartitionResult::IndexesCreated {
+                    num_indexes_before,
+                    num_indexes_after: declared.len() as u32 + 1,
+                    created_collection,
+                }
+            }
+
+            PartitionCommand::ListCollections { database, filter } => {
+                // Collections are stored under their `db.collection`
+                // namespace; a listing is scoped to the requesting
+                // database and reports bare collection names, like
+                // real MongoDB. An empty `database` lists everything
+                // (engine-internal callers).
+                let prefix = if database.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}.", database)
+                };
+
                 // One entry per collection this partition owns, shaped
                 // like a real MongoDB listCollections document (the
                 // server-generated `uuid` is omitted). The filter uses
@@ -237,6 +350,13 @@ impl PartitionWorker {
                 let mut collections: Vec<Document> = self
                     .collections
                     .keys()
+                    .filter_map(|key| {
+                        let bare = key.strip_prefix(&prefix)?;
+                        if bare.is_empty() || bare.contains('.') {
+                            return None;
+                        }
+                        Some(bare.to_string())
+                    })
                     .map(|name| {
                         doc! {
                             "name": name,
@@ -262,18 +382,124 @@ impl PartitionWorker {
                 PartitionResult::ListedCollections { collections }
             }
 
+            PartitionCommand::ListDatabases { filter } => {
+                // One entry per database this partition touches. A
+                // database is only "empty" when every collection it
+                // owns here is empty; the network layer ANDs that flag
+                // across partitions when it merges the replies.
+                let mut emptiness: std::collections::BTreeMap<String, bool> =
+                    std::collections::BTreeMap::new();
+                for (key, docs) in &self.collections {
+                    let name = key.split_once('.').map_or("test", |(db, _)| db);
+                    let entry = emptiness.entry(name.to_string()).or_insert(true);
+                    *entry &= docs.is_empty();
+                }
+
+                let databases: Vec<Document> = emptiness
+                    .into_iter()
+                    .map(|(name, empty)| {
+                        doc! {
+                            "name": name,
+                            "sizeOnDisk": 0i64,
+                            "empty": empty,
+                        }
+                    })
+                    .filter(|database| document_matches(database, &filter))
+                    .collect();
+                PartitionResult::ListedDatabases { databases }
+            }
+
+            PartitionCommand::CollectionStats { collection } => {
+                // Studio 3T and Compass render a collection's storage
+                // panel from this; a missing namespace is an error so
+                // the tools do not show a phantom zero-size collection.
+                let Some(docs) = self.collections.get(&collection) else {
+                    return PartitionResult::Error {
+                        message: format!("ns not found: {}", collection),
+                    };
+                };
+
+                // `size` is the real serialized footprint: every
+                // document is measured, not estimated.
+                let size: u64 = docs
+                    .iter()
+                    .map(|doc| {
+                        bson::to_vec(doc)
+                            .map(|bytes| bytes.len() as u64)
+                            .unwrap_or(0)
+                    })
+                    .sum();
+                let count = docs.len() as u64;
+                let avg_obj_size = size.checked_div(count).unwrap_or(0);
+
+                // Index sizes are declared metadata only (Phase 4
+                // builds the real structures), so they report zero
+                // rather than an invented number.
+                let declared = self
+                    .declared_indexes
+                    .get(&collection)
+                    .map_or(0, |v| v.len());
+
+                PartitionResult::CollectionStats {
+                    stats: doc! {
+                        "ns": collection,
+                        "count": count as i64,
+                        "size": size as i64,
+                        "avgObjSize": avg_obj_size as i64,
+                        // In-memory storage: storage mirrors `size`.
+                        "storageSize": size as i64,
+                        "capped": false,
+                        "nindexes": (declared + 1) as i64,
+                        "totalIndexSize": 0i64,
+                        "indexSizes": { "_id_": 0i64 },
+                    },
+                }
+            }
+
+            PartitionCommand::DatabaseStats { database } => {
+                // One database's collections hash across partitions,
+                // so this worker reports only its own share; the
+                // network layer sums the counters.
+                let prefix = format!("{}.", database);
+                let mut collections = 0u64;
+                let mut objects = 0u64;
+                let mut data_size = 0u64;
+                let mut indexes = 0u64;
+
+                for (key, docs) in &self.collections {
+                    // Bare namespaces belong to `test` by convention.
+                    let owned =
+                        key.starts_with(&prefix) || (database == "test" && !key.contains('.'));
+                    if !owned {
+                        continue;
+                    }
+                    collections += 1;
+                    objects += docs.len() as u64;
+                    data_size += docs
+                        .iter()
+                        .map(|doc| bson::to_vec(doc).map(|b| b.len() as u64).unwrap_or(0))
+                        .sum::<u64>();
+                    indexes += self
+                        .declared_indexes
+                        .get(key)
+                        .map_or(1, |declared| declared.len() as u64 + 1);
+                }
+
+                PartitionResult::DatabaseStats {
+                    collections,
+                    objects,
+                    data_size,
+                    indexes,
+                }
+            }
+
             PartitionCommand::Search {
                 collection,
                 query,
                 filter,
+                options,
             } => {
-                let Some(index) = self.index.as_mut() else {
-                    return PartitionResult::Error {
-                        message: "full-text search is unavailable".into(),
-                    };
-                };
-
-                let hits = match index.search(&collection, &query) {
+                let hits = match self.index.search(&collection, &query, &options.boosts) {
                     Ok(hits) => hits,
                     Err(err) => return PartitionResult::Error { message: err },
                 };
@@ -287,15 +513,24 @@ impl PartitionWorker {
                     };
                 };
 
-                let mut documents = Vec::with_capacity(hits.len());
+                // (score, document) pairs in BM25 order, so a later
+                // decay re-rank starts from the relevance ordering.
+                let mut ranked: Vec<(f32, Document)> = Vec::with_capacity(hits.len());
                 for hit in hits {
                     if let Some(doc) = docs.iter().find(|doc| document_id_string(doc) == hit.id) {
                         if document_matches(doc, &filter) {
-                            documents.push(doc.clone());
+                            ranked.push((hit.score, doc.clone()));
                         }
                     }
                 }
-                PartitionResult::Found { documents }
+
+                if let Some(decay) = &options.decay {
+                    apply_decay(&mut ranked, decay);
+                }
+
+                PartitionResult::Found {
+                    documents: ranked.into_iter().map(|(_, doc)| doc).collect(),
+                }
             }
 
             PartitionCommand::Delete {
@@ -333,7 +568,8 @@ impl PartitionWorker {
                     });
                 }
                 let deleted_count = (before - docs.len()) as u32;
-                drop(docs);
+                // `docs` borrow ends here (NLL); unindexing below
+                // needs `&mut self` again.
 
                 for doc in &removed_docs {
                     self.unindex_document(&collection, doc);
@@ -342,6 +578,19 @@ impl PartitionWorker {
                 PartitionResult::Deleted { deleted_count }
             }
         }
+    }
+}
+
+/// Builds the description of the mandatory `_id_` index.
+///
+/// Every MongoDB collection carries this index; drivers expect to see
+/// it in `listCollections` (`idIndex`) and `listIndexes`, so both
+/// reply shapes are built from this one definition.
+fn default_id_index() -> Document {
+    doc! {
+        "v": 2i32,
+        "key": { "_id": 1i32 },
+        "name": "_id_",
     }
 }
 
@@ -366,40 +615,76 @@ fn document_id_string(doc: &Document) -> String {
     }
 }
 
-/// Concatenates every string value in a document into one blob of text.
+/// Extracts every top-level field's string values of a document.
 ///
-/// This is what the search index tokenizes: nested documents and arrays
-/// are walked so fields at any depth become searchable. Non-string
-/// values are skipped — BM25 over numbers adds noise, not signal.
-fn extract_text(doc: &Document) -> String {
-    fn walk(value: &bson::Bson, out: &mut String) {
+/// This is what the search index tokenizes, one entry per field, so
+/// the index can weight fields independently (`$text.$boost`). Nested
+/// documents contribute dotted paths (`author.name`) and arrays join
+/// their string values into one blob. Non-string values are skipped —
+/// BM25 over numbers adds noise, not signal. `_id` is excluded, like
+/// a MongoDB text index (ids are not text content).
+fn extract_field_values(doc: &Document) -> Vec<(String, String)> {
+    use std::collections::BTreeMap;
+
+    let mut collected: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    fn walk(path: &str, value: &bson::Bson, acc: &mut BTreeMap<String, Vec<String>>) {
         use bson::Bson;
         match value {
-            Bson::String(s) => {
-                if !out.is_empty() {
-                    out.push(' ');
-                }
-                out.push_str(s);
-            }
+            Bson::String(s) => acc.entry(path.to_string()).or_default().push(s.clone()),
+            // Arrays contribute every string element to the same
+            // field: `tags: ["a", "b"]` is one searchable field.
             Bson::Array(values) => {
                 for value in values {
-                    walk(value, out);
+                    walk(path, value, acc);
                 }
             }
             Bson::Document(nested) => {
-                for value in nested.values() {
-                    walk(value, out);
+                for (key, value) in nested {
+                    walk(&format!("{}.{}", path, key), value, acc);
                 }
             }
             _ => {}
         }
     }
 
-    let mut out = String::new();
-    for value in doc.values() {
-        walk(value, &mut out);
+    for (key, value) in doc {
+        if key == "_id" {
+            continue;
+        }
+        walk(key, value, &mut collected);
     }
-    out
+
+    collected
+        .into_iter()
+        .map(|(field, values)| (field, values.join(" ")))
+        .collect()
+}
+
+/// Re-ranks (score, document) pairs by an exponential date decay.
+///
+/// Each document's score is multiplied by `2^(-age/half_life)`, where
+/// the age is measured against `DecaySpec::field` (a BSON date).
+/// Documents without a usable date keep their raw BM25 score: missing
+/// metadata must not punish a document the index considered relevant.
+fn apply_decay(ranked: &mut [(f32, Document)], spec: &DecaySpec) {
+    use bson::Bson;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0);
+
+    for (score, doc) in ranked.iter_mut() {
+        if let Some(Bson::DateTime(date)) = doc.get(&spec.field) {
+            let age_secs = (now_ms - date.timestamp_millis()).max(0) as f64 / 1000.0;
+            let factor = 2f64.powf(-age_secs / spec.half_life_secs);
+            *score *= factor as f32;
+        }
+    }
+
+    // Newest/highest score first; ties keep the BM25 order (stable).
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 }
 
 /// Returns `true` when every field in `filter` is present and equal in `doc`.
@@ -407,7 +692,8 @@ fn extract_text(doc: &Document) -> String {
 /// This is an equality-only matcher: it covers the subset of the MongoDB
 /// query language needed to route and verify Phase 2 commands. Rich
 /// operators (`$gt`, `$in`, ...) arrive with the query engine in Phase 4.
-fn document_matches(doc: &Document, filter: &Document) -> bool {
+/// Shared with the network layer to filter broadcast listings.
+pub(crate) fn document_matches(doc: &Document, filter: &Document) -> bool {
     filter
         .iter()
         .all(|(key, expected)| doc.get(key) == Some(expected))
@@ -592,6 +878,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SearchOptions;
 
     fn router() -> PartitionRouter {
         PartitionRouter::new(2)
@@ -764,6 +1051,7 @@ mod tests {
                 collection: "articles".into(),
                 query: "database".into(),
                 filter: doc! {},
+                options: SearchOptions::default(),
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
@@ -795,6 +1083,7 @@ mod tests {
                 collection: "posts".into(),
                 query: "rust".into(),
                 filter: doc! { "tag": "rust" },
+                options: SearchOptions::default(),
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
@@ -838,6 +1127,7 @@ mod tests {
                         collection: "notes".into(),
                         query,
                         filter: doc! {},
+                        options: SearchOptions::default(),
                     })
                     .expect("worker reachable");
                 match rx.await.expect("worker replied") {
@@ -890,6 +1180,7 @@ mod tests {
                 collection: "tmp".into(),
                 query: "vanish".into(),
                 filter: doc! {},
+                options: SearchOptions::default(),
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
@@ -918,7 +1209,10 @@ mod tests {
         }
 
         let mut names = Vec::new();
-        for rx in router.broadcast(PartitionCommand::ListCollections { filter: doc! {} }) {
+        for rx in router.broadcast(PartitionCommand::ListCollections {
+            database: String::new(),
+            filter: doc! {},
+        }) {
             match rx.await.expect("worker replied") {
                 PartitionResult::ListedCollections { collections } => {
                     names.extend(
@@ -949,6 +1243,7 @@ mod tests {
 
         let mut matched = Vec::new();
         for rx in router.broadcast(PartitionCommand::ListCollections {
+            database: String::new(),
             filter: doc! { "name": "users" },
         }) {
             match rx.await.expect("worker replied") {
@@ -962,6 +1257,499 @@ mod tests {
         assert_eq!(matched.len(), 1, "filter must match exactly one");
         assert_eq!(matched[0].get_str("name").unwrap(), "users");
         assert_eq!(matched[0].get_str("type").unwrap(), "collection");
+    }
+
+    #[tokio::test]
+    async fn test_create_collection_makes_it_listable_without_documents() {
+        let router = router();
+
+        let rx = router
+            .dispatch(PartitionCommand::CreateCollection {
+                collection: "shop.orders".into(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Created => {}
+            other => panic!("expected Created, got {:?}", other),
+        }
+
+        // Scoped to the requesting database, reported by bare name.
+        let mut names = Vec::new();
+        for rx in router.broadcast(PartitionCommand::ListCollections {
+            database: "shop".into(),
+            filter: doc! {},
+        }) {
+            match rx.await.expect("worker replied") {
+                PartitionResult::ListedCollections { collections } => names.extend(
+                    collections
+                        .into_iter()
+                        .filter_map(|info| info.get_str("name").ok().map(String::from)),
+                ),
+                other => panic!("expected ListedCollections, got {:?}", other),
+            }
+        }
+        assert_eq!(names, vec!["orders"]);
+
+        // A duplicate create is an error, matching MongoDB's
+        // NamespaceExists, and never clears existing data.
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "shop.orders".into(),
+                documents: vec![doc! { "n": 1 }],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+        let rx = router
+            .dispatch(PartitionCommand::CreateCollection {
+                collection: "shop.orders".into(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Error { message } => {
+                assert!(message.contains("already exists"), "got: {}", message);
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+
+        let rx = router
+            .dispatch(PartitionCommand::Count {
+                collection: "shop.orders".into(),
+                filter: doc! {},
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Counted { count } => assert_eq!(count, 1, "data must survive"),
+            other => panic!("expected Counted, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_indexes_then_list_indexes_round_trip() {
+        // Mirrors the Spring Data start-up flow: declare indexes, then
+        // list them when the collection is browsed.
+        let router = router();
+        router
+            .dispatch(PartitionCommand::CreateCollection {
+                collection: "shop.orders".into(),
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let rx = router
+            .dispatch(PartitionCommand::CreateIndexes {
+                collection: "shop.orders".into(),
+                indexes: vec![
+                    doc! { "key": { "sku": 1i32 }, "name": "sku_1" },
+                    doc! { "key": { "qty": -1i32 }, "name": "qty_-1", "unique": true },
+                ],
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::IndexesCreated {
+                num_indexes_before,
+                num_indexes_after,
+                created_collection,
+            } => {
+                assert_eq!(num_indexes_before, 1, "only _id_ before");
+                assert_eq!(num_indexes_after, 3, "_id_ plus two declared");
+                assert!(
+                    !created_collection,
+                    "the collection was created explicitly first"
+                );
+            }
+            other => panic!("expected IndexesCreated, got {:?}", other),
+        }
+
+        // Re-declaring the same name is a no-op, not a duplicate.
+        let rx = router
+            .dispatch(PartitionCommand::CreateIndexes {
+                collection: "shop.orders".into(),
+                indexes: vec![doc! { "key": { "sku": 1i32 }, "name": "sku_1" }],
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::IndexesCreated {
+                num_indexes_after, ..
+            } => assert_eq!(num_indexes_after, 3, "re-declaration must not grow"),
+            other => panic!("expected IndexesCreated, got {:?}", other),
+        }
+
+        let rx = router
+            .dispatch(PartitionCommand::ListIndexes {
+                collection: "shop.orders".into(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::ListedIndexes { indexes } => {
+                let names: Vec<&str> = indexes
+                    .iter()
+                    .filter_map(|spec| spec.get_str("name").ok())
+                    .collect();
+                assert_eq!(names, vec!["_id_", "sku_1", "qty_-1"]);
+                // The mandatory index keeps its own definition.
+                assert_eq!(indexes[0].get_i32("v").unwrap(), 2);
+                assert_eq!(
+                    indexes[0].get_document("key").unwrap(),
+                    &doc! { "_id": 1i32 }
+                );
+                // `v` is filled in for declarations that omitted it.
+                assert_eq!(indexes[1].get_i32("v").unwrap(), 2);
+            }
+            other => panic!("expected ListedIndexes, got {:?}", other),
+        }
+
+        // Dropping the collection drops its declarations too.
+        router
+            .dispatch(PartitionCommand::Drop {
+                collection: "shop.orders".into(),
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+        let rx = router
+            .dispatch(PartitionCommand::ListIndexes {
+                collection: "shop.orders".into(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Error { message } => {
+                assert!(message.contains("ns not found"), "got: {}", message);
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_indexes_creates_missing_collection() {
+        // Spring Data declares indexes at application start-up, before
+        // any insert exists. MongoDB's `createIndexes` creates the
+        // collection implicitly; without that the boot flow fails.
+        let router = router();
+
+        let rx = router
+            .dispatch(PartitionCommand::CreateIndexes {
+                collection: "spring.users".into(),
+                indexes: vec![doc! { "key": { "email": 1i32 }, "name": "email_1" }],
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::IndexesCreated {
+                num_indexes_before,
+                num_indexes_after,
+                created_collection,
+            } => {
+                assert!(created_collection, "collection must be created");
+                assert_eq!(num_indexes_before, 1, "_id_ is pre-declared");
+                assert_eq!(num_indexes_after, 2);
+            }
+            other => panic!("expected IndexesCreated, got {:?}", other),
+        }
+
+        // The implicitly created collection is now listable...
+        let mut names = Vec::new();
+        for rx in router.broadcast(PartitionCommand::ListCollections {
+            database: "spring".into(),
+            filter: doc! {},
+        }) {
+            match rx.await.expect("worker replied") {
+                PartitionResult::ListedCollections { collections } => names.extend(
+                    collections
+                        .into_iter()
+                        .filter_map(|info| info.get_str("name").ok().map(String::from)),
+                ),
+                other => panic!("expected ListedCollections, got {:?}", other),
+            }
+        }
+        assert_eq!(names, vec!["users"]);
+
+        // ...and its indexes list the declaration made before it existed.
+        let rx = router
+            .dispatch(PartitionCommand::ListIndexes {
+                collection: "spring.users".into(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::ListedIndexes { indexes } => {
+                let names: Vec<&str> = indexes
+                    .iter()
+                    .filter_map(|spec| spec.get_str("name").ok())
+                    .collect();
+                assert_eq!(names, vec!["_id_", "email_1"]);
+            }
+            other => panic!("expected ListedIndexes, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_indexes_reports_only_id_index_by_default() {
+        let router = router();
+        router
+            .dispatch(PartitionCommand::CreateCollection {
+                collection: "plain".into(),
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let rx = router
+            .dispatch(PartitionCommand::ListIndexes {
+                collection: "plain".into(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::ListedIndexes { indexes } => {
+                assert_eq!(indexes.len(), 1, "only the mandatory _id_ index");
+                assert_eq!(indexes[0].get_str("name").unwrap(), "_id_");
+            }
+            other => panic!("expected ListedIndexes, got {:?}", other),
+        }
+
+        // An unknown collection is NamespaceNotFound, not an empty list.
+        let rx = router
+            .dispatch(PartitionCommand::ListIndexes {
+                collection: "ghost".into(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Error { message } => {
+                assert!(message.contains("ns not found"), "got: {}", message);
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_same_collection_name_in_two_databases_is_isolated() {
+        let router = router();
+        for db in ["shop", "inventory"] {
+            router
+                .dispatch(PartitionCommand::Insert {
+                    collection: format!("{}.orders", db),
+                    documents: vec![doc! { "from": db }],
+                })
+                .expect("worker reachable")
+                .await
+                .expect("worker replied");
+        }
+
+        // Each database sees only its own "orders".
+        for db in ["shop", "inventory"] {
+            let rx = router
+                .dispatch(PartitionCommand::Find {
+                    collection: format!("{}.orders", db),
+                    filter: doc! {},
+                })
+                .expect("worker reachable");
+            match rx.await.expect("worker replied") {
+                PartitionResult::Found { documents } => {
+                    assert_eq!(documents.len(), 1, "{} must see one doc", db);
+                    assert_eq!(documents[0].get_str("from").unwrap(), db);
+                }
+                other => panic!("expected Found, got {:?}", other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_databases_merges_partitions() {
+        let router = router();
+
+        // "shop" gets a document; "empty" only gets an (empty)
+        // collection. They hash to different partitions.
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "shop.orders".into(),
+                documents: vec![doc! { "n": 1 }],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+        router
+            .dispatch(PartitionCommand::CreateCollection {
+                collection: "empty.logs".into(),
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let mut merged: Vec<Document> = Vec::new();
+        for rx in router.broadcast(PartitionCommand::ListDatabases { filter: doc! {} }) {
+            match rx.await.expect("worker replied") {
+                PartitionResult::ListedDatabases { mut databases } => {
+                    merged.append(&mut databases);
+                }
+                other => panic!("expected ListedDatabases, got {:?}", other),
+            }
+        }
+
+        let shop = merged
+            .iter()
+            .find(|db| db.get_str("name") == Ok("shop"))
+            .expect("shop listed");
+        assert!(!shop.get_bool("empty").unwrap(), "shop holds a document");
+
+        let empty = merged
+            .iter()
+            .find(|db| db.get_str("name") == Ok("empty"))
+            .expect("empty listed");
+        assert!(empty.get_bool("empty").unwrap(), "no documents yet");
+    }
+
+    #[tokio::test]
+    async fn test_collection_stats_reports_real_serialized_size() {
+        let router = router();
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "shop.orders".into(),
+                documents: vec![doc! { "sku": "a" }, doc! { "sku": "bb" }],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let rx = router
+            .dispatch(PartitionCommand::CollectionStats {
+                collection: "shop.orders".into(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::CollectionStats { stats } => {
+                assert_eq!(stats.get_str("ns").unwrap(), "shop.orders");
+                assert_eq!(stats.get_i64("count"), Ok(2));
+
+                // `size` must equal the real serialized footprint, not
+                // an estimate: compute it independently here.
+                let expected: i64 = bson::to_vec(&doc! { "sku": "a" }).unwrap().len() as i64
+                    + bson::to_vec(&doc! { "sku": "bb" }).unwrap().len() as i64;
+                assert_eq!(stats.get_i64("size"), Ok(expected));
+                assert_eq!(stats.get_i64("avgObjSize"), Ok(expected / 2));
+                assert!(!stats.get_bool("capped").unwrap());
+                // Only the mandatory _id_ index exists so far.
+                assert_eq!(stats.get_i64("nindexes"), Ok(1));
+            }
+            other => panic!("expected CollectionStats, got {:?}", other),
+        }
+
+        // An unknown namespace is an error, not a phantom zero-size
+        // collection.
+        let rx = router
+            .dispatch(PartitionCommand::CollectionStats {
+                collection: "shop.ghost".into(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Error { message } => {
+                assert!(message.contains("ns not found"), "got: {}", message);
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_database_stats_sums_across_partitions() {
+        let router = router();
+        // Two collections in the same database; they hash to different
+        // partitions, so only a summed broadcast sees both.
+        for coll in ["shop.orders", "shop.users"] {
+            router
+                .dispatch(PartitionCommand::Insert {
+                    collection: coll.into(),
+                    documents: vec![doc! { "n": 1 }],
+                })
+                .expect("worker reachable")
+                .await
+                .expect("worker replied");
+        }
+        // A different database must not leak into the totals.
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "other.things".into(),
+                documents: vec![doc! { "n": 1 }],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let mut collections = 0u64;
+        let mut objects = 0u64;
+        let mut data_size = 0u64;
+        for rx in router.broadcast(PartitionCommand::DatabaseStats {
+            database: "shop".into(),
+        }) {
+            match rx.await.expect("worker replied") {
+                PartitionResult::DatabaseStats {
+                    collections: c,
+                    objects: o,
+                    data_size: s,
+                    indexes: _,
+                } => {
+                    collections += c;
+                    objects += o;
+                    data_size += s;
+                }
+                other => panic!("expected DatabaseStats, got {:?}", other),
+            }
+        }
+
+        assert_eq!(collections, 2, "only shop's two collections count");
+        assert_eq!(objects, 2, "one document each");
+        assert!(data_size > 0, "size must be measured, not zero");
+    }
+
+    #[tokio::test]
+    async fn test_drop_database_removes_only_that_database() {
+        let router = router();
+        for (db, word) in [("shop", "alpha"), ("inventory", "omega")] {
+            router
+                .dispatch(PartitionCommand::Insert {
+                    collection: format!("{}.orders", db),
+                    documents: vec![doc! { "text": word }],
+                })
+                .expect("worker reachable")
+                .await
+                .expect("worker replied");
+        }
+
+        // Broadcast: one database's collections hash across workers.
+        for rx in router.broadcast(PartitionCommand::DropDatabase {
+            database: "shop".into(),
+        }) {
+            match rx.await.expect("worker replied") {
+                PartitionResult::DroppedDatabase { database } => {
+                    assert_eq!(database, "shop");
+                }
+                other => panic!("expected DroppedDatabase, got {:?}", other),
+            }
+        }
+
+        // shop.orders is gone (data and search index), inventory intact.
+        let rx = router
+            .dispatch(PartitionCommand::Count {
+                collection: "shop.orders".into(),
+                filter: doc! {},
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Counted { count } => assert_eq!(count, 0),
+            other => panic!("expected Counted, got {:?}", other),
+        }
+
+        let rx = router
+            .dispatch(PartitionCommand::Search {
+                collection: "inventory.orders".into(),
+                query: "omega".into(),
+                filter: doc! {},
+                options: SearchOptions::default(),
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1, "other database must survive");
+            }
+            other => panic!("expected Found, got {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -1048,5 +1836,173 @@ mod tests {
         assert_eq!(doc.get_i32("_id").unwrap(), 1);
         assert_eq!(doc.get_str("name").unwrap(), "Grace");
         assert!(doc.get("age").is_none(), "replacement drops old fields");
+    }
+
+    #[test]
+    fn test_extract_field_values_splits_fields_and_skips_id() {
+        let doc = doc! {
+            "_id": "a",
+            "title": "Rust engines",
+            "tags": ["db", "fast"],
+            "author": { "name": "Ada" },
+            "year": 2026i32,
+        };
+        let mut fields = extract_field_values(&doc);
+        fields.sort();
+
+        assert_eq!(
+            fields,
+            vec![
+                ("author.name".to_string(), "Ada".to_string()),
+                ("tags".to_string(), "db fast".to_string()),
+                ("title".to_string(), "Rust engines".to_string()),
+            ],
+            "_id and non-string values must not be indexed"
+        );
+    }
+
+    #[test]
+    fn test_apply_decay_prefers_newer_documents() {
+        use bson::DateTime;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let old = DateTime::from_millis(now_ms - 10 * 86_400_000); // 10 days ago
+        let new = DateTime::from_millis(now_ms - 60); // just now
+
+        let mut ranked = vec![
+            (10.0f32, doc! { "_id": "old", "when": old }),
+            (10.0f32, doc! { "_id": "new", "when": new }),
+        ];
+        apply_decay(
+            &mut ranked,
+            &DecaySpec {
+                field: "when".into(),
+                half_life_secs: 86_400.0, // one day
+            },
+        );
+
+        assert_eq!(ranked[0].1.get_str("_id").unwrap(), "new");
+        assert_eq!(ranked[1].1.get_str("_id").unwrap(), "old");
+        // 10 half-lives: ~2^-10 of the original score.
+        assert!(ranked[1].0 < 0.01, "decay factor: {}", ranked[1].0);
+    }
+
+    #[test]
+    fn test_apply_decay_keeps_documents_without_date() {
+        let mut ranked = vec![
+            (1.0f32, doc! { "_id": "undated" }),
+            (0.5f32, doc! { "_id": "also_undated" }),
+        ];
+        apply_decay(
+            &mut ranked,
+            &DecaySpec {
+                field: "when".into(),
+                half_life_secs: 1.0,
+            },
+        );
+
+        assert_eq!(ranked[0].1.get_str("_id").unwrap(), "undated");
+        assert_eq!(ranked[0].0, 1.0, "missing date must not be penalized");
+    }
+
+    #[tokio::test]
+    async fn test_search_boost_reorders_worker_reply() {
+        let router = router();
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "articles".into(),
+                documents: vec![
+                    doc! { "_id": "body", "body": "rust oven seasoning" },
+                    doc! { "_id": "title", "title": "Rust programming" },
+                ],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let rx = router
+            .dispatch(PartitionCommand::Search {
+                collection: "articles".into(),
+                query: "rust".into(),
+                filter: doc! {},
+                options: SearchOptions {
+                    boosts: vec![("title".to_string(), 20.0)],
+                    decay: None,
+                },
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 2);
+                assert_eq!(
+                    documents[0].get_str("_id").unwrap(),
+                    "title",
+                    "boosted title must rank first"
+                );
+            }
+            other => panic!("expected Found, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_decay_reorders_worker_reply() {
+        use bson::DateTime;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let router = router();
+        router
+            .dispatch(PartitionCommand::Insert {
+                collection: "news".into(),
+                documents: vec![
+                    doc! {
+                        "_id": "old",
+                        "text": "rust release",
+                        "created_at": DateTime::from_millis(now_ms - 30 * 86_400_000),
+                    },
+                    doc! {
+                        "_id": "new",
+                        "text": "rust release",
+                        "created_at": DateTime::from_millis(now_ms),
+                    },
+                ],
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
+        let rx = router
+            .dispatch(PartitionCommand::Search {
+                collection: "news".into(),
+                query: "rust".into(),
+                filter: doc! {},
+                options: SearchOptions {
+                    boosts: Vec::new(),
+                    decay: Some(DecaySpec {
+                        field: "created_at".into(),
+                        half_life_secs: 86_400.0,
+                    }),
+                },
+            })
+            .expect("worker reachable");
+        match rx.await.expect("worker replied") {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 2);
+                assert_eq!(
+                    documents[0].get_str("_id").unwrap(),
+                    "new",
+                    "decay must rank the fresh document first"
+                );
+            }
+            other => panic!("expected Found, got {:?}", other),
+        }
     }
 }

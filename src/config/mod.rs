@@ -269,10 +269,10 @@ mod tests {
     #[test]
     fn test_parse_bool_spellings() {
         for raw in ["true", "TRUE", "1", "yes", "on"] {
-            assert_eq!(parse_bool(raw), Some(true), "{}", raw);
+            assert!(parse_bool(raw) == Some(true), "{}", raw);
         }
         for raw in ["false", "0", "no", "off"] {
-            assert_eq!(parse_bool(raw), Some(false), "{}", raw);
+            assert!(parse_bool(raw) == Some(false), "{}", raw);
         }
         assert_eq!(parse_bool("maybe"), None);
     }
@@ -286,10 +286,8 @@ mod tests {
 
     #[test]
     fn test_from_toml_rejects_unknown_analyzer() {
-        let err = Config::from_toml("[search]\nanalyzer = \"lucene9\"")
-            .map(|config| config.validate())
-            .expect("parse ok")
-            .expect("validate fails");
+        let config = Config::from_toml("[search]\nanalyzer = \"lucene9\"").expect("parse ok");
+        let err = config.validate().expect_err("validate fails");
         assert!(err.contains("analyzer"), "unexpected error: {}", err);
     }
 }

@@ -125,34 +125,83 @@ before any buffer is allocated.
 
 ## 7. Partitioning Strategy
 
-- Each partition owns a disjoint set of keys (hashed by document ID).
-- Commands route to the owning partition deterministically.
+- Each partition owns a disjoint set of collections, keyed by the
+  `db.collection` namespace and hashed with FNV-1a. Two databases may
+  hold a collection with the same name without colliding.
+- Commands route to the owning partition deterministically; commands
+  that span partitions (`listCollections`, `listDatabases`,
+  `dropDatabase`, `dbStats`) are broadcast and merged in the network
+  layer. Commands that name a single collection (`createIndexes`,
+  `listIndexes`, `collStats`) are *not* broadcast: one partition
+  answers alone.
 - Partition workers are single-threaded and process commands sequentially.
 - No cross-partition locks are required in the hot path.
 
 ## 8. Search Subsystem
 
-- Tantivy inverted indexes are built per partition, each in a RAM
-  directory (no disk I/O) and owned exclusively by its worker thread.
-- Text fields are tokenized into terms; BM25 relevance scoring is used.
-- Indexing is a hot, incremental process: as a document arrives, its text
-  fields are indexed immediately. Update, delete and drop keep the index
-  consistent with the transactional map.
-- The query surface is MongoDB's native `$text` operator
-  (`{ $text: { $search: "..." } }`); extra predicates in the same
-  filter are applied as an equality post-filter over the hits.
-- When the exact query scores zero hits, the search retries with a
-  fuzzy (distance-1) query so a one-character typo still matches.
-- `src/search/mod.rs` never reads raw BSON: the storage layer hands it
-  plain strings and receives document ids, per `docs/CONTRACT.md` §4.
+Tantivy is Kova's embedded Lucene: the same inverted-index DNA
+(BM25, FST term dictionaries, query automata), but in-process and
+RAM-only.
 
-## 9. Phases
+- **Per-field indexes (Phase 3.5)**: each partition keeps one tantivy
+  index per *document field name*, all in RAM directories and owned
+  exclusively by the worker thread. This is what makes MongoDB-style
+  field weights possible: every field has its own BM25 corpus and
+  statistics, and the worker sums `bm25(field) * boost` per document
+  when merging (fields default to weight 1, like a MongoDB text
+  index). A cap of 8 field names per partition bounds memory (each
+  tantivy writer owns a >= 15 MB arena); fields beyond it are skipped
+  with a logged warning.
+- **Analyzer**: the `[search]` section of `kova.toml` picks the token
+  pipeline (`default` or `en_stem`) and optional stop words. It is
+  registered at index creation and applied at index *and* query time,
+  mirroring how a MongoDB text index fixes its tokenizer.
+- **Query surface**: MongoDB's native `$text` operator, plus two Kova
+  extensions (`$boost`, `$decay`) that log a WARN when
+  `warn_on_non_mongo_queries` is enabled:
+  `{ $text: { $search: "...", $boost: {title: 10},
+              $decay: {field: "created_at", halfLifeSeconds: 86400} } }`.
+  Extra predicates in the same filter are applied as an equality
+  post-filter over the hits.
+- **Wildcards**: tokens containing `*`/`?` expand to whole-term
+  automaton queries (Solr semantics: `dat*` matches `database`, `*sta`
+  does not match inside `rust`).
+- **Fuzzy fallback**: when the exact query scores zero hits, the
+  search retries with a distance-1 fuzzy query so a one-character
+  typo still matches.
+- **Decay re-rank**: `$decay` multiplies each hit's score by
+  `2^(-age/half_life)` computed from a BSON date field in the worker;
+  documents without a usable date keep their raw BM25 score.
+- **BSON boundary**: `src/search/mod.rs` never reads raw BSON — the
+  storage layer hands it `(field, text)` pairs and receives
+  `(id, score)` hits, per `docs/CONTRACT.md` §4.
+- **Consistency**: indexing is hot and incremental; insert, update,
+  delete and drop keep the index consistent with the transactional
+  map (searches commit and reload before querying).
+
+## 9. Configuration
+
+`kova.toml` (working directory, or the path in `KOVA_CONFIG`) holds
+the engine configuration. Precedence: **environment variable > file >
+built-in default**. A malformed file aborts startup; a malformed env
+value is warned about and ignored.
+
+| Key | Env override | Default | Meaning |
+|---|---|---|---|
+| `port` | `KOVA_PORT` | `27017` | TCP listener port |
+| `log_level` | `KOVA_LOG_LEVEL` | `info` | Minimum emitted level |
+| `warn_on_non_mongo_queries` | `KOVA_WARN_NON_MONGO_QUERIES` | `true` | WARN on non-Mongo operators |
+| `search.analyzer` | — | `default` | `default` \| `en_stem` |
+| `search.stopwords` | — | `[]` | Stop words removed at index/query time |
+
+## 10. Phases
 
 | Phase | Scope |
 |-------|-------|
 | 1 | TCP listener, header parsing, OP_MSG detection, concurrent tasks |
 | 2 | Partition isolation, `PartitionCommand`, `crossbeam-channel` routing |
-| 3 | Tantivy full-text indexing |
+| 3 | Tantivy full-text indexing (per-partition, hot, `$text`) |
+| 3.5 | Per-field boosts, wildcards, decay, analyzer config, `kova.toml` |
 | 4 | DataFusion query optimization |
 
 ---

@@ -2,6 +2,7 @@ mod config;
 mod logger;
 mod network;
 mod protocol;
+mod query_engine;
 mod search;
 mod storage;
 mod types;
