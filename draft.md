@@ -1,37 +1,74 @@
-# Kova: Ultra-High Performance In-Memory Database Engine
+# Kova: Ultra-High Performance Hybrid Memory+Disk Database Engine
 
-**Kova** is a cutting-edge systems engineering project built from the ground up in **Rust**. Its vision is to unify three paradigms that traditionally operate separately in infrastructure stacks: the predictable speed and transactional determinism of *NewSQL* in-memory systems, the flexibility of dynamic *NoSQL* document stores (MongoDB), and the analytical power of a full-text relevance search engine (*Lucene*).
+**Kova** is a cutting-edge systems engineering project built from the ground up in **Rust**. Its vision is to unify multiple paradigms that traditionally operate separately in infrastructure stacks:
+
+- The predictable speed and transactional determinism of *NewSQL* in-memory systems
+- The flexibility of dynamic *NoSQL* document stores (MongoDB native wire protocol)
+- The analytical power of a full-text relevance search engine (*Tantivy/Lucene*)
+- The enterprise-grade query parsing and optimization of Apache DataFusion (SQL)
+- **Durable disk storage** with Write-Ahead Logging (WAL), buffer pool, and page-based storage (inspired by GraniteDB)
+- **Multi-model indexing**: B-Tree (range), Hash (O(1)), Unique, Sparse, and Full-Text (Tantivy)
+- **High availability** via oplog-based replication, replica sets, and heartbeat monitoring
 
 ---
 
 ## 👁️ Project Vision & Purpose (The "Why")
 
-In modern software development, engineering teams are often forced to duplicate their infrastructure. They rely on a transactional database (relational or document-based) for quick updates and maintain a completely separate cluster (such as Elasticsearch or Solr) for advanced text search. This architecture introduces complex data synchronization challenges, network latency, and high operational costs.
+In modern software development, engineering teams are often forced to duplicate their infrastructure. They rely on a transactional database for quick updates, a separate search cluster (Elasticsearch/Solr) for full-text search, and a separate analytical engine for SQL queries.
 
-**Kova solves this by unifying these capabilities into a single database engine:**
-* Processes data at the physical speed of RAM (inspired by VoltDB's architecture).
-* Speaks the native wire protocol that developers already love and use (MongoDB).
-* Parses and structures internal query execution with a production-grade query optimizer.
-* Indexes string content in real-time for instant full-text analytics and relevance matching.
+**Kova solves this by unifying these capabilities into a single hybrid memory+disk database engine:**
 
-This makes Kova an ideal solution for **Edge Computing/IoT environments**—where resources are limited and extreme local efficiency is mandatory—as well as an **elite technical portfolio project** that showcases mastery over low-level Rust concurrency and memory management.
+* Processes data at the physical speed of RAM for hot workloads (in-memory hash maps + buffer pool cache)
+* Persists data durably to disk via Write-Ahead Logging (WAL) with CRC32 checksums and LSN tracking
+* Speaks the native MongoDB wire protocol that developers already love and use (`OP_MSG`, `db.runCommand({ sql: "..." })`)
+* Parses and structures internal query execution with Apache DataFusion (SQL parser + optimizer)
+* Indexes string content in real-time for instant full-text analytics (Tantivy)
+* Supports multi-model indexing: B-Tree (range), Hash (O(1)), Unique, Sparse, and Full-Text
+* Provides high availability via oplog-based replication and replica sets
+
+**Kova is inspired by:**
+* **VoltDB** — lock-free, thread-per-core in-memory processing
+* **GraniteDB** — WAL, buffer pool, page-based storage, MVCC, replication
+* **MongoDB** — wire protocol, document model, aggregation pipeline
+* **Apache DataFusion** — SQL parsing, optimization, and execution
+* **Tantivy** — full-text search (Lucene equivalent in Rust)
+
+This makes Kova an ideal solution for **Edge Computing/IoT environments** (where resources are limited and extreme local efficiency is mandatory) and as an **elite technical portfolio project** that showcases mastery over low-level Rust concurrency, memory management, and storage engine design.
 
 ---
 
-## 🏗️ The Four Core Architectural Pillars
+## 🏗️ The Core Architectural Pillars
 
-### 1. Lock-Free In-Memory Engine (VoltDB Inspiration)
-* **Thread-per-Core:** The database partitions its memory allocation strictly across CPU cores. Each data partition runs on its own isolated, native OS thread (`std::thread`).
-* **Local Determinism:** Because a partition is confined to a single thread, it processes incoming transactions sequentially through fast asynchronous channels. This completely eliminates the need for heavy, contention-prone locks (`Mutex` or `RwLock`) on the main data structures. It guarantees microsecond-level latency and avoids Garbage Collection (GC) pauses entirely.
+### 1. Hybrid Memory+Disk Engine (VoltDB + GraniteDB Inspiration)
+* **In-Memory Hot Path:** Thread-per-core partitions, lock-free `crossbeam::channel` routing, in-memory hash maps for the working set.
+* **Disk Durability:** Write-Ahead Logging (WAL) with CRC32 checksums and LSN tracking. Every write goes to the WAL before the memory state. Crash recovery replays the WAL on startup.
+* **Page-Based Storage:** Fixed-size pages (16 KB default, configurable) with integrity verification and overflow support. Pages stored on disk in a structured directory layout.
+* **Buffer Pool:** LRU-based page cache with pin/unpin eviction. The buffer pool bridges memory and disk: hot pages stay in RAM, cold pages are paged to disk.
+* **MVCC + ACID Transactions:** Multi-Version Concurrency Control with snapshot reads, multiple isolation levels (Read Uncommitted, Read Committed, Repeatable Read, Snapshot, Serializable), conflict detection, and automatic transaction timeout.
 
 ### 2. Native MongoDB Interoperability (The Wire Protocol)
-* **Drop-in Compatibility:** Kova exposes a server listening on port `27017` that intercepts native binary messages from MongoDB clients (`OP_MSG`). Any application built using official MongoDB drivers (Node.js, Python, Go, Java, etc.) can connect seamlessly to Kova without altering a single line of business logic.
+* **Drop-in Compatibility:** Kova exposes a server on port 27017 that speaks the native MongoDB wire protocol (`OP_MSG`, legacy `OP_QUERY`). Any application using official MongoDB drivers connects seamlessly.
+* **SQL via MongoDB:** `db.runCommand({ sql: "SELECT ... FROM ... WHERE ..." })` is accepted and executed via DataFusion, returning result sets as BSON.
 
-### 3. Integrated Advanced Search (Lucene Equivalent)
-* **Hot Indexing:** As soon as a document enters a memory partition, its text fields are processed through an inverted index engine. This equips Kova with out-of-the-box analytical features like tokenization, relevance scoring, and fuzzy matching directly inside the transactional worker.
+### 3. Integrated Advanced Search (Tantivy Equivalent)
+* **Hot Indexing:** As soon as a document enters a partition, its text fields are processed through Tantivy inverted indexes. Full-text queries use `$text` with BM25 relevance, fuzzy fallback, wildcards, per-field boosts, and recency decay.
 
-### 4. Enterprise-Grade Query Parsing and Optimization (Apache Ecosytem)
-* While the external API speaks MongoDB, internal operations require an analytical query planner. Instead of reinventing the wheel by writing a logic optimizer from scratch, Kova integrates **Apache DataFusion** (the modern standard for analytical engines in Rust). This allows the system to parse, optimize, and execute logical query plans over memory partitions with maximum CPU efficiency.
+### 4. Enterprise-Grade Query Parsing and Optimization (Apache DataFusion)
+* **SQL Parser + Optimizer:** Apache DataFusion parses SQL, generates AST/logical/physical plans, and optimizes execution over the storage layer.
+* **Query Execution:** SQL queries are executed against the storage layer (in-memory + disk), returning results as BSON via the MongoDB wire protocol.
+
+### 5. Multi-Model Indexing Subsystem
+* **B-Tree Indexes:** Ordered indexes for range queries with composite key support.
+* **Hash Indexes:** O(1) exact-match lookups.
+* **Unique Constraints:** Enforce uniqueness across indexed fields.
+* **Sparse Indexes:** Skip documents missing the indexed field.
+* **Full-Text Indexes (Tantivy):** Already implemented (Phase 3/3.5). The index manager creates, drops, and auto-maintains full-text indexes alongside other index types.
+* **Auto-Maintenance:** Indexes are updated on insert/update/delete — no manual reindexing.
+
+### 6. Replication & High Availability
+* **Oplog-Based Replication:** Every write is recorded in a capped operations log with timestamps. Secondaries replay the oplog to stay in sync.
+* **Replica Sets:** Primary/Secondary/Arbiter roles with heartbeat monitoring and automatic election.
+* **Read Preference:** Clients can read from primary, secondary, or nearest.
 
 ---
 
@@ -39,29 +76,50 @@ This makes Kova an ideal solution for **Edge Computing/IoT environments**—wher
 
 Kova's core is engineered by assembling highly optimized, production-proven crates from the Rust systems ecosystem:
 
-* **`tokio` & `bytes`:** Asynchronous networking layer built to handle thousands of concurrent TCP connections and manage raw binary streams via `BytesMut`.
-* **`bson`:** The official MongoDB BSON serialization crate to parse and manipulate dynamic incoming document structures.
-* **`crossbeam-channel`:** Ultra-fast multi-producer, single-consumer (MPSC) channels to route data from the network tasks to the single-threaded storage workers.
-* **`tantivy`:** The "Lucene of Rust". A blazing fast, memory-optimized full-text search engine library that replaces Elasticsearch weight.
-* **`datafusion` (Apache):** An extensible SQL query planner and execution framework used as the internal analytical brain of the database.
+* **`tokio` & `bytes`:** Asynchronous networking layer for thousands of concurrent TCP connections and raw binary streams via `BytesMut`.
+* **`bson`:** Official MongoDB BSON serialization for parsing and manipulating dynamic document structures.
+* **`crossbeam-channel`:** Ultra-fast MPSC channels for lock-free routing from network tasks to single-threaded storage workers.
+* **`tantivy`:** The "Lucene of Rust" — blazing fast, memory-optimized full-text search engine.
+* **`datafusion` (Apache):** Extensible SQL query planner and execution framework as the internal analytical brain.
+* **`sled` or custom page store** (Phase 5+): For disk-based page storage, or a custom implementation inspired by GraniteDB.
+* **`crc32fast`:** CRC32 checksums for WAL entries and page integrity verification.
 
 ---
 
-## 📂 Initial Codebase Structure
+## 📂 Codebase Structure
 
 The local source code is modularized into dedicated files inside the `kova/src/` directory:
 
-* `main.rs`: Application entry point, thread (worker) initialization, and global engine orchestration.
+* `main.rs`: Application entry point, Tokio runtime bootstrap, engine orchestration.
 * `network.rs`: Asynchronous TCP server and binary parser for the *MongoDB Wire Protocol* 16-byte header.
-* `storage.rs`: Implementation of the `PartitionWorker`, transactional execution loops, and isolated in-memory maps.
-* `search.rs`: Tokenization configurations, inverted index schemas, and relevance queries managed by `tantivy`.
-* `query_engine.rs`: Internal SQL parsing, optimization, and abstract syntax tree (AST) evaluation using Apache DataFusion.
+* `protocol/mod.rs`: Message types, opcodes, payload parsing, BSON enumerations, reply building.
+* `types/mod.rs`: Partition command enum, document model, query model, shared types.
+* `storage/mod.rs`: Partition worker, in-memory storage, `crossbeam-channel` routing.
+* `storage/wal.rs` *(Phase 5)*: Write-Ahead Log with CRC32 checksums, LSN tracking, segment rolling.
+* `storage/page.rs` *(Phase 5)*: Fixed-size page management with integrity verification.
+* `storage/buffer_pool.rs` *(Phase 5)*: LRU page cache with pin/unpin eviction.
+* `storage/disk.rs` *(Phase 5)*: Low-level disk I/O for page read/write.
+* `storage/engine.rs` *(Phase 5)*: Unified storage (WAL + buffer pool + disk + memory).
+* `storage/mvcc.rs` *(Phase 6)*: Multi-Version Concurrency Control, snapshot reads.
+* `storage/transaction.rs` *(Phase 6)*: Transaction manager (begin/commit/abort, conflict detection, timeout).
+* `search/mod.rs`: Tantivy indexes, tokenizers, relevance queries.
+* `index/btree.rs` *(Phase 7)*: B-Tree index for range queries + composite keys.
+* `index/hash_index.rs` *(Phase 7)*: Hash index for O(1) lookups.
+* `index/manager.rs` *(Phase 7)*: Index lifecycle management (create/drop/auto-maintain).
+* `replication/oplog.rs` *(Phase 8)*: Capped operations log for replication.
+* `replication/replica.rs` *(Phase 8)*: Replica set management, heartbeat, election.
+* `query_engine/mod.rs`: DataFusion integration, SQL parser, query optimizer, execution.
 
 ---
 
 ## 📈 Roadmap for the AI Coding Agent (Phase-by-Phase)
 
-1. **Phase 1 (Networking & Interception):** Spin up the TCP socket, intercept a MongoDB client handshake, and successfully parse the initial 16-byte binary header packet.
-2. **Phase 2 (Partition Isolation):** Bridge asynchronous network tasks to the single-threaded native storage worker using a custom `enum PartitionCommand` for lock-free `Insert` and `Find` pipelines.
-3. **Phase 3 (Lucene Indexing):** Embed `tantivy` inside the partition thread's lifecycle to automatically build inverted indexes alongside the main in-memory hash maps.
-4. **Phase 4 (Apache Query Optimization):** Plug in the query compiler layer to optimize execution plans over multi-partition datasets.
+1. **Phase 1 (Networking & Interception):** TCP socket, MongoDB client handshake, 16-byte binary header parsing. ✅ Complete.
+2. **Phase 2 (Partition Isolation):** `crossbeam-channel` routing, single-threaded partition workers, `PartitionCommand` enum. ✅ Complete.
+3. **Phase 3 (Lucene Indexing):** `tantivy` integration, hot indexing, `$text` queries. ✅ Complete.
+4. **Phase 3.5 (Search Flexibility):** Per-field indexes, `$text.$boost`, wildcards, `$text.$decay`, analyzer config, `kova.toml`. ✅ Complete.
+5. **Phase 4 (DataFusion SQL):** SQL parsing, plan extraction, `db.runCommand({ sql: "..." })`. 🔵 Current.
+6. **Phase 5 (Disk Storage Engine):** WAL, buffer pool, page-based storage, hybrid memory+disk. ⚪ Planned.
+7. **Phase 6 (Transactional Storage):** MVCC, ACID transactions, multiple isolation levels. ⚪ Planned.
+8. **Phase 7 (Indexing Subsystem):** B-Tree, Hash, Unique, Sparse indexes, index manager, auto-maintain, query planner integration. ⚪ Planned.
+9. **Phase 8 (Replication & HA):** Oplog, replica sets, heartbeat, election, read preference. ⚪ Planned.
