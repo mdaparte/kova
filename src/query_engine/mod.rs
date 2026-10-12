@@ -30,14 +30,22 @@ pub fn new_session() -> Session {
 }
 
 /// Registers a collection as a DataFusion table.
-pub fn register_collection(session: &Session, name: &str, documents: Arc<Vec<Document>>) -> DFResult<()> {
+pub fn register_collection(
+    session: &Session,
+    name: &str,
+    documents: Arc<Vec<Document>>,
+) -> DFResult<()> {
     let table = memory_table::MemoryTable::new(name, documents)?;
     session.register_table(name, Arc::new(table))?;
     Ok(())
 }
 
 /// Executes a SQL query against a fresh session pre-seeded with documents.
-pub async fn execute_sql(documents: Arc<Vec<Document>>, table_name: &str, sql: &str) -> DFResult<bson::Document> {
+pub async fn execute_sql(
+    documents: Arc<Vec<Document>>,
+    table_name: &str,
+    sql: &str,
+) -> DFResult<bson::Document> {
     let session = new_session();
     register_collection(&session, table_name, documents.clone())?;
 
@@ -56,8 +64,12 @@ pub async fn execute_sql(documents: Arc<Vec<Document>>, table_name: &str, sql: &
     })
 }
 
-fn convert_batches_to_bson(batches: &[datafusion::arrow::record_batch::RecordBatch]) -> DFResult<Vec<bson::Document>> {
-    use datafusion::arrow::array::{BooleanArray, Float64Array, Int32Array, Int64Array, StringArray};
+fn convert_batches_to_bson(
+    batches: &[datafusion::arrow::record_batch::RecordBatch],
+) -> DFResult<Vec<bson::Document>> {
+    use datafusion::arrow::array::{
+        BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
+    };
 
     let mut docs = Vec::with_capacity(batches.iter().map(|b| b.num_rows()).sum());
     for batch in batches {
@@ -70,41 +82,88 @@ fn convert_batches_to_bson(batches: &[datafusion::arrow::record_batch::RecordBat
                 let column = batch.column(col_idx);
                 let name = field.name().clone();
 
-                let bson_value = if column.data_type() == &datafusion::arrow::datatypes::DataType::Boolean {
-                    let arr = column.as_any().downcast_ref::<BooleanArray>().ok_or_else(|| {
-                        datafusion::error::DataFusionError::Internal(format!("expected BooleanArray for column {}", name))
-                    })?;
+                let bson_value = if column.data_type()
+                    == &datafusion::arrow::datatypes::DataType::Boolean
+                {
+                    let arr = column
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(format!(
+                                "expected BooleanArray for column {}",
+                                name
+                            ))
+                        })?;
                     if arr.is_null(row_idx) {
                         bson::Bson::Null
                     } else {
                         bson::Bson::Boolean(arr.value(row_idx))
                     }
                 } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Int32 {
-                    let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
-                        datafusion::error::DataFusionError::Internal(format!("expected Int32Array for column {}", name))
-                    })?;
+                    let arr = column
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(format!(
+                                "expected Int32Array for column {}",
+                                name
+                            ))
+                        })?;
                     if arr.is_null(row_idx) {
                         bson::Bson::Null
                     } else {
                         bson::Bson::Int32(arr.value(row_idx))
                     }
                 } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Int64 {
-                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                        datafusion::error::DataFusionError::Internal(format!("expected Int64Array for column {}", name))
-                    })?;
+                    let arr = column
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(format!(
+                                "expected Int64Array for column {}",
+                                name
+                            ))
+                        })?;
                     if arr.is_null(row_idx) {
                         bson::Bson::Null
                     } else {
                         bson::Bson::Int64(arr.value(row_idx))
                     }
                 } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Float64 {
-                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-                        datafusion::error::DataFusionError::Internal(format!("expected Float64Array for column {}", name))
-                    })?;
+                    let arr = column
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(format!(
+                                "expected Float64Array for column {}",
+                                name
+                            ))
+                        })?;
                     if arr.is_null(row_idx) {
                         bson::Bson::Null
                     } else {
                         bson::Bson::Double(arr.value(row_idx))
+                    }
+                } else if matches!(
+                    column.data_type(),
+                    datafusion::arrow::datatypes::DataType::Timestamp(
+                        datafusion::arrow::datatypes::TimeUnit::Millisecond,
+                        _
+                    )
+                ) {
+                    let arr = column
+                        .as_any()
+                        .downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(format!(
+                                "expected TimestampMillisecondArray for column {}",
+                                name
+                            ))
+                        })?;
+                    if arr.is_null(row_idx) {
+                        bson::Bson::Null
+                    } else {
+                        bson::Bson::DateTime(bson::DateTime::from_millis(arr.value(row_idx)))
                     }
                 } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Utf8
                     || column.data_type() == &datafusion::arrow::datatypes::DataType::LargeUtf8
@@ -113,7 +172,10 @@ fn convert_batches_to_bson(batches: &[datafusion::arrow::record_batch::RecordBat
                         .as_any()
                         .downcast_ref::<StringArray>()
                         .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(format!("expected StringArray for column {}", name))
+                            datafusion::error::DataFusionError::Internal(format!(
+                                "expected StringArray for column {}",
+                                name
+                            ))
                         })?;
                     if arr.is_null(row_idx) {
                         bson::Bson::Null
@@ -152,8 +214,9 @@ mod tests {
             doc! { "name": "Bob", "age": 25i32 },
         ]);
 
-        let result =
-            execute_sql(docs, "users", "SELECT * FROM users").await.expect("execute query");
+        let result = execute_sql(docs, "users", "SELECT * FROM users")
+            .await
+            .expect("execute query");
         assert_eq!(result.get_f64("ok").unwrap(), 1.0);
 
         let cursor = result.get_document("cursor").expect("cursor");
@@ -169,15 +232,17 @@ mod tests {
             doc! { "name": "Charlie", "age": 35i32 },
         ]);
 
-        let result =
-            execute_sql(docs, "users", "SELECT name FROM users WHERE age > 28")
-                .await
-                .expect("execute query");
+        let result = execute_sql(docs, "users", "SELECT name FROM users WHERE age > 28")
+            .await
+            .expect("execute query");
         assert_eq!(result.get_f64("ok").unwrap(), 1.0);
 
         let cursor = result.get_document("cursor").expect("cursor");
         let batch = cursor.get_array("firstBatch").expect("firstBatch");
-        let names: Vec<&str> = batch.iter().filter_map(|bson| bson.as_document().and_then(|doc| doc.get_str("name").ok())).collect();
+        let names: Vec<&str> = batch
+            .iter()
+            .filter_map(|bson| bson.as_document().and_then(|doc| doc.get_str("name").ok()))
+            .collect();
         assert!(names.contains(&"Alice"), "Alice should be in results");
         assert!(names.contains(&"Charlie"), "Charlie should be in results");
         assert!(!names.contains(&"Bob"), "Bob should not be in results");
@@ -191,6 +256,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_missing_numeric_field_and_object_id() {
+        // Mirrors a mongosh insert of the Oracle emp sample: KING has no
+        // mgr, and every document carries an ObjectId `_id`.
+        let docs = Arc::new(vec![
+            doc! {
+                "_id": bson::oid::ObjectId::new(),
+                "ename": "KING",
+                "sal": 5000i32,
+                "deptno": 10i32,
+            },
+            doc! {
+                "_id": bson::oid::ObjectId::new(),
+                "ename": "SCOTT",
+                "sal": 3000i32,
+                "mgr": 7566i32,
+                "deptno": 20i32,
+            },
+            doc! {
+                "_id": bson::oid::ObjectId::new(),
+                "ename": "SMITH",
+                "sal": 800i32,
+                "mgr": 7902i32,
+                "deptno": 20i32,
+            },
+        ]);
+
+        let result = execute_sql(docs, "emp", "select ename from emp where sal > 2000")
+            .await
+            .expect("execute query");
+        let cursor = result.get_document("cursor").expect("cursor");
+        let batch = cursor.get_array("firstBatch").expect("firstBatch");
+        let names: Vec<&str> = batch
+            .iter()
+            .filter_map(|row| row.as_document().and_then(|doc| doc.get_str("ename").ok()))
+            .collect();
+        assert!(
+            names.contains(&"KING"),
+            "KING must survive a null mgr: {names:?}"
+        );
+        assert!(names.contains(&"SCOTT"));
+        assert!(!names.contains(&"SMITH"));
+    }
+
+    #[tokio::test]
+    async fn test_datetime_round_trips_as_bson_date() {
+        let hired = bson::DateTime::from_millis(345_859_200_000); // 1980-12-17 UTC
+        let docs = Arc::new(vec![doc! {
+            "ename": "SMITH",
+            "hiredate": hired,
+            "sal": 800i32,
+        }]);
+
+        let result = execute_sql(docs, "emp", "select ename, hiredate from emp")
+            .await
+            .expect("execute query");
+        let cursor = result.get_document("cursor").expect("cursor");
+        let batch = cursor.get_array("firstBatch").expect("firstBatch");
+        let row = batch[0].as_document().expect("row");
+        assert_eq!(
+            row.get_datetime("hiredate")
+                .expect("hiredate")
+                .timestamp_millis(),
+            hired.timestamp_millis()
+        );
+    }
+
+    #[tokio::test]
     async fn test_numeric_where_clause() {
         let docs = Arc::new(vec![
             doc! { "name": "Alice", "age": 30i32 },
@@ -198,10 +330,9 @@ mod tests {
             doc! { "name": "Charlie", "age": 35i32 },
         ]);
 
-        let result =
-            execute_sql(docs, "users", "SELECT * FROM users WHERE age > 25")
-                .await
-                .expect("execute query");
+        let result = execute_sql(docs, "users", "SELECT * FROM users WHERE age > 25")
+            .await
+            .expect("execute query");
         assert_eq!(result.get_f64("ok").unwrap(), 1.0);
 
         let cursor = result.get_document("cursor").expect("cursor");

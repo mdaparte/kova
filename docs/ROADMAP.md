@@ -26,7 +26,7 @@ replication, and multi-model indexing.
 
 ## Phase 1 — Networking & Interception ✅
 
-- TCP listener (default port 27017, overridable via `KOVA_PORT`).
+- TCP listener (default port 27018, overridable via `KOVA_PORT`).
 - 16-byte Wire Protocol header parsed in **little-endian**.
 - `OP_MSG (2013)` and legacy `OP_QUERY (2004)` handled; OP_QUERY answered with `OP_REPLY (1)`.
 - Handshake answered at the protocol layer: `ping`, `hello`, `isMaster`/`ismaster`,
@@ -285,7 +285,7 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
    recovery on startup.
 3. **ACID transactions**: MVCC for snapshot reads, conflict detection, multiple
    isolation levels.
-4. **Native MongoDB**: port 27017, `OP_MSG` (+ legacy `OP_QUERY`), little-endian
+4. **Native MongoDB**: port 27018, `OP_MSG` (+ legacy `OP_QUERY`), little-endian
    wire format, BSON parsing, `db.runCommand({ sql: "..." })` for SQL.
 5. **Multi-model indexing**: B-Tree (range), Hash (O(1)), Unique, Sparse, and
    Full-Text (Tantivy) — all auto-maintained on write.

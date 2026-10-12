@@ -47,7 +47,7 @@ This makes Kova an ideal solution for **Edge Computing/IoT environments** (where
 * **MVCC + ACID Transactions:** Multi-Version Concurrency Control with snapshot reads, multiple isolation levels (Read Uncommitted, Read Committed, Repeatable Read, Snapshot, Serializable), conflict detection, and automatic transaction timeout.
 
 ### 2. Native MongoDB Interoperability (The Wire Protocol)
-* **Drop-in Compatibility:** Kova exposes a server on port 27017 that speaks the native MongoDB wire protocol (`OP_MSG`, legacy `OP_QUERY`). Any application using official MongoDB drivers connects seamlessly.
+* **Drop-in Compatibility:** Kova exposes a server on port 27018 that speaks the native MongoDB wire protocol (`OP_MSG`, legacy `OP_QUERY`). Any application using official MongoDB drivers connects seamlessly.
 * **SQL via MongoDB:** `db.runCommand({ sql: "SELECT ... FROM ... WHERE ..." })` is accepted and executed via DataFusion, returning result sets as BSON.
 
 ### 3. Integrated Advanced Search (Tantivy Equivalent)

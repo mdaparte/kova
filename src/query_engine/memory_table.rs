@@ -9,12 +9,12 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bson::Document;
+use datafusion::arrow::datatypes::DataType;
 use datafusion::common::ScalarValue;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DFResult;
-use async_trait::async_trait;
-use datafusion::arrow::datatypes::DataType;
 
 /// A DataFusion table backed by a Kova in-memory collection.
 ///
@@ -121,11 +121,7 @@ impl TableProvider for MemoryTable {
         // on MemTable internals (which are private in this crate).
         let partitions = build_partitions(&self.documents, &self.schema())?;
 
-        let exec = MemoryExec::try_new(
-            &partitions,
-            self.schema(),
-            projection.map(|p| p.to_vec()),
-        )?;
+        let exec = MemoryExec::try_new(&partitions, self.schema(), projection.map(|p| p.to_vec()))?;
 
         Ok(Arc::new(exec))
     }
@@ -150,8 +146,9 @@ fn infer_schema(documents: &[Document]) -> DFResult<datafusion::arrow::datatypes
     use std::collections::BTreeSet;
 
     if documents.is_empty() {
-        let schema =
-            datafusion::arrow::datatypes::Schema::new(Vec::<datafusion::arrow::datatypes::Field>::new());
+        let schema = datafusion::arrow::datatypes::Schema::new(Vec::<
+            datafusion::arrow::datatypes::Field,
+        >::new());
         return Ok(Arc::new(schema));
     }
 
@@ -168,8 +165,9 @@ fn infer_schema(documents: &[Document]) -> DFResult<datafusion::arrow::datatypes
     }
 
     if field_names.is_empty() {
-        let schema =
-            datafusion::arrow::datatypes::Schema::new(Vec::<datafusion::arrow::datatypes::Field>::new());
+        let schema = datafusion::arrow::datatypes::Schema::new(Vec::<
+            datafusion::arrow::datatypes::Field,
+        >::new());
         return Ok(Arc::new(schema));
     }
 
@@ -195,16 +193,28 @@ fn infer_schema(documents: &[Document]) -> DFResult<datafusion::arrow::datatypes
 fn infer_data_type(values: &[&bson::Bson]) -> datafusion::arrow::datatypes::DataType {
     use bson::Bson;
 
-    if values.is_empty() {
+    // Explicit nulls do not vote: a missing commission is still a number.
+    let present: Vec<&Bson> = values
+        .iter()
+        .copied()
+        .filter(|value| !matches!(value, Bson::Null))
+        .collect();
+
+    if present.is_empty() {
         return DataType::Null;
     }
 
-    let all_int32 = values.iter().all(|v| matches!(v, Bson::Int32(_)));
-    let all_int64 = values.iter().all(|v| matches!(v, Bson::Int64(_)));
-    let all_double = values.iter().all(|v| matches!(v, Bson::Double(_)));
-    let all_bool = values.iter().all(|v| matches!(v, Bson::Boolean(_)));
-    let all_string = values.iter().all(|v| matches!(v, Bson::String(_)));
+    let all_int32 = present.iter().all(|v| matches!(v, Bson::Int32(_)));
+    let all_int64 = present.iter().all(|v| matches!(v, Bson::Int64(_)));
+    let all_double = present.iter().all(|v| matches!(v, Bson::Double(_)));
+    let all_bool = present.iter().all(|v| matches!(v, Bson::Boolean(_)));
+    let all_string = present.iter().all(|v| matches!(v, Bson::String(_)));
+    let all_object_id = present.iter().all(|v| matches!(v, Bson::ObjectId(_)));
+    let all_datetime = present.iter().all(|v| matches!(v, Bson::DateTime(_)));
 
+    if all_datetime {
+        return DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None);
+    }
     if all_int32 {
         return DataType::Int32;
     }
@@ -217,7 +227,8 @@ fn infer_data_type(values: &[&bson::Bson]) -> datafusion::arrow::datatypes::Data
     if all_bool {
         return DataType::Boolean;
     }
-    if all_string {
+    if all_string || all_object_id {
+        // ObjectIds are stored as hex strings, matching `bson_to_scalar`.
         return DataType::Utf8;
     }
 
@@ -240,7 +251,6 @@ fn build_record_batches(
     schema: &datafusion::arrow::datatypes::SchemaRef,
 ) -> DFResult<Vec<datafusion::arrow::record_batch::RecordBatch>> {
     use datafusion::common::ScalarValue;
-    use datafusion::arrow::datatypes::DataType;
 
     let num_rows = documents.len();
     if num_rows == 0 {
@@ -253,49 +263,33 @@ fn build_record_batches(
         .map(|field| {
             let scalars: Vec<ScalarValue> = documents
                 .iter()
-                .map(|doc| {
-                    match doc.get(field.name().as_str()) {
-                        Some(bson) => MemoryTable::bson_to_scalar(bson),
-                        None => null_scalar_for_data_type(&field.data_type()),
-                    }
+                .map(|doc| match doc.get(field.name().as_str()) {
+                    Some(bson) => MemoryTable::bson_to_scalar(bson),
+                    None => null_scalar_for_data_type(&field.data_type()),
                 })
                 .collect();
-
 
             ScalarValue::iter_to_array(scalars.into_iter()).unwrap_or_else(|_| {
                 // If iter_to_array still fails (unexpected mixed types), build
                 // a NullArray as a last resort so the query can still run.
-                Arc::new(
-                    datafusion::arrow::array::NullArray::new(num_rows),
-                ) as datafusion::arrow::array::ArrayRef
+                Arc::new(datafusion::arrow::array::NullArray::new(num_rows))
+                    as datafusion::arrow::array::ArrayRef
             })
         })
         .collect();
 
-    let batch = datafusion::arrow::record_batch::RecordBatch::try_new(
-        schema.clone(),
-        columns,
-    )?;
+    let batch = datafusion::arrow::record_batch::RecordBatch::try_new(schema.clone(), columns)?;
 
     Ok(vec![batch])
 }
 
-/// Returns a null scalar value that is compatible with the given column type.
+/// Returns a null scalar of the same Arrow type as the column.
+///
+/// A missing `mgr` on an Int32 column must be `Int32(None)`. A wider null
+/// (Int64, or an untyped Null) makes the batch fail with "expected Int32
+/// but found Null", which is what `where sal > 2000` hit on the emp sample.
 fn null_scalar_for_data_type(data_type: &DataType) -> ScalarValue {
-    match data_type {
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
-            ScalarValue::Utf8(None)
-        }
-        DataType::Boolean => ScalarValue::Boolean(None),
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-            ScalarValue::Int64(None)
-        }
-        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-            ScalarValue::UInt64(None)
-        }
-        DataType::Float32 | DataType::Float64 => ScalarValue::Float64(None),
-        _ => ScalarValue::Null,
-    }
+    ScalarValue::try_from(data_type).unwrap_or(ScalarValue::Null)
 }
 
 #[cfg(test)]
@@ -315,11 +309,7 @@ mod tests {
         assert_eq!(table.documents.len(), 2);
 
         let schema = table.schema();
-        let field_names: Vec<&str> = schema
-            .fields()
-            .iter()
-            .map(|f| f.name().as_str())
-            .collect();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(field_names.contains(&"name"));
         assert!(field_names.contains(&"age"));
         assert!(field_names.contains(&"city"));
@@ -359,10 +349,7 @@ mod tests {
             MemoryTable::bson_to_scalar(&Bson::Boolean(true)),
             ScalarValue::Boolean(Some(true))
         );
-        assert_eq!(
-            MemoryTable::bson_to_scalar(&Bson::Null),
-            ScalarValue::Null
-        );
+        assert_eq!(MemoryTable::bson_to_scalar(&Bson::Null), ScalarValue::Null);
     }
 
     #[tokio::test]
@@ -377,7 +364,8 @@ mod tests {
         let table = MemoryTable::new("users", docs).expect("create table");
 
         let ctx = SessionContext::new();
-        ctx.register_table("users", Arc::new(table)).expect("register table");
+        ctx.register_table("users", Arc::new(table))
+            .expect("register table");
 
         let df = ctx.sql("SELECT * FROM users").await.expect("sql");
         let results = df.collect().await.expect("collect");

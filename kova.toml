@@ -5,8 +5,9 @@
 # Point KOVA_CONFIG at another file to load a different profile.
 
 # TCP port for the MongoDB wire protocol listener.
+# 27018 keeps Kova off the port a local mongod already uses.
 # Env: KOVA_PORT
-port = 27017
+port = 27018
 
 # Minimum log level: "debug" | "info" | "warn" | "error".
 # Env: KOVA_LOG_LEVEL

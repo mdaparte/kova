@@ -110,9 +110,9 @@ static REPLY_REQUEST_ID: AtomicI32 = AtomicI32::new(1);
 ///
 /// ## Port
 ///
-/// The default port is `27017` (the standard MongoDB port). It can be
-/// changed in `kova.toml` or overridden with the `KOVA_PORT` environment
-/// variable (environment wins over file).
+/// The default port is `27018`, so a local mongod can keep `27017`.
+/// It can be changed in `kova.toml` or overridden with the `KOVA_PORT`
+/// environment variable (environment wins over file).
 pub async fn start_server(router: PartitionRouter) -> std::io::Result<()> {
     let port = resolve_port();
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
@@ -143,10 +143,7 @@ pub async fn start_server(router: PartitionRouter) -> std::io::Result<()> {
 /// Each iteration reads the 16-byte header, then the remaining
 /// `messageLength - 16` bytes, decodes the OP_MSG body, executes the
 /// command through the router and writes the reply.
-async fn handle_client(
-    socket: &mut TcpStream,
-    router: &PartitionRouter,
-) -> std::io::Result<()> {
+async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std::io::Result<()> {
     loop {
         // ---- header ------------------------------------------------
         // `with_capacity` only reserves memory; the length must be set
@@ -191,9 +188,7 @@ async fn handle_client(
         }
 
         // ---- body --------------------------------------------------
-        let body_len = header
-            .message_length
-            .saturating_sub(HEADER_SIZE as u32) as usize;
+        let body_len = header.message_length.saturating_sub(HEADER_SIZE as u32) as usize;
 
         if body_len > 0 {
             let mut body_buf = BytesMut::with_capacity(body_len);
@@ -230,9 +225,7 @@ async fn handle_client(
                     header.request_id, header.message_length
                 ));
 
-                if let Err(err) =
-                    process_op_query(&header, &body_buf, router, socket).await
-                {
+                if let Err(err) = process_op_query(&header, &body_buf, router, socket).await {
                     LOGGER.warn(format!("Failed to process OP_QUERY: {}", err));
                 }
             } else {
@@ -404,18 +397,31 @@ async fn execute_command(
 
 /// Extracts a table/collection name from a simple SQL FROM clause.
 ///
-/// This is intentionally minimal for Phase 4: we look for the first token
-/// after "FROM" (case-insensitive) and return it. It does not handle
-/// joins, subqueries, or complex SQL.
+/// The keyword match is case-insensitive, but the identifier is returned
+/// with its original spelling. MongoDB collection names are case-sensitive,
+/// so uppercasing `users` into `USERS` loads an empty collection: `SELECT *`
+/// comes back with no rows, and `WHERE age > 25` fails with "No field named
+/// age" because the empty snapshot has no columns.
+///
+/// This is intentionally minimal for Phase 4. It does not handle joins,
+/// subqueries, or schema-qualified names.
 fn sql_table_name(sql: &str) -> Option<String> {
-    let upper = sql.to_uppercase();
-    let from_pos = upper.find("FROM")?;
-    let after_from = &upper[from_pos + 4..];
+    let bytes = sql.as_bytes();
+    let from_pos = (0..bytes.len().saturating_sub(3)).find(|&index| {
+        let word = &bytes[index..index + 4];
+        word.eq_ignore_ascii_case(b"from")
+            && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric())
+            && (index + 4 >= bytes.len() || !bytes[index + 4].is_ascii_alphanumeric())
+    })?;
+
+    let after_from = sql.get(from_pos + 4..)?;
     let trimmed = after_from.trim_start();
     let end = trimmed
         .find(|c: char| c.is_whitespace() || c == '(' || c == ',' || c == ';')
         .unwrap_or(trimmed.len());
-    let name = trimmed[..end].trim();
+    let name = trimmed[..end]
+        .trim()
+        .trim_matches(|c| c == '"' || c == '`' || c == '\'');
     if name.is_empty() {
         None
     } else {
@@ -455,10 +461,7 @@ async fn load_collection_documents(
 ///
 /// The reply namespace follows MongoDB's own format,
 /// `<db>.$cmd.listCollections`.
-async fn list_collections(
-    command: &bson::Document,
-    router: &PartitionRouter,
-) -> bson::Document {
+async fn list_collections(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
     let partition_command = match protocol::command_from_document(command) {
         Ok(partition_command) => partition_command,
         Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
@@ -502,10 +505,7 @@ async fn list_collections(
 ///
 /// Every worker drops the share of the database it owns; the reply
 /// names the database like MongoDB's own `{dropped: "<db>"}`.
-async fn drop_database(
-    command: &bson::Document,
-    router: &PartitionRouter,
-) -> bson::Document {
+async fn drop_database(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
     let partition_command = match protocol::command_from_document(command) {
         Ok(partition_command) => partition_command,
         Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
@@ -541,10 +541,7 @@ async fn drop_database(
 ///
 /// One database's collections hash across partitions, so no single
 /// worker knows the whole picture; the totals are summed here.
-async fn database_stats(
-    command: &bson::Document,
-    router: &PartitionRouter,
-) -> bson::Document {
+async fn database_stats(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
     let partition_command = match protocol::command_from_document(command) {
         Ok(partition_command) => partition_command,
         Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
@@ -605,10 +602,7 @@ async fn database_stats(
 /// A database may live on several partitions (its collections hash
 /// across workers); the merged entry is `empty` only when every
 /// partition reported it empty.
-async fn list_databases(
-    command: &bson::Document,
-    router: &PartitionRouter,
-) -> bson::Document {
+async fn list_databases(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
     let partition_command = match protocol::command_from_document(command) {
         Ok(partition_command) => partition_command,
         Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
@@ -616,15 +610,12 @@ async fn list_databases(
 
     // name -> empty; a database is non-empty once any partition says
     // it holds documents.
-    let mut emptiness: std::collections::BTreeMap<String, bool> =
-        std::collections::BTreeMap::new();
+    let mut emptiness: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     for rx in router.broadcast(partition_command) {
         match rx.await {
             Ok(PartitionResult::ListedDatabases { databases }) => {
                 for database in databases {
-                    let Some(name) =
-                        database.get_str("name").ok().map(str::to_string)
-                    else {
+                    let Some(name) = database.get_str("name").ok().map(str::to_string) else {
                         continue;
                     };
                     let empty = database.get_bool("empty").unwrap_or(false);
@@ -716,6 +707,77 @@ mod tests {
         bytes[8..12].copy_from_slice(&response_to.to_le_bytes());
         bytes[12..16].copy_from_slice(&op_code.to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn test_sql_table_name_keeps_collection_case() {
+        // mongosh sends lowercase SQL. Uppercasing the identifier used to
+        // look up `USERS` and return an empty snapshot.
+        assert_eq!(
+            sql_table_name("select * from users where age > 25").as_deref(),
+            Some("users")
+        );
+        assert_eq!(
+            sql_table_name("SELECT * FROM users").as_deref(),
+            Some("users")
+        );
+        assert_eq!(
+            sql_table_name("select * from \"users\"").as_deref(),
+            Some("users")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_server_runs_sql_against_stored_documents() {
+        let router = PartitionRouter::new(1);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test port");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server_router = router.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let client_router = server_router.clone();
+                tokio::spawn(async move {
+                    let _ = handle_client(&mut socket, &client_router).await;
+                });
+            }
+        });
+
+        let insert = bson::doc! {
+            "insert": "users",
+            "$db": "shop",
+            "documents": [
+                { "name": "Ada", "age": 30i32 },
+                { "name": "Bob", "age": 25i32 },
+            ],
+        };
+        let frame = protocol::encode_reply(1, 0, &insert).expect("encode");
+        let (inserted, _) = send_and_read_reply(addr, frame).await;
+        assert_eq!(inserted.command.get_f64("ok").expect("ok"), 1.0);
+
+        let query = bson::doc! {
+            "sql": "select * from users where age > 25",
+            "$db": "shop",
+        };
+        let frame = protocol::encode_reply(2, 0, &query).expect("encode");
+        let (reply, _) = send_and_read_reply(addr, frame).await;
+        assert_eq!(
+            reply.command.get_f64("ok").expect("ok"),
+            1.0,
+            "sql must run against shop.users: {:?}",
+            reply.command
+        );
+
+        let cursor = reply.command.get_document("cursor").expect("cursor");
+        let batch = cursor.get_array("firstBatch").expect("firstBatch");
+        assert_eq!(batch.len(), 1, "only Ada is older than 25: {:?}", batch);
+        let row = batch[0].as_document().expect("row");
+        assert_eq!(row.get_str("name").expect("name"), "Ada");
     }
 
     #[test]
@@ -963,8 +1025,7 @@ mod tests {
         let mut body_buf = vec![0u8; body_len];
         client.read_exact(&mut body_buf).await.expect("reply body");
 
-        let number_returned =
-            i32::from_le_bytes(body_buf[16..20].try_into().unwrap());
+        let number_returned = i32::from_le_bytes(body_buf[16..20].try_into().unwrap());
         assert_eq!(number_returned, 1);
 
         let doc: bson::Document = bson::from_slice(&body_buf[20..]).expect("decode reply doc");

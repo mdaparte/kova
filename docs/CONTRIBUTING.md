@@ -9,7 +9,7 @@
 
 Kova is an ultra-high-performance, **hybrid memory+disk** database engine
 written in Rust. It presents a native MongoDB Wire Protocol interface on
-port 27017, processes hot data in RAM (in-memory hash maps + buffer pool
+port 27018, processes hot data in RAM (in-memory hash maps + buffer pool
 cache), persists data durably to disk via Write-Ahead Logging (WAL) with
 CRC32 checksums and LSN tracking, and unifies transactional writes (MVCC +
 ACID), full-text search (Tantivy), multi-model indexing (B-Tree, Hash,
@@ -109,8 +109,8 @@ parser + optimizer), Tantivy (full-text search).
 ### 3.5 Logging
 
 - Use `eprintln!` with the `[Kova]` prefix for all engine diagnostics:
-  - `[Kova] Servidor de rede iniciado na porta 27017` →
-    `[Kova] Network server started on port 27017`
+  - `[Kova] Servidor de rede iniciado na porta 27018` →
+    `[Kova] Network server started on port 27018`
   - `[Kova] Conexão recebida de 127.0.0.1:45678` →
     `[Kova] Connection received from 127.0.0.1:45678`
 - Production logs MUST be written to `stderr` only. File/syslog logging

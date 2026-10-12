@@ -7,8 +7,8 @@ mod search;
 mod storage;
 mod types;
 
-use std::panic;
 use std::io::Write;
+use std::panic;
 
 fn register_panic_hook() {
     panic::set_hook(Box::new(|info| {
@@ -24,8 +24,11 @@ fn register_panic_hook() {
         } else {
             String::new()
         };
+        let stamp = logger::format_timestamp(logger::now_millis());
         let mut buf = Vec::with_capacity(256);
-        buf.extend_from_slice(b"[Kova] ERROR - panic");
+        buf.extend_from_slice(b"[Kova] ");
+        buf.extend_from_slice(stamp.as_bytes());
+        buf.extend_from_slice(b" ERROR - panic");
         buf.extend_from_slice(location.as_bytes());
         buf.extend_from_slice(b": ");
         buf.extend_from_slice(msg.as_bytes());

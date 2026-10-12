@@ -36,14 +36,18 @@ const LOG_LEVEL_ENV: &str = "KOVA_LOG_LEVEL";
 const WARN_ENV: &str = "KOVA_WARN_NON_MONGO_QUERIES";
 
 /// Default TCP port (the standard MongoDB port).
-const DEFAULT_PORT: u16 = 27017;
+const DEFAULT_PORT: u16 = 27018;
 
 /// The global configuration, resolved on first access.
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     Config::load().unwrap_or_else(|err| {
         // Unrecoverable: refusing to start beats running with settings
         // the operator never chose.
-        eprintln!("[Kova] CONFIG ERROR: {}", err);
+        eprintln!(
+            "[Kova] {} CONFIG ERROR: {}",
+            crate::logger::format_timestamp(crate::logger::now_millis()),
+            err
+        );
         std::process::exit(1);
     })
 });
@@ -205,9 +209,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_defaults_match_mongodb_conventions() {
+    fn test_builtin_defaults() {
         let config = Config::default();
-        assert_eq!(config.port, 27017);
+        assert_eq!(config.port, 27018);
         assert_eq!(config.log_level(), Level::Info);
         assert!(config.warn_on_non_mongo_queries);
         assert_eq!(config.search, SearchConfig::default());
@@ -217,7 +221,7 @@ mod tests {
     fn test_from_toml_overrides_defaults() {
         let config = Config::from_toml(
             r#"
-            port = 27018
+            port = 27019
             log_level = "debug"
             warn_on_non_mongo_queries = false
 
@@ -228,7 +232,7 @@ mod tests {
         )
         .expect("valid toml");
 
-        assert_eq!(config.port, 27018);
+        assert_eq!(config.port, 27019);
         assert_eq!(config.log_level(), Level::Debug);
         assert!(!config.warn_on_non_mongo_queries);
         assert_eq!(config.search.analyzer, "en_stem");

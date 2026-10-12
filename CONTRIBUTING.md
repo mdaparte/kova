@@ -8,7 +8,7 @@
 ## 1. Project Purpose
 
 Kova is an ultra-high-performance, in-memory database engine written in
-Rust. It presents a native MongoDB Wire Protocol interface on port 27017,
+Rust. It presents a native MongoDB Wire Protocol interface on port 27018,
 processes data entirely in RAM, and unifies transactional writes, full-text
 search (tantivy), and analytical query planning (Apache DataFusion) in a
 single process.
@@ -69,8 +69,8 @@ single process.
 ### 3.5 Logging
 
 - Use `eprintln!` with the `[Kova]` prefix for all engine diagnostics:
-  - `[Kova] Servidor de rede iniciado na porta 27017` →
-    `[Kova] Network server started on port 27017`
+  - `[Kova] Servidor de rede iniciado na porta 27018` →
+    `[Kova] Network server started on port 27018`
   - `[Kova] Conexão recebida de 127.0.0.1:45678` →
     `[Kova] Connection received from 127.0.0.1:45678`
 - Production logs MUST be written to `stderr` only. File/syslog logging

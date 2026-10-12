@@ -97,22 +97,43 @@ pub fn decode_op_msg(body: &[u8]) -> Result<OpMsg, String> {
                 offset += consumed;
             }
             1 => {
-                // Document sequence: identifier cstring, then the
-                // documents. The command is incomplete without them,
-                // so they are folded back under the identifier.
-                let payload = &sections[offset..];
-                let nul = payload
+                // Document sequence (wire spec):
+                //   int32 size — bytes in this sequence, including itself
+                //   cstring identifier — "documents", "updates", "deletes"
+                //   zero or more BSON documents
+                // Drivers send insert payloads this way. The size is not
+                // part of the identifier; skipping it makes the next NUL
+                // inside the size field end the name early, and the BSON
+                // reader then treats "\0\0do" from "documents" as a length
+                // (1868824576).
+                if sections.len() - offset < 4 {
+                    return Err("OP_MSG section 1 is missing its size".to_string());
+                }
+                let size = i32::from_le_bytes(
+                    sections[offset..offset + 4]
+                        .try_into()
+                        .map_err(|_| "section 1 size must be 4 bytes".to_string())?,
+                ) as usize;
+                if size < 5 || offset + size > sections.len() {
+                    return Err(format!(
+                        "OP_MSG section 1 size {} out of range for {} available bytes",
+                        size,
+                        sections.len() - offset
+                    ));
+                }
+                let after_size = &sections[offset + 4..offset + size];
+                let nul = after_size
                     .iter()
                     .position(|byte| *byte == 0)
                     .ok_or_else(|| "section 1 identifier is not terminated".to_string())?;
-                let identifier = std::str::from_utf8(&payload[..nul])
+                let identifier = std::str::from_utf8(&after_size[..nul])
                     .map_err(|_| "section 1 identifier is not UTF-8".to_string())?
                     .to_string();
 
                 let mut cursor = nul + 1;
                 let mut sequence = Vec::new();
-                while cursor < payload.len() {
-                    let (document, consumed) = read_bson(&payload[cursor..])?;
+                while cursor < after_size.len() {
+                    let (document, consumed) = read_bson(&after_size[cursor..])?;
                     sequence.push(bson::Bson::Document(document));
                     cursor += consumed;
                 }
@@ -121,7 +142,7 @@ pub fn decode_op_msg(body: &[u8]) -> Result<OpMsg, String> {
                     .as_mut()
                     .ok_or_else(|| "OP_MSG section 1 precedes section 0".to_string())?;
                 command.insert(identifier, bson::Bson::Array(sequence));
-                offset += cursor;
+                offset += size;
             }
             other => {
                 return Err(format!("unsupported OP_MSG section kind {}", other));
@@ -760,7 +781,7 @@ fn get_parameter_reply(command: &Document) -> Document {
 /// is the legacy `mongo` shell, not `mongosh`. That legacy shell only
 /// speaks wire protocol up to version 17 (MongoDB 5.0). When Kova
 /// advertised 8.2 / wire version 27, the bundled shell exited
-/// immediately with "unable to open shell". 
+/// immediately with "unable to open shell".
 ///
 /// Real MongoDB servers >= 5.0 already require mongosh, but Studio 3T
 /// still bundles the legacy mongo shell for backwards compatibility.
@@ -944,30 +965,56 @@ mod tests {
         assert_eq!(msg.command.get_str("insert").unwrap(), "users");
     }
 
+    /// Appends a kind-1 document sequence: size, identifier, documents.
+    ///
+    /// `size` counts every byte after the kind byte, including itself.
+    fn push_document_sequence(body: &mut Vec<u8>, identifier: &str, documents: &[Document]) {
+        let mut sequence = Vec::new();
+        sequence.extend_from_slice(&[0, 0, 0, 0]);
+        sequence.extend_from_slice(identifier.as_bytes());
+        sequence.push(0);
+        for document in documents {
+            sequence.extend(to_vec(document).expect("encode"));
+        }
+        let size = (sequence.len() as i32).to_le_bytes();
+        sequence[..4].copy_from_slice(&size);
+        body.push(1u8);
+        body.extend(sequence);
+    }
+
     #[test]
     fn test_decode_op_msg_with_document_sequence_section() {
-        // The Java driver (Studio 3T, Spring Data) splits insert /
+        // Drivers (mongosh, Studio 3T, Spring Data) split insert /
         // update / delete payloads into a kind-1 section: the command
-        // document, then an identifier and the document sequence. The
-        // documents must be folded back under the identifier.
-        let command = doc! { "insert": "users", "$db": "shop" };
+        // document, then a sized sequence. The documents must be folded
+        // back under the identifier.
+        let command = doc! { "insert": "users", "ordered": true, "$db": "shop" };
         let mut body = 0u32.to_le_bytes().to_vec(); // flagBits = 0
         body.push(0u8); // section kind 0
         body.extend(to_vec(&command).expect("encode"));
-        body.push(1u8); // section kind 1 (document sequence)
-        body.extend_from_slice(b"documents\0"); // identifier
-        body.extend(to_vec(&doc! { "name": "Ada" }).expect("encode"));
-        body.extend(to_vec(&doc! { "name": "Grace" }).expect("encode"));
+        push_document_sequence(
+            &mut body,
+            "documents",
+            &[
+                doc! { "name": "Ada" },
+                doc! { "_id": "u1", "name": "Grace" },
+            ],
+        );
 
         let msg = decode_op_msg(&body).expect("decode");
         assert_eq!(msg.command.get_str("insert").unwrap(), "users");
         assert_eq!(msg.command.get_str("$db").unwrap(), "shop");
+        assert!(msg.command.get_bool("ordered").unwrap());
 
         let documents = msg.command.get_array("documents").expect("documents");
         assert_eq!(documents.len(), 2, "both sequenced docs must survive");
         assert_eq!(
             documents[0].as_document().unwrap().get_str("name").unwrap(),
             "Ada"
+        );
+        assert_eq!(
+            documents[1].as_document().unwrap().get_str("_id").unwrap(),
+            "u1"
         );
     }
 
@@ -1006,7 +1053,8 @@ mod tests {
             0x00, // string "$db" = "admin"
             0x00, // BSON terminator
             0xDE, 0xAD, 0xBE, 0xEF, // checksum
-        ];        let msg = decode_op_msg(BODY).expect("Studio 3T handshake must decode");
+        ];
+        let msg = decode_op_msg(BODY).expect("Studio 3T handshake must decode");
         assert_eq!(msg.flag_bits, 1);
         assert_eq!(msg.command.get_i32("whatsmyuri").unwrap(), 1);
         assert_eq!(msg.command.get_str("$db").unwrap(), "admin");
@@ -1058,9 +1106,7 @@ mod tests {
         // put its documents; failing is better than silently dropping
         // the payload.
         let mut body = vec![0u8, 0u8, 0u8, 0u8]; // flagBits = 0
-        body.push(1u8);
-        body.extend_from_slice(b"documents\0");
-        body.extend(to_vec(&doc! { "a": 1i32 }).expect("encode"));
+        push_document_sequence(&mut body, "documents", &[doc! { "a": 1i32 }]);
         let err = decode_op_msg(&body).expect_err("must fail");
         assert!(err.contains("precedes section 0"), "got: {}", err);
     }
@@ -1569,19 +1615,29 @@ mod tests {
 
     #[test]
     fn test_special_command_host_info() {
-        let reply = special_command(&doc! { "hostInfo": 1.0 })
-            .expect("hostInfo must be answered");
+        let reply = special_command(&doc! { "hostInfo": 1.0 }).expect("hostInfo must be answered");
         assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
-        assert!(reply.get_str("system").unwrap().contains("macos") || reply.get_str("system").unwrap().contains("darwin"), "system field must contain platform");
-        assert!(reply.get_str("cpu").unwrap().contains("x86_64") || reply.get_str("cpu").unwrap().contains("aarch64"), "cpu field must contain architecture");
+        assert!(
+            reply.get_str("system").unwrap().contains("macos")
+                || reply.get_str("system").unwrap().contains("darwin"),
+            "system field must contain platform"
+        );
+        assert!(
+            reply.get_str("cpu").unwrap().contains("x86_64")
+                || reply.get_str("cpu").unwrap().contains("aarch64"),
+            "cpu field must contain architecture"
+        );
     }
 
     #[test]
     fn test_special_command_atlas_version() {
-        let reply = special_command(&doc! { "atlasVersion": 1.0 })
-            .expect("atlasVersion must be answered");
+        let reply =
+            special_command(&doc! { "atlasVersion": 1.0 }).expect("atlasVersion must be answered");
         assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
-        assert!(reply.get("version").unwrap().as_null().is_some(), "atlasVersion must be null for non-Atlas servers");
+        assert!(
+            reply.get("version").unwrap().as_null().is_some(),
+            "atlasVersion must be null for non-Atlas servers"
+        );
     }
 
     #[test]

@@ -70,23 +70,18 @@ pub struct LogRecord {
     pub message: String,
     /// Structured key-value payloads.
     pub fields: Vec<(String, String)>,
-    /// The monotonic timestamp of the record (milliseconds since UNIX epoch).
+    /// Wall-clock time of the record, milliseconds since the UNIX epoch.
     pub timestamp: u128,
 }
 
 impl LogRecord {
     /// Creates a new log record with the current timestamp.
     pub fn new(level: Level, message: impl Into<String>) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time is before UNIX epoch")
-            .as_millis();
-
         Self {
             level,
             message: message.into(),
             fields: Vec::new(),
-            timestamp: now,
+            timestamp: now_millis(),
         }
     }
 
@@ -111,8 +106,97 @@ struct StderrSink;
 
 impl LogSink for StderrSink {
     fn emit(&self, record: &LogRecord) {
-        eprintln!("[Kova] {} - {}", record.level.as_str(), record.message);
+        eprintln!(
+            "[Kova] {} {} - {}",
+            format_timestamp(record.timestamp),
+            record.level.as_str(),
+            record.message
+        );
     }
+}
+
+/// Current wall-clock time in milliseconds since the UNIX epoch.
+pub(crate) fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0)
+}
+
+/// Formats epoch milliseconds as local `YYYY-MM-DD HH:MM:SS.mmm`.
+///
+/// Local time is what an operator compares against the clock on the
+/// machine. The millisecond field is the remainder of the epoch instant,
+/// so two records in the same second stay ordered.
+pub(crate) fn format_timestamp(epoch_millis: u128) -> String {
+    let secs = (epoch_millis / 1000) as i64;
+    let millis = (epoch_millis % 1000) as u32;
+    let (year, month, day, hour, minute, second) = local_civil(secs);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{millis:03}")
+}
+
+/// Broken-down local civil time for `secs` since the UNIX epoch.
+fn local_civil(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct Tm {
+            tm_sec: i32,
+            tm_min: i32,
+            tm_hour: i32,
+            tm_mday: i32,
+            tm_mon: i32,
+            tm_year: i32,
+            tm_wday: i32,
+            tm_yday: i32,
+            tm_isdst: i32,
+            tm_gmtoff: i64,
+            tm_zone: *const i8,
+        }
+
+        extern "C" {
+            fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+        }
+
+        unsafe {
+            let mut tm = std::mem::zeroed();
+            if !localtime_r(&secs, &mut tm).is_null() {
+                return (
+                    tm.tm_year + 1900,
+                    (tm.tm_mon + 1) as u32,
+                    tm.tm_mday as u32,
+                    tm.tm_hour as u32,
+                    tm.tm_min as u32,
+                    tm.tm_sec as u32,
+                );
+            }
+        }
+    }
+
+    civil_utc(secs)
+}
+
+/// Broken-down UTC civil time. Used when the local conversion is unavailable.
+fn civil_utc(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400) as u32;
+    let hour = tod / 3_600;
+    let minute = (tod % 3_600) / 60;
+    let second = tod % 60;
+
+    // Howard Hinnant's civil_from_days, shifted to the Unix epoch.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    (year as i32, month as u32, day as u32, hour, minute, second)
 }
 
 /// The global logger facade.
@@ -296,5 +380,22 @@ mod tests {
     fn test_log_record_timestamp_is_set() {
         let record = LogRecord::new(Level::Info, "with timestamp");
         assert!(record.timestamp > 0);
+    }
+
+    #[test]
+    fn test_civil_utc_epoch_and_known_date() {
+        assert_eq!(civil_utc(0), (1970, 1, 1, 0, 0, 0));
+        // 1980-12-17 00:00:00 UTC.
+        assert_eq!(civil_utc(345_859_200), (1980, 12, 17, 0, 0, 0));
+    }
+
+    #[test]
+    fn test_format_timestamp_keeps_millis() {
+        let rendered = format_timestamp(345_081_600_128);
+        assert!(
+            rendered.ends_with(".128"),
+            "millis must survive the clock conversion: {rendered}"
+        );
+        assert_eq!(rendered.len(), "1980-12-17 00:00:00.128".len());
     }
 }

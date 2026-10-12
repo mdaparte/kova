@@ -23,7 +23,7 @@ Rust concurrency, memory management, and storage engine design.
 
 ## 2. Goals
 
-- Accept native MongoDB clients on port 27017 without driver changes.
+- Accept native MongoDB clients on port 27018 without driver changes.
 - Keep the working set in RAM for predictable, microsecond-latency
   transaction processing (in-memory hash maps + buffer pool cache).
 - Persist data durably to disk via WAL with CRC32 checksums and LSN
@@ -103,7 +103,7 @@ Rust concurrency, memory management, and storage engine design.
 
 ### 4.1 Network Layer (Phase 1)
 
-- TCP listener on port 27017 (configurable via `KOVA_PORT`).
+- TCP listener on port 27018 (configurable via `KOVA_PORT`).
 - Accepts connections and spawns a `tokio::spawn` task per client.
 - Reads 16-byte Wire Protocol header (little-endian): `messageLength`,
   `requestId`, `responseTo`, `opCode`.
@@ -203,7 +203,7 @@ Rust concurrency, memory management, and storage engine design.
 
 ## 5. Data Flow
 
-1. A client opens a TCP connection on port 27017.
+1. A client opens a TCP connection on port 27018.
 2. The network task spawns a `tokio::spawn` task.
 3. The network task reads exactly 16 bytes: `messageLength`, `requestId`,
    `responseTo`, `opCode`.
@@ -226,7 +226,7 @@ about and ignored.
 
 | Key | Env override | Default | Meaning |
 |---|---|---|---|
-| `port` | `KOVA_PORT` | `27017` | TCP listener port |
+| `port` | `KOVA_PORT` | `27018` | TCP listener port |
 | `log_level` | `KOVA_LOG_LEVEL` | `info` | Minimum emitted level |
 | `warn_on_non_mongo_queries` | `KOVA_WARN_NON_MONGO_QUERIES` | `true` | WARN on non-Mongo operators |
 | `search.analyzer` | — | `default` | `default` \| `en_stem` |
