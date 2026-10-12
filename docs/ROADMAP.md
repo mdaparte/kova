@@ -17,14 +17,14 @@ replication, and multi-model indexing.
 | 1 | Networking & Interception | ✅ Complete |
 | 2 | Partition Isolation | ✅ Complete |
 | 3 | Full-Text Search Indexing | ✅ Complete |
-| 3.5 | Search Flexibility & Configuration | ✅ Complete |
-| 4 | Analytical Query Optimization (DataFusion SQL) | ✅ Complete |
-| 5 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | ✅ Complete |
-| 5b | Disk-Resident Collections (pages are the database, RAM is the cache) | ✅ Complete |
-| 5.5 | MongoDB Aggregation Pipeline | ⚪ Planned |
-| 6 | Transactional Storage (MVCC + ACID + Isolation) | ⚪ Planned |
-| 7 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ⚪ Planned |
-| 8 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ⚪ Planned |
+| 4 | Search Flexibility & Configuration | ✅ Complete |
+| 5 | Analytical Query Optimization (DataFusion SQL) | ✅ Complete |
+| 6 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | ✅ Complete |
+| 7 | Disk-Resident Collections (pages are the database, RAM is the cache) | ✅ Complete |
+| 8 | MongoDB Aggregation Pipeline | ⚪ Planned |
+| 9 | Transactional Storage (MVCC + ACID + Isolation) | ⚪ Planned |
+| 10 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ⚪ Planned |
+| 11 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -39,7 +39,7 @@ replication, and multi-model indexing.
 - `messageLength` validated (16 B … 48 MB) before allocation.
 - One `tokio::spawn` task per client; abrupt disconnects logged with peer address.
 - SQL via DataFusion: `db.runCommand({ sql: "..." })` executes against in-memory
-  collections and returns a cursor. (Phase 4.)
+  collections and returns a cursor. (Phase 5.)
 
 ## Phase 2 — Partition Isolation ✅
 
@@ -66,7 +66,7 @@ replication, and multi-model indexing.
 - Relevance scoring (BM25) and fuzzy (distance-1) fallback via `$text`.
 - Validated end-to-end with a real `mongosh` (8/8 assertions).
 
-## Phase 3.5 — Search Flexibility & Configuration ✅
+## Phase 4 — Search Flexibility & Configuration ✅
 
 - Per-field indexes (one tantivy index per document field per partition).
 - `$text.$boost`: per-field BM25 multipliers.
@@ -79,7 +79,7 @@ replication, and multi-model indexing.
 - Non-Mongo warnings: Kova extensions (`$boost`, `$decay`) and unsupported
   operators (`$analyzer`, `$language`) log a WARN when enabled.
 
-## Phase 4 — Analytical Query Optimization (DataFusion SQL) ✅
+## Phase 5 — Analytical Query Optimization (DataFusion SQL) ✅
 
 - Integrate `Apache DataFusion` (v45).
 - SQL via `db.runCommand({ sql: "..." })` executes against in-memory collections.
@@ -89,10 +89,10 @@ replication, and multi-model indexing.
 - `SELECT` without `FROM`, `WHERE`, `COUNT(*)`, and `GROUP BY` return a cursor.
 - `parse_sql()` returns the logical plan for debugging.
 - One `FROM` table per query. Joins are out of scope. The Mongo aggregation
-  pipeline (`aggregate`, `$match`, `$group`, …) is Phase 5.5, after collections
-  live on pages (Phase 5b).
+  pipeline (`aggregate`, `$match`, `$group`, …) is Phase 8, after collections
+  live on pages (Phase 7).
 
-### Phase 4 — Sub-tasks
+### Phase 5 — Sub-tasks
 
 - [x] Add `datafusion = "45"` dependency.
 - [x] Create `src/query_engine/mod.rs` with `parse_sql()` and execution.
@@ -103,11 +103,11 @@ replication, and multi-model indexing.
 - [x] Validate `SELECT ... FROM ... WHERE ...`, `COUNT(*)`, `GROUP BY`.
 - [x] Add unit tests for query_engine parsing + execution.
 
-## Phase 5 — Disk Storage Engine (WAL + Buffer Pool + Page Store) ✅
+## Phase 6 — Disk Storage Engine (WAL + Buffer Pool + Page Store) ✅
 
 _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 
-### 5.1 Write-Ahead Log (WAL)
+### 6.1 Write-Ahead Log (WAL)
 
 - Segmented WAL with CRC32 checksums per entry.
 - LSN (Log Sequence Number) tracking for crash recovery.
@@ -115,7 +115,7 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 - `fsync` on commit (configurable: `wal_fsync = true/false` in `kova.toml`).
 - Recovery on startup: replay WAL entries since the last checkpoint.
 
-### 5.2 Page-Based Storage
+### 6.2 Page-Based Storage
 
 - Fixed-size pages (default 16 KB, configurable via `page_size`).
 - Pages stored on disk in a structured directory layout.
@@ -123,14 +123,14 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 - Overflow support for large documents (document spans multiple pages).
 - Page manager handles allocation, deallocation, and reuse of pages.
 
-### 5.3 Buffer Pool
+### 6.3 Buffer Pool
 
 - LRU-based page cache with pin/unpin eviction.
 - Configurable capacity (default: 4096 pages, via `buffer_pool_pages`).
 - Performance counters: hits, misses, evictions, pin count.
 - Dirty page writeback: flush dirty pages to disk on checkpoint or eviction.
 
-### 5.4 Hybrid Memory + Disk Architecture
+### 6.4 Hybrid Memory + Disk Architecture
 
 - **Hot data in memory**: the partition hash map is the working set. Finds,
   updates, and SQL read it.
@@ -141,10 +141,10 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
   WAL tail. The search index is rebuilt from the restored documents.
 - **Layout**: `{data_dir}/partition-{id}/checkpoint.bin`, `wal/`, `pages/`.
 - The page file in this phase was a snapshot of the whole map. Startup loaded
-  every document back into RAM. Phase 5b replaced that: documents stay on the
+  every document back into RAM. Phase 7 replaced that: documents stay on the
   pages, and RAM is the buffer pool.
 
-### 5.5 Durability Guarantees
+### 6.5 Durability Guarantees
 
 - Every write goes through the WAL before reaching the in-memory state.
 - On crash, the WAL is replayed to reconstruct the in-memory state up to the
@@ -152,7 +152,7 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 - Checkpoints periodically flush the in-memory state to disk and truncate the
   WAL.
 
-### Phase 5 — Sub-tasks
+### Phase 6 — Sub-tasks
 
 - [x] Design the on-disk layout: database directory, collection directories,
   page files, WAL segments.
@@ -167,22 +167,22 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 - [x] Add configuration for `data_dir`, `page_size`, `buffer_pool_pages`,
   `wal_fsync` in `kova.toml`.
 
-## Phase 5b — Disk-Resident Collections ✅
+## Phase 7 — Disk-Resident Collections ✅
 
-Phase 5 made a crash survivable by copying the in-memory map to disk and
+Phase 6 made a crash survivable by copying the in-memory map to disk and
 loading that copy back on startup. The map is still the database: `find`,
 `update`, and SQL read it, so the collection has to fit in RAM.
 
-Phase 5b turns that around. The page file is the database. RAM holds the
+Phase 7 turns that around. The page file is the database. RAM holds the
 buffer pool (default 4096 pages × 16 KB, set by `buffer_pool_pages`) and
 nothing else that grows with the collection. A query that misses the pool
 reads the page from disk. When the pool is full, the least recently used
 unpinned page is written back if it is dirty and then dropped.
 
-The WAL from Phase 5 stays. It records the mutation before the page is
+The WAL from Phase 6 stays. It records the mutation before the page is
 dirtied. It is not where the document lives.
 
-### 5b.1 Documents live in pages
+### 7.1 Documents live in pages
 
 - A collection is a set of pages, not a `Vec` that must all be resident.
 - Each document is BSON inside a page. The page header gains a slot
@@ -194,7 +194,7 @@ dirtied. It is not where the document lives.
   catalog that is itself stored in pages and cached by the buffer pool.
   The catalog is not a second copy of every document.
 
-### 5b.2 The buffer pool is the only working set
+### 7.2 The buffer pool is the only working set
 
 - `insert`, `find`, `update`, `delete`, and `count` pin pages, read or
   change the slots, then unpin.
@@ -204,7 +204,7 @@ dirtied. It is not where the document lives.
   names. It does not materialize every document into a hash map.
 - The partition `HashMap<String, Vec<Document>>` stops being the store.
 
-### 5b.3 Checkpoint
+### 7.3 Checkpoint
 
 - A checkpoint flushes dirty pages, records the last LSN those pages
   cover, and deletes the WAL segments behind that LSN.
@@ -212,7 +212,7 @@ dirtied. It is not where the document lives.
 - After a crash, flushed pages stay as they are. Recovery applies only
   the WAL records newer than the checkpoint.
 
-### 5b.4 SQL and search
+### 7.4 SQL and search
 
 - DataFusion scans a collection by pulling pages through the buffer pool
   in batches. The command `db.runCommand({ sql: "..." })` does not change.
@@ -220,7 +220,7 @@ dirtied. It is not where the document lives.
   rebuilt by scanning pages on startup. It does not keep a second copy
   of the BSON.
 
-### 5b.5 Tests
+### 7.5 Tests
 
 - Insert more documents than `buffer_pool_pages` can hold. A later `find`
   still returns a document that had to be read from disk.
@@ -230,7 +230,7 @@ dirtied. It is not where the document lives.
 - A document larger than one page round-trips.
 - `SELECT` over that collection returns the same rows as `find`.
 
-### Phase 5b — Sub-tasks
+### Phase 7 — Sub-tasks
 
 - [x] Slot directory and overflow chains in `src/storage/heap.rs`. The
   32-byte page envelope is unchanged.
@@ -251,21 +251,21 @@ dirtied. It is not where the document lives.
   and delete of an evicted document, overflow round-trip. SQL tests
   still read through `find`.
 
-## Phase 5.5 — MongoDB Aggregation Pipeline ⚪ Planned
+## Phase 8 — MongoDB Aggregation Pipeline ⚪ Planned
 
-Runs after Phase 5b. The `aggregate` command reads documents from pages
+Runs after Phase 7. The `aggregate` command reads documents from pages
 through the buffer pool, not from a second in-memory copy. mongosh and
 Compass already send this command; today it is rejected as
 `unsupported command aggregate`.
 
-### 5.5.1 Command and cursor
+### 8.1 Command and cursor
 
 - `aggregate` on a collection, with a `pipeline` array and a `cursor`.
 - Reply is a cursor (`firstBatch`), same shape as `find`.
 - An empty pipeline returns the collection.
 - Unknown stages fail the command with the stage name, instead of dropping the filter.
 
-### 5.5.2 Stages
+### 8.2 Stages
 
 - `$match` — same predicates as `find` (`$gt`, `$in`, `$and`, `$or`, …).
 - `$project` — include, exclude, and rename fields.
@@ -274,9 +274,9 @@ Compass already send this command; today it is rejected as
 - `$count`.
 - `$unwind` on one array field.
 
-### 5.5.3 Integrated test
+### 8.3 Integrated test
 
-After Phase 5b, one mongosh session loads the Oracle `emp` sample and checks
+After Phase 7, one mongosh session loads the Oracle `emp` sample and checks
 the pipeline against the same question asked in SQL:
 
 - `$match` on `sal` and `job` returns the same rows as `WHERE`.
@@ -285,25 +285,25 @@ the pipeline against the same question asked in SQL:
   documents, read back from pages. The collection must not have been
   loaded entirely into RAM to answer.
 
-### Phase 5.5 — Sub-tasks
+### Phase 8 — Sub-tasks
 
 - [ ] Accept `aggregate` in `command_from_document` and route it to the partition that owns the collection.
 - [ ] Implement `src/aggregate/mod.rs`: run a pipeline over the storage engine's document scan.
 - [ ] Implement `$match`, `$project`, `$sort`, `$skip`, `$limit`, `$count`, `$group`, `$unwind`.
 - [ ] Return a cursor reply from the network layer.
-- [ ] Integration test with mongosh against the Phase 5b engine: seed `emp`, aggregate, compare with SQL, restart, aggregate again.
+- [ ] Integration test with mongosh against the Phase 7 engine: seed `emp`, aggregate, compare with SQL, restart, aggregate again.
 
-## Phase 6 — Transactional Storage (MVCC + ACID + Isolation) ⚪ Planned
+## Phase 9 — Transactional Storage (MVCC + ACID + Isolation) ⚪ Planned
 
 _Inspiration: GraniteDB (MVCC, ACID transactions, multiple isolation levels)_
 
-### 6.1 MVCC (Multi-Version Concurrency Control)
+### 9.1 MVCC (Multi-Version Concurrency Control)
 
 - Each document version gets a timestamp/LSN.
 - Snapshot reads: a query sees the database as of a point in time.
 - Garbage collection of old versions no longer needed by any active transaction.
 
-### 6.2 ACID Transactions
+### 9.2 ACID Transactions
 
 - `beginTransaction`, `commit`, `abort` commands.
 - Atomicity: all-or-nothing via the WAL + MVCC.
@@ -312,14 +312,14 @@ _Inspiration: GraniteDB (MVCC, ACID transactions, multiple isolation levels)_
   Serializable.
 - Conflict detection: write-write conflicts abort the later transaction.
 
-### 6.3 Transaction Manager
+### 9.3 Transaction Manager
 
 - Tracks active transactions, their isolation level, and their snapshot.
 - On commit: flush to WAL, advance LSN, make the new version visible.
 - On abort: discard the transaction's writes.
 - Timeout enforcement: automatic abort on timeout.
 
-### Phase 6 — Sub-tasks
+### Phase 9 — Sub-tasks
 
 - [ ] Design MVCC version storage: per-document version chain (LSN, document,
   deleted flag).
@@ -330,20 +330,20 @@ _Inspiration: GraniteDB (MVCC, ACID transactions, multiple isolation levels)_
 - [ ] Add transaction tests: ACID properties, isolation levels, conflict
   detection, timeout.
 
-## Phase 7 — Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) ⚪ Planned
+## Phase 10 — Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) ⚪ Planned
 
 _Inspiration: GraniteDB (B-Tree, Hash, Unique, Sparse, Index Manager)_
 
-### 7.1 Index Types
+### 10.1 Index Types
 
 - **B-Tree Indexes**: ordered indexes for range queries + composite key support.
 - **Hash Indexes**: O(1) exact-match lookups.
 - **Unique Constraints**: enforce uniqueness across indexed fields.
 - **Sparse Indexes**: skip documents missing the indexed field.
-- **Full-Text Indexes (Tantivy)**: already implemented in Phase 3/3.5; the index
+- **Full-Text Indexes (Tantivy)**: already implemented in Phase 3/4; the index
   manager will create, drop, and auto-maintain them alongside other index types.
 
-### 7.2 Index Manager
+### 10.2 Index Manager
 
 - Create index: `createIndexes` command (already in Phase 2, but now builds the
   actual index structure instead of just recording metadata).
@@ -352,14 +352,14 @@ _Inspiration: GraniteDB (B-Tree, Hash, Unique, Sparse, Index Manager)_
   reindexing needed).
 - Index metadata stored in the disk storage (not just in-memory).
 
-### 7.3 Query Planner Integration
+### 10.3 Query Planner Integration
 
-- The query planner (Phase 4 + DataFusion) consults the index manager to choose
+- The query planner (Phase 5 + DataFusion) consults the index manager to choose
   the best strategy: ID lookup → index scan → collection scan.
 - Explain plans: `db.runCommand({ explain: { find: "users", filter: { age: { $gt: 25 } } } })`
   shows the chosen strategy.
 
-### Phase 7 — Sub-tasks
+### Phase 10 — Sub-tasks
 
 - [ ] Design index on-disk layout (B-Tree pages, hash buckets, full-text index
   files).
@@ -372,11 +372,11 @@ _Inspiration: GraniteDB (B-Tree, Hash, Unique, Sparse, Index Manager)_
 - [ ] Add index tests: create, drop, auto-maintain, unique constraint, sparse
   index, query planner index usage.
 
-## Phase 8 — Replication & High Availability (Oplog + Replica Sets + Heartbeat) ⚪ Planned
+## Phase 11 — Replication & High Availability (Oplog + Replica Sets + Heartbeat) ⚪ Planned
 
 _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
 
-### 8.1 Oplog (Capped Operations Log)
+### 11.1 Oplog (Capped Operations Log)
 
 - Every write operation is recorded in a capped operations log with a timestamp.
 - The oplog is used for replication: secondaries replay the oplog to stay in sync
@@ -384,7 +384,7 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
 - Timestamp-based sync queries: a secondary asks the primary for operations
   after a given timestamp.
 
-### 8.2 Replica Sets
+### 11.2 Replica Sets
 
 - Roles: Primary (read/write), Secondary (read-only, replicates from primary),
   Arbiter (votes, no data).
@@ -394,13 +394,13 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
   new primary.
 - Read preference: clients can read from primary, secondary, or nearest.
 
-### 8.3 Sharding (future extension, optional)
+### 11.3 Sharding (future extension, optional)
 
 - Consistent hashing with virtual nodes for even data distribution.
 - Key range sharding: automatic routing based on shard key values.
 - Shard router: routes queries to the correct shard.
 
-### Phase 8 — Sub-tasks
+### Phase 11 — Sub-tasks
 
 - [ ] Design the oplog on-disk layout (capped collection of operations with
   timestamps).
@@ -429,14 +429,14 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
 7. **Analytical brain**: DataFusion as the internal optimizer, with SQL parsing
    and execution against the storage layer.
 
-## Current Implementation Gaps (to address in Phase 5+)
+## Current Implementation Gaps
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| `aggregate` is rejected | 5.5 | Pipeline reads pages through the buffer pool, including after a restart. |
-| No transactions | 6 | MVCC + transaction manager needed. |
-| Indexes are metadata only | 7 | B-Tree + Hash + auto-maintain needed. |
-| No replication | 8 | Oplog + replica sets needed. |
+| `aggregate` is rejected | 8 | Pipeline reads pages through the buffer pool, including after a restart. |
+| No transactions | 9 | MVCC + transaction manager needed. |
+| Indexes are metadata only | 10 | B-Tree + Hash + auto-maintain needed. |
+| No replication | 11 | Oplog + replica sets needed. |
 
 ## Architecture Diagram (updated)
 
@@ -455,13 +455,13 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
               ┌───────────────┼───────────────┐
               │                               │
 ┌─────────────▼─────────────┐ ┌──────────────▼──────────────┐
-│     Query Engine (Phase 4)│ │   Aggregation Pipeline       │
-│  DataFusion SQL parsing +  │ │  (Phase 5.5) $match,$group,  │
+│     Query Engine (Phase 5)│ │   Aggregation Pipeline       │
+│  DataFusion SQL parsing +  │ │  (Phase 8) $match,$group,  │
 │  execution against storage │ │  $project,$sort,$limit...    │
 └─────────────┬──────────────┘ └──────────────┬──────────────┘
               │                               │
 ┌─────────────▼───────────────────────────────▼──────────────┐
-│                   Storage Layer (Phase 5+)                   │
+│                   Storage Layer (Phase 6+)                   │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │               Unified Storage Engine                    │  │
 │  │  ┌──────────┐  ┌───────────┐  ┌─────────────────────┐  │  │
@@ -471,10 +471,10 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
 │  └────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │                MVCC + Transaction Manager               │  │
-│  │  (Phase 6: begin/commit/abort, isolation levels)       │  │
+│  │  (Phase 9: begin/commit/abort, isolation levels)       │  │
 │  └────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │                   Index Manager (Phase 7)               │  │
+│  │                   Index Manager (Phase 10)               │  │
 │  │  B-Tree │ Hash │ Unique │ Sparse │ Full-Text (Tantivy) │  │
 │  └────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
@@ -482,7 +482,7 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
               ┌───────────────┼───────────────┐
               │                               │
 ┌─────────────▼─────────────┐ ┌──────────────▼──────────────┐
-│  Replication (Phase 8)    │ │   Sharding (optional)        │
+│  Replication (Phase 11)    │ │   Sharding (optional)        │
 │  Oplog + Replica Sets +   │ │  Consistent Hashing +        │
 │  Heartbeat + Election     │ │  Key Range Sharding          │
 └───────────────────────────┘ └──────────────────────────────┘
@@ -494,6 +494,6 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phase 5b is complete: documents live on pages and RAM is the buffer pool.
-Next is the aggregation pipeline (Phase 5.5), then transactional storage
+*Phase 7 is complete: documents live on pages and RAM is the buffer pool.
+Next is the aggregation pipeline (Phase 8), then transactional storage
 (MVCC + ACID), the indexing subsystem, and replication.*

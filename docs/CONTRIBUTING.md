@@ -9,13 +9,11 @@
 
 Kova is an ultra-high-performance, **hybrid memory+disk** database engine
 written in Rust. It presents a native MongoDB Wire Protocol interface on
-port 27018, processes hot data in RAM (in-memory hash maps + buffer pool
-cache), persists data durably to disk via Write-Ahead Logging (WAL) with
-CRC32 checksums and LSN tracking, and unifies transactional writes (MVCC +
-ACID), full-text search (Tantivy), multi-model indexing (B-Tree, Hash,
-Unique, Sparse, Full-Text), analytical SQL query planning (Apache
-DataFusion), and high availability (oplog-based replication, replica sets)
-in a single process.
+port 27018. Documents live in pages. RAM holds the buffer pool and the
+Tantivy token index. Mutations are recorded in a write-ahead log before a
+page is dirtied. SQL goes through Apache DataFusion. Transactions (MVCC),
+secondary indexes, and replication are later phases, tracked in
+`docs/ROADMAP.md`.
 
 **Inspiration:** VoltDB (lock-free, thread-per-core), GraniteDB (WAL,
 buffer pool, page-based storage, MVCC, replication), MongoDB (wire
@@ -27,29 +25,31 @@ parser + optimizer), Tantivy (full-text search).
 | Path | Responsibility |
 |---|---|
 | `src/main.rs` | Application entry point, Tokio runtime bootstrap, engine orchestration |
-| `src/network.rs` | TCP server, MongoDB Wire Protocol header parsing, client task spawning, SQL command routing |
+| `src/network/mod.rs` | TCP server, Wire Protocol framing, client tasks, SQL command routing |
 | `src/protocol/mod.rs` | Message types, opcodes, payload parsing, BSON enumerations, reply building |
 | `src/types/mod.rs` | `PartitionCommand`, document model, query model, shared types |
-| `src/storage/mod.rs` | Partition worker, in-memory storage, `crossbeam-channel` routing |
-| `src/storage/wal.rs` | Write-Ahead Log with CRC32 checksums, LSN tracking, segment rolling |
-| `src/storage/page.rs` | Fixed-size page management with integrity verification |
+| `src/config/mod.rs` | `kova.toml` loading and environment overrides |
+| `src/storage/mod.rs` | Partition worker and `crossbeam-channel` routing |
+| `src/storage/wal.rs` | Write-ahead log with CRC32 checksums, LSN tracking, segment rolling |
+| `src/storage/page.rs` | Fixed-size page envelope with integrity verification |
 | `src/storage/buffer_pool.rs` | LRU page cache with pin/unpin eviction |
 | `src/storage/disk.rs` | Low-level disk I/O for page read/write |
-| `src/storage/engine.rs` | Unified storage (WAL + buffer pool + disk + memory) |
-| `src/storage/mvcc.rs` *(Phase 6)* | Multi-Version Concurrency Control, snapshot reads |
-| `src/storage/transaction.rs` *(Phase 6)* | Transaction manager (begin/commit/abort, conflict detection, timeout) |
+| `src/storage/crc.rs` | CRC-32 used by the WAL and page checksums |
+| `src/storage/engine.rs` | WAL, buffer pool, page store, and checkpoint |
+| `src/storage/heap.rs` | Document pages, overflow chains, and the catalog |
+| `src/storage/mvcc.rs` *(Phase 9)* | Multi-version concurrency control, snapshot reads |
+| `src/storage/transaction.rs` *(Phase 9)* | Transaction manager (begin/commit/abort, conflict detection, timeout) |
 | `src/search/mod.rs` | Tantivy indexes, tokenizers, relevance queries |
-| `src/index/btree.rs` *(Phase 7)* | B-Tree index for range queries + composite keys |
-| `src/index/hash_index.rs` *(Phase 7)* | Hash index for O(1) lookups |
-| `src/index/manager.rs` *(Phase 7)* | Index lifecycle management (create/drop/auto-maintain) |
-| `src/replication/oplog.rs` *(Phase 8)* | Capped operations log for replication |
-| `src/replication/replica.rs` *(Phase 8)* | Replica set management, heartbeat, election |
+| `src/index/btree.rs` *(Phase 10)* | B-Tree index for range queries and composite keys |
+| `src/index/hash_index.rs` *(Phase 10)* | Hash index for O(1) lookups |
+| `src/index/manager.rs` *(Phase 10)* | Index lifecycle (create, drop, auto-maintain) |
+| `src/replication/oplog.rs` *(Phase 11)* | Capped operations log for replication |
+| `src/replication/replica.rs` *(Phase 11)* | Replica set management, heartbeat, election |
 | `src/query_engine/mod.rs` | DataFusion integration, SQL parser, query optimizer, execution |
-| `kova.toml` | Engine configuration file (env vars override it) |
+| `kova.toml` | Engine configuration file (environment variables override it) |
 | `src/logger/` | Structured logging, log capture, external sinks |
-| `docs/` | Design specs, architecture decision records, roadmap |
-| `tests/unit/` *(novo)* | Unit tests for parsing, types, channel routing |
-| `tests/integration/` *(novo)* | Integration tests for end-to-end flows |
+| `docs/` | Design specs, architecture, roadmap |
+| module tests | `cargo test` runs the tests that live beside each module |
 
 ## 3. Code Conventions
 
@@ -69,19 +69,17 @@ parser + optimizer), Tantivy (full-text search).
   structured types from `types.rs` only.
 - Mutating a partition MUST never panic. Errors are returned as `Result`
   and logged at the caller boundary.
-- **New for Phase 5+:** `storage/wal.rs`, `storage/page.rs`,
-  `storage/buffer_pool.rs`, `storage/disk.rs`, `storage/engine.rs` MUST
-  NOT access the network layer directly. They are pure storage engine
-  components.
-- **New for Phase 6+:** `storage/mvcc.rs` and `storage/transaction.rs`
-  MUST coordinate with the buffer pool and WAL, but MUST NOT access the
-  network layer directly.
-- **New for Phase 7+:** `index/btree.rs`, `index/hash_index.rs`,
-  `index/manager.rs` MUST integrate with the storage engine (read/write
-  through the buffer pool) and with the query planner (index scan strategy).
-- **New for Phase 8+:** `replication/oplog.rs` and `replication/replica.rs`
-  MUST integrate with the storage engine (oplog reads/writes through the
-  buffer pool) and with the network layer (heartbeat, election messages).
+- `storage/wal.rs`, `storage/page.rs`, `storage/buffer_pool.rs`,
+  `storage/disk.rs`, `storage/engine.rs`, and `storage/heap.rs` MUST NOT
+  access the network layer directly. They are storage engine components.
+- `storage/mvcc.rs` and `storage/transaction.rs` (Phase 9) MUST coordinate
+  with the buffer pool and WAL, and MUST NOT access the network layer.
+- `index/btree.rs`, `index/hash_index.rs`, and `index/manager.rs` (Phase 10)
+  MUST read and write through the buffer pool and MUST be visible to the
+  query planner.
+- `replication/oplog.rs` and `replication/replica.rs` (Phase 11) MUST
+  read and write the oplog through the storage engine and MUST speak
+  heartbeat and election messages through the network layer.
 
 ### 3.3 Naming
 
@@ -102,9 +100,9 @@ parser + optimizer), Tantivy (full-text search).
   `Error` level with the peer address.
 - Unrecoverable engine failures MUST abort with a clear message on
   `stderr` and a non-zero exit code.
-- **New for Phase 5+:** Storage engine errors (WAL corruption, page I/O
-  failure, buffer pool exhaustion) MUST be logged at `Error` level with
-  enough context to diagnose the issue (page number, LSN, etc.).
+- Storage engine errors (WAL corruption, page I/O failure, buffer pool
+  exhaustion) MUST be logged at `Error` level with enough context to
+  diagnose the issue (page number, LSN, and so on).
 
 ### 3.5 Logging
 
@@ -115,11 +113,11 @@ parser + optimizer), Tantivy (full-text search).
     `[Kova] Connection received from 127.0.0.1:45678`
 - Production logs MUST be written to `stderr` only. File/syslog logging
   will be added in a future phase.
-- **New for Phase 5+:** WAL writes, page reads/writes, buffer pool hits/misses,
-  checkpoint progress, MVCC version creation, transaction begin/commit/abort,
-  replication heartbeats, and election events MUST be logged at appropriate
-  levels (Debug for internals, Info for milestones, Warn for anomalies, Error
-  for failures).
+- WAL writes, page reads and writes, buffer pool hits and misses, and
+  checkpoint progress MUST be logged at the appropriate level: Debug for
+  internals, Info for milestones, Warn for anomalies, Error for failures.
+  The same rule applies to MVCC, transactions, and replication when those
+  phases land.
 
 ### 3.6 Documentation
 
@@ -136,10 +134,8 @@ parser + optimizer), Tantivy (full-text search).
   allocations where possible.
 - `BytesMut` buffers MUST be sized to the expected maximum message size.
 - Partition reads MUST be lock-free via `crossbeam::channel`.
-- **New for Phase 5+:** The buffer pool LRU eviction MUST be efficient
-  (O(1) or O(log n) per operation). WAL writes MUST be batched where
-  possible to reduce fsync overhead. Page reads/writes MUST use direct I/O
-  or buffered I/O as appropriate for the workload.
+- Buffer pool LRU eviction MUST be O(1) per operation. WAL appends MUST
+  stay sequential. Page reads and writes go through the page store.
 
 ## 4. Developer Workflow
 
@@ -159,22 +155,21 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 2 — Partitioning:** `PartitionCommand`, `crossbeam-channel` routing,
   single-threaded partition workers. ✅ Complete.
 - **Phase 3 — Search indexing:** `tantivy` integration with hot indexing. ✅ Complete.
-- **Phase 3.5 — Search flexibility:** Per-field indexes, `$text.$boost`, wildcards,
+- **Phase 4 — Search flexibility:** per-field indexes, `$text.$boost`, wildcards,
   `$text.$decay`, analyzer config, `kova.toml`. ✅ Complete.
-- **Phase 4 — Analytical Query Optimization:** DataFusion SQL execution
-  against in-memory collections, including `COUNT(*)` and `GROUP BY`. ✅ Complete.
-- **Phase 5 — Disk Storage Engine:** WAL, buffer pool, page-based storage,
-  checkpoint, and crash recovery. ✅ Complete.
-- **Phase 5b — Disk-resident collections:** documents live in pages; the
-  buffer pool is the only RAM that grows with the cache, not with the
-  database. ✅ Complete.
-- **Phase 5.5 — Aggregation pipeline:** `aggregate` with `$match`, `$group`,
-  `$project`, `$sort`, `$limit`, after Phase 5b, tested with mongosh. ⚪ Planned.
-- **Phase 6 — Transactional Storage:** MVCC, ACID transactions, multiple
+- **Phase 5 — Analytical SQL:** DataFusion execution, including `COUNT(*)`
+  and `GROUP BY`. ✅ Complete.
+- **Phase 6 — Disk storage engine:** WAL, buffer pool, page store, checkpoint,
+  and crash recovery. ✅ Complete.
+- **Phase 7 — Disk-resident collections:** documents live in pages; the buffer
+  pool is the only RAM that grows with the cache. ✅ Complete.
+- **Phase 8 — Aggregation pipeline:** `aggregate` with `$match`, `$group`,
+  `$project`, `$sort`, `$limit`, reading pages, tested with mongosh. ⚪ Planned.
+- **Phase 9 — Transactional storage:** MVCC, ACID transactions, multiple
   isolation levels. ⚪ Planned.
-- **Phase 7 — Indexing Subsystem:** B-Tree, Hash, Unique, Sparse indexes,
+- **Phase 10 — Indexing subsystem:** B-Tree, hash, unique, and sparse indexes,
   index manager, auto-maintain, query planner integration. ⚪ Planned.
-- **Phase 8 — Replication & HA:** Oplog, replica sets, heartbeat, election,
+- **Phase 11 — Replication and HA:** oplog, replica sets, heartbeat, election,
   read preference. ⚪ Planned.
 
 ---

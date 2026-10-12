@@ -96,7 +96,7 @@ impl PartitionWorker {
 
     /// Builds the search index entry for one document and adds it.
     ///
-    /// Each top-level field becomes its own index entry (Phase 3.5),
+    /// Each top-level field becomes its own index entry (Phase 4),
     /// which is what makes per-field boosts possible. Indexing
     /// failures are logged, never propagated: a document that cannot
     /// be tokenized must still be stored and returned by normal

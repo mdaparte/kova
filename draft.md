@@ -62,7 +62,7 @@ This makes Kova an ideal solution for **Edge Computing/IoT environments** (where
 * **Hash Indexes:** O(1) exact-match lookups.
 * **Unique Constraints:** Enforce uniqueness across indexed fields.
 * **Sparse Indexes:** Skip documents missing the indexed field.
-* **Full-Text Indexes (Tantivy):** Already implemented (Phase 3/3.5). The index manager creates, drops, and auto-maintains full-text indexes alongside other index types.
+* **Full-Text Indexes (Tantivy):** Already implemented (Phase 3/4). The index manager creates, drops, and auto-maintains full-text indexes alongside other index types.
 * **Auto-Maintenance:** Indexes are updated on insert/update/delete — no manual reindexing.
 
 ### 6. Replication & High Availability
@@ -81,7 +81,7 @@ Kova's core is engineered by assembling highly optimized, production-proven crat
 * **`crossbeam-channel`:** Ultra-fast MPSC channels for lock-free routing from network tasks to single-threaded storage workers.
 * **`tantivy`:** The "Lucene of Rust" — blazing fast, memory-optimized full-text search engine.
 * **`datafusion` (Apache):** Extensible SQL query planner and execution framework as the internal analytical brain.
-* **`sled` or custom page store** (Phase 5+): For disk-based page storage, or a custom implementation inspired by GraniteDB.
+* **`sled` or custom page store** (Phase 6+): For disk-based page storage, or a custom implementation inspired by GraniteDB.
 * **`crc32fast`:** CRC32 checksums for WAL entries and page integrity verification.
 
 ---
@@ -95,19 +95,21 @@ The local source code is modularized into dedicated files inside the `kova/src/`
 * `protocol/mod.rs`: Message types, opcodes, payload parsing, BSON enumerations, reply building.
 * `types/mod.rs`: Partition command enum, document model, query model, shared types.
 * `storage/mod.rs`: Partition worker, in-memory storage, `crossbeam-channel` routing.
-* `storage/wal.rs` *(Phase 5)*: Write-Ahead Log with CRC32 checksums, LSN tracking, segment rolling.
-* `storage/page.rs` *(Phase 5)*: Fixed-size page management with integrity verification.
-* `storage/buffer_pool.rs` *(Phase 5)*: LRU page cache with pin/unpin eviction.
-* `storage/disk.rs` *(Phase 5)*: Low-level disk I/O for page read/write.
-* `storage/engine.rs` *(Phase 5)*: Unified storage (WAL + buffer pool + disk + memory).
-* `storage/mvcc.rs` *(Phase 6)*: Multi-Version Concurrency Control, snapshot reads.
-* `storage/transaction.rs` *(Phase 6)*: Transaction manager (begin/commit/abort, conflict detection, timeout).
+* `storage/wal.rs` *(Phase 6)*: Write-Ahead Log with CRC32 checksums, LSN tracking, segment rolling.
+* `storage/page.rs` *(Phase 6)*: Fixed-size page management with integrity verification.
+* `storage/buffer_pool.rs` *(Phase 6)*: LRU page cache with pin/unpin eviction.
+* `storage/disk.rs` *(Phase 6)*: Low-level disk I/O for page read/write.
+* `storage/engine.rs` *(Phase 6)*: WAL, buffer pool, page store, and checkpoint.
+* `storage/heap.rs` *(Phase 7)*: Document pages, overflow chains, and the catalog.
+* `storage/crc.rs` *(Phase 6)*: CRC-32 used by the WAL and page checksums.
+* `storage/mvcc.rs` *(Phase 9)*: Multi-Version Concurrency Control, snapshot reads.
+* `storage/transaction.rs` *(Phase 9)*: Transaction manager (begin/commit/abort, conflict detection, timeout).
 * `search/mod.rs`: Tantivy indexes, tokenizers, relevance queries.
-* `index/btree.rs` *(Phase 7)*: B-Tree index for range queries + composite keys.
-* `index/hash_index.rs` *(Phase 7)*: Hash index for O(1) lookups.
-* `index/manager.rs` *(Phase 7)*: Index lifecycle management (create/drop/auto-maintain).
-* `replication/oplog.rs` *(Phase 8)*: Capped operations log for replication.
-* `replication/replica.rs` *(Phase 8)*: Replica set management, heartbeat, election.
+* `index/btree.rs` *(Phase 10)*: B-Tree index for range queries + composite keys.
+* `index/hash_index.rs` *(Phase 10)*: Hash index for O(1) lookups.
+* `index/manager.rs` *(Phase 10)*: Index lifecycle management (create/drop/auto-maintain).
+* `replication/oplog.rs` *(Phase 11)*: Capped operations log for replication.
+* `replication/replica.rs` *(Phase 11)*: Replica set management, heartbeat, election.
 * `query_engine/mod.rs`: DataFusion integration, SQL parser, query optimizer, execution.
 
 ---
@@ -116,10 +118,12 @@ The local source code is modularized into dedicated files inside the `kova/src/`
 
 1. **Phase 1 (Networking & Interception):** TCP socket, MongoDB client handshake, 16-byte binary header parsing. ✅ Complete.
 2. **Phase 2 (Partition Isolation):** `crossbeam-channel` routing, single-threaded partition workers, `PartitionCommand` enum. ✅ Complete.
-3. **Phase 3 (Lucene Indexing):** `tantivy` integration, hot indexing, `$text` queries. ✅ Complete.
-4. **Phase 3.5 (Search Flexibility):** Per-field indexes, `$text.$boost`, wildcards, `$text.$decay`, analyzer config, `kova.toml`. ✅ Complete.
-5. **Phase 4 (DataFusion SQL):** SQL parsing, plan extraction, `db.runCommand({ sql: "..." })`. 🔵 Current.
-6. **Phase 5 (Disk Storage Engine):** WAL, buffer pool, page-based storage, hybrid memory+disk. ⚪ Planned.
-7. **Phase 6 (Transactional Storage):** MVCC, ACID transactions, multiple isolation levels. ⚪ Planned.
-8. **Phase 7 (Indexing Subsystem):** B-Tree, Hash, Unique, Sparse indexes, index manager, auto-maintain, query planner integration. ⚪ Planned.
-9. **Phase 8 (Replication & HA):** Oplog, replica sets, heartbeat, election, read preference. ⚪ Planned.
+3. **Phase 3 (Full-Text Search):** `tantivy` integration, hot indexing, `$text` queries. ✅ Complete.
+4. **Phase 4 (Search Flexibility):** Per-field indexes, `$text.$boost`, wildcards, `$text.$decay`, analyzer config, `kova.toml`. ✅ Complete.
+5. **Phase 5 (DataFusion SQL):** SQL parsing, plan extraction, `db.runCommand({ sql: "..." })`. ✅ Complete.
+6. **Phase 6 (Disk Storage Engine):** WAL, buffer pool, page store, checkpoint, crash recovery. ✅ Complete.
+7. **Phase 7 (Disk-Resident Collections):** documents live in pages; RAM is the buffer pool. ✅ Complete.
+8. **Phase 8 (Aggregation Pipeline):** `aggregate` with `$match`, `$group`, `$project`, `$sort`, `$limit`, reading pages. ⚪ Planned.
+9. **Phase 9 (Transactional Storage):** MVCC, ACID transactions, multiple isolation levels. ⚪ Planned.
+10. **Phase 10 (Indexing Subsystem):** B-Tree, Hash, Unique, Sparse indexes, index manager, auto-maintain, query planner integration. ⚪ Planned.
+11. **Phase 11 (Replication & HA):** Oplog, replica sets, heartbeat, election, read preference. ⚪ Planned.

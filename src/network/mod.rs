@@ -5,7 +5,7 @@
 //! write the reply back. Raw protocol parsing lives in
 //! [`crate::protocol`]; this file handles I/O and command routing.
 //!
-//! Phase 4 (DataFusion) is wired in through [`crate::query_engine`];
+//! Phase 5 (DataFusion) is wired in through [`crate::query_engine`];
 //! SQL text arriving as an OP_MSG command is parsed, planned and executed
 //! there against in-memory collections.
 
@@ -328,7 +328,7 @@ async fn execute_command(
         return bson::doc! { "ok": 1.0, "me": local_addr.to_string() };
     }
 
-    // ---- Phase 4: SQL via db.runCommand({ sql: "..." }) ------------
+    // ---- Phase 5: SQL via db.runCommand({ sql: "..." }) ------------
     // SQL text arrives as an OP_MSG command with the key "sql".
     // We extract the referenced collection name from the SQL's FROM clause,
     // use the command's `$db` to resolve the storage namespace, load the
@@ -401,7 +401,7 @@ async fn execute_command(
 /// comes back with no rows, and `WHERE age > 25` fails with "No field named
 /// age" because the empty snapshot has no columns.
 ///
-/// This is intentionally minimal for Phase 4. It does not handle joins,
+/// This is intentionally minimal for Phase 5. It does not handle joins,
 /// subqueries, or schema-qualified names.
 fn sql_table_name(sql: &str) -> Option<String> {
     let bytes = sql.as_bytes();

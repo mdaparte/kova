@@ -1,7 +1,7 @@
 //! Full-text search backed by `tantivy`.
 //!
 //! Phase 3 gave every partition worker an inverted index living in a
-//! RAM directory, so searching never touches the disk. Phase 3.5
+//! RAM directory, so searching never touches the disk. Phase 4
 //! refined it into a *per-field* index: one tantivy index per document
 //! field name, which is what makes MongoDB-style field boosts
 //! (`$text.$boost`) possible — each field keeps its own BM25 corpus

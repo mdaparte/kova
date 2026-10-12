@@ -438,7 +438,7 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
     }
 
     // The same drivers declare indexes at start-up. Kova records the
-    // declarations (metadata until Phase 4) so `listIndexes` reports
+    // declarations (metadata until Phase 10) so `listIndexes` reports
     // a stable, non-surprising set.
     if let Ok(collection) = command.get_str("createIndexes") {
         let indexes = command

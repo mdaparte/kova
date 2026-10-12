@@ -10,9 +10,9 @@
 //! The response is a BSON document with either `ok: 1` and the result set,
 //! or `ok: 0` and an error message.
 //!
-//! **Phase 4 scope:** SQL parsing + planning + execution against in-memory
-//! collections. Disk-backed storage (Phase 5+) swaps in a different table
-//! provider without changing the query path.
+//! **Phase 5 scope:** SQL parsing + planning + execution against stored
+//! collections. A later table provider can read pages directly without
+//! changing the query path.
 
 use std::sync::Arc;
 

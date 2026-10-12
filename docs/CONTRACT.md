@@ -25,29 +25,30 @@ how to produce a change that fits the project.
 | Path | Responsibility |
 |---|---|
 | `src/main.rs` | Entry point, Tokio runtime bootstrap, engine orchestration |
-| `src/network.rs` | TCP listener, Wire Protocol header parsing, client task spawning, SQL command routing |
+| `src/network/mod.rs` | TCP listener, Wire Protocol framing, client tasks, SQL command routing |
 | `src/protocol/mod.rs` | Message types, opcodes, payload parsing, BSON, reply building |
 | `src/types/mod.rs` | `PartitionCommand`, document model, query model, shared types |
-| `src/storage/mod.rs` | Partition worker, in-memory storage, channel routing |
-| `src/storage/wal.rs` *(Phase 5)* | Write-Ahead Log with CRC32 checksums, LSN tracking, segment rolling |
-| `src/storage/page.rs` *(Phase 5)* | Fixed-size page management with integrity verification |
-| `src/storage/buffer_pool.rs` *(Phase 5)* | LRU page cache with pin/unpin eviction |
-| `src/storage/disk.rs` *(Phase 5)* | Low-level disk I/O for page read/write |
-| `src/storage/engine.rs` *(Phase 5)* | Unified storage (WAL + buffer pool + disk + memory) |
-| `src/storage/mvcc.rs` *(Phase 6)* | Multi-Version Concurrency Control, snapshot reads |
-| `src/storage/transaction.rs` *(Phase 6)* | Transaction manager (begin/commit/abort, conflict detection, timeout) |
+| `src/storage/mod.rs` | Partition worker and channel routing |
+| `src/storage/wal.rs` *(Phase 6)* | Write-Ahead Log with CRC32 checksums, LSN tracking, segment rolling |
+| `src/storage/page.rs` *(Phase 6)* | Fixed-size page envelope with integrity verification |
+| `src/storage/buffer_pool.rs` *(Phase 6)* | LRU page cache with pin/unpin eviction |
+| `src/storage/disk.rs` *(Phase 6)* | Low-level disk I/O for page read/write |
+| `src/storage/engine.rs` *(Phase 6)* | WAL, buffer pool, page store, and checkpoint |
+| `src/storage/heap.rs` *(Phase 7)* | Document pages, overflow chains, and the catalog |
+| `src/storage/crc.rs` *(Phase 6)* | CRC-32 used by the WAL and page checksums |
+| `src/storage/mvcc.rs` *(Phase 9)* | Multi-Version Concurrency Control, snapshot reads |
+| `src/storage/transaction.rs` *(Phase 9)* | Transaction manager (begin/commit/abort, conflict detection, timeout) |
 | `src/search/mod.rs` | Tantivy per-field indexes, tokenizers, relevance queries |
-| `src/index/btree.rs` *(Phase 7)* | B-Tree index for range queries + composite keys |
-| `src/index/hash_index.rs` *(Phase 7)* | Hash index for O(1) lookups |
-| `src/index/manager.rs` *(Phase 7)* | Index lifecycle management (create/drop/auto-maintain) |
-| `src/replication/oplog.rs` *(Phase 8)* | Capped operations log for replication |
-| `src/replication/replica.rs` *(Phase 8)* | Replica set management, heartbeat, election |
+| `src/index/btree.rs` *(Phase 10)* | B-Tree index for range queries + composite keys |
+| `src/index/hash_index.rs` *(Phase 10)* | Hash index for O(1) lookups |
+| `src/index/manager.rs` *(Phase 10)* | Index lifecycle management (create/drop/auto-maintain) |
+| `src/replication/oplog.rs` *(Phase 11)* | Capped operations log for replication |
+| `src/replication/replica.rs` *(Phase 11)* | Replica set management, heartbeat, election |
 | `src/query_engine/mod.rs` | DataFusion integration, SQL parser, query optimizer, execution |
 | `kova.toml` | Engine configuration file (env vars override it) |
 | `src/logger/` | Structured logging, log capture, external sinks |
 | `docs/` | Design specs, architecture decision records, roadmap |
-| `tests/unit/` *(novo)* | Unit tests for parsing, types, channel routing |
-| `tests/integration/` *(novo)* | Integration tests for end-to-end flows |
+| `docs/CONTRIBUTING.md` | How code in this repository is written |
 
 ## 4. Module Boundaries
 
@@ -59,14 +60,14 @@ how to produce a change that fits the project.
 - Mutating a partition MUST never panic. Errors are returned as `Result`
   and logged at the caller boundary.
 - **storage/wal.rs, storage/page.rs, storage/buffer_pool.rs,
-  storage/disk.rs, storage/engine.rs** (Phase 5+) MUST NOT access the
+  storage/disk.rs, storage/engine.rs** (Phase 6+) MUST NOT access the
   network layer directly. They are pure storage engine components.
-- **storage/mvcc.rs and storage/transaction.rs** (Phase 6+) MUST coordinate
+- **storage/mvcc.rs and storage/transaction.rs** (Phase 9+) MUST coordinate
   with the buffer pool and WAL, but MUST NOT access the network layer directly.
-- **index/btree.rs, index/hash_index.rs, index/manager.rs** (Phase 7+) MUST
+- **index/btree.rs, index/hash_index.rs, index/manager.rs** (Phase 10+) MUST
   integrate with the storage engine (read/write through the buffer pool) and
   with the query planner (index scan strategy).
-- **replication/oplog.rs and replication/replica.rs** (Phase 8+) MUST
+- **replication/oplog.rs and replication/replica.rs** (Phase 11+) MUST
   integrate with the storage engine (oplog reads/writes through the buffer
   pool) and with the network layer (heartbeat, election messages).
 
@@ -87,7 +88,7 @@ how to produce a change that fits the project.
   peer address.
 - Unrecoverable engine failures abort with a message to `stderr` and a
   non-zero exit code.
-- **Phase 5+:** Storage engine errors (WAL corruption, page I/O failure,
+- **Phase 6+:** Storage engine errors (WAL corruption, page I/O failure,
   buffer pool exhaustion) MUST be logged at `Error` level with enough
   context to diagnose the issue (page number, LSN, etc.) and MUST abort
   the operation (not panic) unless the error is unrecoverable (e.g., WAL
@@ -129,7 +130,7 @@ how to produce a change that fits the project.
   where possible.
 - `BytesMut` buffers MUST be sized to the expected maximum message size.
 - Partition reads MUST be lock-free via `crossbeam::channel`.
-- **Phase 5+:** The buffer pool LRU eviction MUST be efficient (O(1) or
+- **Phase 6+:** The buffer pool LRU eviction MUST be efficient (O(1) or
   O(log n) per operation). WAL writes MUST be batched where possible to
   reduce fsync overhead. Page reads/writes MUST use direct I/O or buffered
   I/O as appropriate for the workload. The page store MUST handle
@@ -152,26 +153,23 @@ how to produce a change that fits the project.
 | 1 | TCP listener, header parsing, OP_MSG detection, concurrent tasks |
 | 2 | Partition isolation, `PartitionCommand`, `crossbeam-channel` routing |
 | 3 | Tantivy full-text indexing (per-partition, hot, `$text`) |
-| 3.5 | Per-field boosts, wildcards, decay, analyzer config, `kova.toml` |
-| 4 | DataFusion SQL parsing, `db.runCommand({ sql: "..." })`, plan extraction |
-| 5 | Disk storage engine: WAL, buffer pool, page store, hybrid memory+disk |
-| 5b | Disk-resident collections: pages are the database, RAM is the buffer pool |
-| 5.5 | Aggregation pipeline, reading pages through the buffer pool |
-| 6 | Transactional storage: MVCC, ACID, multiple isolation levels |
-| 7 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
-| 8 | Replication & HA: Oplog, replica sets, heartbeat, election |
+| 4 | Per-field boosts, wildcards, decay, analyzer config, `kova.toml` |
+| 5 | DataFusion SQL parsing, `db.runCommand({ sql: "..." })`, plan extraction |
+| 6 | Disk storage engine: WAL, buffer pool, page store, hybrid memory+disk |
+| 7 | Disk-resident collections: pages are the database, RAM is the buffer pool |
+| 8 | Aggregation pipeline, reading pages through the buffer pool |
+| 9 | Transactional storage: MVCC, ACID, multiple isolation levels |
+| 10 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
+| 11 | Replication & HA: Oplog, replica sets, heartbeat, election |
 
 ## 12. Test Strategy
 
-- **Unit tests** belong in `tests/unit/` and test pure logic: header
-  parsing, BSON payload, `PartitionCommand` routing, log capture, WAL
-  entry encoding/decoding, page checksum verification, buffer pool LRU
-  eviction, MVCC version creation, transaction begin/commit/abort.
-- **Integration tests** belong in `tests/integration/` and test end-to-end
-  flows: network handshake, storage reads/writes, search queries, SQL
-  query execution, WAL replay on crash recovery, MVCC snapshot reads,
-  index creation/drop/query planner usage, oplog replay, replica set
-  failover.
+- **Unit tests** live next to the module they cover and test pure logic:
+  header parsing, BSON payload, `PartitionCommand` routing, log capture,
+  WAL entry encoding, page checksums, buffer pool eviction.
+- **Integration tests** live in the same crate and test end-to-end flows:
+  network handshake, storage reads/writes, search queries, SQL execution,
+  WAL replay, and, in later phases, MVCC, indexes, and replication.
 - **All tests must be deterministic** and MUST NOT depend on wall-clock
   time, random values, or external services.
 - **No test may pass by accident** — failing assertions MUST fail the
@@ -186,15 +184,15 @@ how to produce a change that fits the project.
 - [ ] `cargo test` passes
 - [ ] Public API documented with doc comments
 - [ ] No natural-language strings or comments in source code
-- [ ] New modules have unit tests in `tests/unit/`
-- [ ] New behaviours have integration tests in `tests/integration/`
-- [ ] **(Phase 5+)** WAL replay tests verify crash recovery
-- [ ] **(Phase 5+)** Page checksum verification tests
-- [ ] **(Phase 5+)** Buffer pool LRU eviction tests
-- [ ] **(Phase 6+)** MVCC snapshot read tests
-- [ ] **(Phase 6+)** Transaction ACID tests
-- [ ] **(Phase 7+)** Index creation/drop/query planner usage tests
-- [ ] **(Phase 8+)** Oplog replay and replica set failover tests
+- [ ] New modules have unit tests beside the code they cover
+- [ ] New behaviours have tests that exercise the path a caller uses
+- [ ] **(Phase 6+)** WAL replay tests verify crash recovery
+- [ ] **(Phase 6+)** Page checksum verification tests
+- [ ] **(Phase 6+)** Buffer pool LRU eviction tests
+- [ ] **(Phase 9+)** MVCC snapshot read tests
+- [ ] **(Phase 9+)** Transaction ACID tests
+- [ ] **(Phase 10+)** Index creation/drop/query planner usage tests
+- [ ] **(Phase 11+)** Oplog replay and replica set failover tests
 
 ---
 

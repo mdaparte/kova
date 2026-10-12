@@ -40,7 +40,7 @@ Rust concurrency, memory management, and storage engine design.
 
 ## 3. Non-Goals (Current Phase)
 
-- Sharding across multiple nodes is out of scope until Phase 8 (optional).
+- Sharding across multiple nodes is out of scope until Phase 11 (optional).
 - Full MongoDB command-level compatibility (only the wire protocol minimum
   required to speak with official drivers).
 - Documents stay on pages. A query reads through the buffer pool. Startup
@@ -64,8 +64,8 @@ Rust concurrency, memory management, and storage engine design.
               ┌───────────────┼───────────────┐
               │                               │
 ┌─────────────▼─────────────┐ ┌──────────────▼──────────────┐
-│    Query Engine (Phase 4) │ │   Aggregation Pipeline       │
-│   DataFusion SQL parsing + │ │   (Phase 5.5) $match,$group,  │
+│    Query Engine (Phase 5) │ │   Aggregation Pipeline       │
+│   DataFusion SQL parsing + │ │   (Phase 8) $match,$group,  │
 │   execution against storage│ │   $project,$sort,$limit...    │
 └─────────────┬──────────────┘ └──────────────┬──────────────┘
               │                               │
@@ -81,13 +81,13 @@ Rust concurrency, memory management, and storage engine design.
 │  │                                                        │  │
 │  │  ┌────────────────────────────────────────────────────┐ │  │
 │  │  │              MVCC + Transaction Manager            │ │  │
-│  │  │       (Phase 6: begin/commit/abort, isolation)     │ │  │
+│  │  │       (Phase 9: begin/commit/abort, isolation)     │ │  │
 │  │  └────────────────────────────────────────────────────┘ │  │
 │  │                                                        │  │
 │  │  ┌────────────────────────────────────────────────────┐ │  │
-│  │  │                Index Manager (Phase 7)             │ │  │
+│  │  │                Index Manager (Phase 10)             │ │  │
 │  │  │  B-Tree │ Hash │ Unique │ Sparse │ Full-Text       │ │  │
-│  │  │  (Tantivy already integrated in Phase 3/3.5)       │ │  │
+│  │  │  (Tantivy already integrated in Phase 3/4)       │ │  │
 │  │  └────────────────────────────────────────────────────┘ │  │
 │  └────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
@@ -95,7 +95,7 @@ Rust concurrency, memory management, and storage engine design.
               ┌───────────────┼───────────────┐
               │                               │
 ┌─────────────▼─────────────┐ ┌──────────────▼──────────────┐
-│   Replication (Phase 8)   │ │   Sharding (optional)        │
+│   Replication (Phase 11)   │ │   Sharding (optional)        │
 │   Oplog + Replica Sets +   │ │   Consistent Hashing +       │
 │   Heartbeat + Election     │ │   Key Range Sharding         │
 └───────────────────────────┘ └──────────────────────────────┘
@@ -119,7 +119,7 @@ Rust concurrency, memory management, and storage engine design.
   - Data commands (`insert`, `find`, `update`, `delete`, `count`, etc.)
     are routed to the storage layer via `PartitionCommand`.
 
-### 4.2 Query Engine (Phase 4)
+### 4.2 Query Engine (Phase 5)
 
 - **SQL Parsing:** Apache DataFusion parses SQL text and generates
   logical/physical plans.
@@ -130,7 +130,7 @@ Rust concurrency, memory management, and storage engine design.
   via the MongoDB wire protocol.
 - **Entry Point:** `db.runCommand({ sql: "SELECT ... FROM ... WHERE ..." })`.
 
-### 4.3 Storage Layer (Phase 5+)
+### 4.3 Storage Layer (Phase 6+)
 
 #### 4.3.1 WAL (Write-Ahead Log)
 
@@ -164,7 +164,7 @@ Rust concurrency, memory management, and storage engine design.
 - **Startup:** discover the page files, overlay the catalog, and replay the
   WAL tail onto the pages. The search index is rebuilt by scanning pages.
 
-#### 4.3.5 MVCC + Transactions (Phase 6)
+#### 4.3.5 MVCC + Transactions (Phase 9)
 
 - **MVCC:** Each document version gets a timestamp/LSN. Snapshot reads see
   the database as of a point in time. Garbage collection of old versions.
@@ -175,22 +175,22 @@ Rust concurrency, memory management, and storage engine design.
 - **Conflict Detection:** Write-write conflicts abort the later transaction.
 - **Timeout Enforcement:** Automatic transaction abort on timeout.
 
-### 4.4 Indexing Subsystem (Phase 7)
+### 4.4 Indexing Subsystem (Phase 10)
 
 - **B-Tree Indexes:** Ordered indexes for range queries + composite key support.
 - **Hash Indexes:** O(1) exact-match lookups.
 - **Unique Constraints:** Enforce uniqueness across indexed fields.
 - **Sparse Indexes:** Skip documents missing the indexed field.
-- **Full-Text Indexes (Tantivy):** Already integrated (Phase 3/3.5). The
+- **Full-Text Indexes (Tantivy):** Already integrated (Phase 3/4). The
   index manager creates, drops, and auto-maintains full-text indexes
   alongside other index types.
 - **Index Manager:** Creates, drops, and auto-maintains indexes. Indexes are
   updated on insert/update/delete. Index metadata stored in disk storage.
-- **Query Planner Integration:** The query planner (Phase 4 + DataFusion)
+- **Query Planner Integration:** The query planner (Phase 5 + DataFusion)
   consults the index manager to choose the best strategy: ID lookup → index
   scan → collection scan. `explain` plans show the chosen strategy.
 
-### 4.5 Replication (Phase 8)
+### 4.5 Replication (Phase 11)
 
 - **Oplog (Capped Operations Log):** Every write is recorded in a capped
   operations log with timestamps. Secondaries replay the oplog to stay in sync.
@@ -242,14 +242,14 @@ about and ignored.
 | 1 | TCP listener, header parsing, OP_MSG detection, concurrent tasks |
 | 2 | Partition isolation, `PartitionCommand`, `crossbeam-channel` routing |
 | 3 | Tantivy full-text indexing (per-partition, hot, `$text`) |
-| 3.5 | Per-field boosts, wildcards, decay, analyzer config, `kova.toml` |
-| 4 | DataFusion SQL parsing, `db.runCommand({ sql: "..." })`, plan extraction |
-| 5 | Disk storage engine: WAL, buffer pool, page store, hybrid memory+disk |
-| 5b | Disk-resident collections: pages are the database, RAM is the buffer pool |
-| 5.5 | Aggregation pipeline, reading pages through the buffer pool |
-| 6 | Transactional storage: MVCC, ACID, multiple isolation levels |
-| 7 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
-| 8 | Replication & HA: Oplog, replica sets, heartbeat, election |
+| 4 | Per-field boosts, wildcards, decay, analyzer config, `kova.toml` |
+| 5 | DataFusion SQL parsing, `db.runCommand({ sql: "..." })`, plan extraction |
+| 6 | Disk storage engine: WAL, buffer pool, page store, hybrid memory+disk |
+| 7 | Disk-resident collections: pages are the database, RAM is the buffer pool |
+| 8 | Aggregation pipeline, reading pages through the buffer pool |
+| 9 | Transactional storage: MVCC, ACID, multiple isolation levels |
+| 10 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
+| 11 | Replication & HA: Oplog, replica sets, heartbeat, election |
 
 ---
 

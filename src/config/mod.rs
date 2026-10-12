@@ -73,9 +73,9 @@ pub struct Config {
     /// not define (Kova extensions such as `$text.$boost`, or
     /// operators the engine does not implement yet).
     pub warn_on_non_mongo_queries: bool,
-    /// Full-text search behavior (Phase 3.5).
+    /// Full-text search behavior (Phase 4).
     pub search: SearchConfig,
-    /// Disk layout, WAL, and buffer pool (Phase 5).
+    /// Disk layout, WAL, and buffer pool (Phase 6).
     pub storage: StorageConfig,
 }
 

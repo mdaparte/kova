@@ -132,7 +132,7 @@ pub enum PartitionCommand {
     /// Kova records the declarations so `listIndexes` reports them
     /// back consistently, but does not yet build inverted structures
     /// for them: BM25 search covers text, and equality lookups scan
-    /// the in-memory map. Declarations are metadata until Phase 4.
+    /// the collection. Declarations are metadata until Phase 10.
     CreateIndexes {
         collection: String,
         indexes: Vec<Document>,
@@ -176,7 +176,7 @@ pub enum PartitionCommand {
     },
 }
 
-/// Phase 3.5 ranking options carried by a [`PartitionCommand::Search`].
+/// Phase 4 ranking options carried by a [`PartitionCommand::Search`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SearchOptions {
     /// Per-field BM25 multipliers (`$text.$boost`), mirroring MongoDB
