@@ -1618,8 +1618,7 @@ mod tests {
         let reply = special_command(&doc! { "hostInfo": 1.0 }).expect("hostInfo must be answered");
         assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
         assert!(
-            reply.get_str("system").unwrap().contains("macos")
-                || reply.get_str("system").unwrap().contains("darwin"),
+            reply.get_str("system").unwrap().contains(std::env::consts::OS),
             "system field must contain platform"
         );
         assert!(

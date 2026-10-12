@@ -130,6 +130,20 @@ impl BufferPool {
         Ok(())
     }
 
+    /// Drops a cached page without writing it. Used when a collection is
+    /// deleted and the dirty copy must not be flushed back.
+    pub fn discard(&mut self, page_id: u64) {
+        let Some(&slot) = self.index.get(&page_id) else {
+            return;
+        };
+        self.unlink(slot);
+        self.index.remove(&page_id);
+        self.frames[slot].live = false;
+        self.frames[slot].dirty = false;
+        self.frames[slot].pin = 0;
+        self.free.push(slot);
+    }
+
     /// Writes every dirty page and clears the dirty bit.
     pub fn flush(&mut self) -> Result<(), String> {
         let dirty: Vec<Page> = self

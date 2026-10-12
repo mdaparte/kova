@@ -43,9 +43,9 @@ Rust concurrency, memory management, and storage engine design.
 - Sharding across multiple nodes is out of scope until Phase 8 (optional).
 - Full MongoDB command-level compatibility (only the wire protocol minimum
   required to speak with official drivers).
-- Phase 5b is in scope now: documents stay on pages, and a query reads
-  through the buffer pool. Until that phase lands, startup still loads
-  the whole checkpoint into RAM.
+- Documents stay on pages. A query reads through the buffer pool. Startup
+  opens those pages and replays the WAL tail. It does not load the
+  collection into a map.
 
 ## 4. High-Level Architecture
 
@@ -157,13 +157,12 @@ Rust concurrency, memory management, and storage engine design.
 
 #### 4.3.4 Hybrid Memory + Disk Architecture
 
-- **Hot data in memory:** The partition hash map is the working set. Finds,
-  updates, and SQL read it.
-- **Durability on disk:** Mutations go to the WAL first. A checkpoint writes
-  the map into pages through the buffer pool and truncates that WAL.
-- **Startup today:** load the checkpoint and replay the WAL tail into the
-  partition map. Phase 5b stops doing that. The page file becomes the
-  database, and startup only opens the catalog plus the WAL tail.
+- **Hot data in memory:** the buffer pool. A miss reads the page from disk.
+  Finds, updates, and SQL walk pages; they do not keep the collection.
+- **Durability on disk:** mutations go to the WAL before a page is dirtied.
+  A checkpoint flushes dirty pages, records the LSN, and truncates that WAL.
+- **Startup:** discover the page files, overlay the catalog, and replay the
+  WAL tail onto the pages. The search index is rebuilt by scanning pages.
 
 #### 4.3.5 MVCC + Transactions (Phase 6)
 

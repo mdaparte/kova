@@ -167,7 +167,7 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   checkpoint, and crash recovery. ✅ Complete.
 - **Phase 5b — Disk-resident collections:** documents live in pages; the
   buffer pool is the only RAM that grows with the cache, not with the
-  database. 🔵 Current.
+  database. ✅ Complete.
 - **Phase 5.5 — Aggregation pipeline:** `aggregate` with `$match`, `$group`,
   `$project`, `$sort`, `$limit`, after Phase 5b, tested with mongosh. ⚪ Planned.
 - **Phase 6 — Transactional Storage:** MVCC, ACID transactions, multiple

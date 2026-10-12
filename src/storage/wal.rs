@@ -1,7 +1,7 @@
 //! Segmented write-ahead log.
 //!
-//! Every mutation is appended here before the partition applies it to
-//! the in-memory map. A record is `magic || lsn || crc32 || len || bson`.
+//! Every mutation is appended here before the partition dirties a page.
+//! A record is `magic || lsn || crc32 || len || bson`.
 //! The CRC covers the LSN and the payload, so a torn tail (crash mid-append)
 //! is truncated on open and a bit flip is rejected.
 //!

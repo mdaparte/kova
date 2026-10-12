@@ -1,28 +1,29 @@
-//! In-memory partition workers and command routing.
+//! Partition workers and command routing.
 //!
 //! This module implements the lock-free storage side of the engine.
-//! Each partition is a **single-threaded** worker (`std::thread`) that
-//! owns its own hash map of collections. Network tasks never touch
-//! storage memory directly: they send a [`CommandEnvelope`] through a
-//! `crossbeam::channel` and await the reply on a `oneshot`.
+//! Each partition is a **single-threaded** worker (`std::thread`).
+//! Documents live in pages. The worker's RAM is the buffer pool and
+//! the search index, not a copy of every document. Network tasks never
+//! touch storage memory directly: they send a [`CommandEnvelope`]
+//! through a `crossbeam::channel` and await the reply on a `oneshot`.
 //!
 //! Because a partition is confined to one thread, no `Mutex` or
 //! `RwLock` is required on the data structures — this is the core of
 //! the thread-per-core design described in `docs/ARCHITECTURE.md`.
 //!
-//! Durability sits beside that map. Each worker owns a
-//! [`engine::StorageEngine`]: mutations are appended to the WAL before
-//! they touch memory, and a checkpoint writes the map out as pages.
-//! Startup loads the checkpoint and replays the WAL tail.
+//! Each worker owns a [`engine::StorageEngine`]. Mutations are appended
+//! to the WAL before a page is dirtied. A checkpoint flushes those
+//! pages and records the LSN. Startup opens the pages and replays the
+//! WAL tail.
 
 mod buffer_pool;
 mod crc;
 mod disk;
 mod engine;
+mod heap;
 mod page;
 mod wal;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -35,11 +36,8 @@ use crate::logger::LOGGER;
 use crate::search::SearchIndex;
 use crate::types::{CommandEnvelope, DecaySpec, PartitionCommand, PartitionResult};
 
-use self::engine::{encode_image, StorageEngine};
+use self::engine::StorageEngine;
 use self::wal::WalOp;
-
-/// A collection of documents stored by a single partition.
-type Collection = Vec<Document>;
 
 /// A single-threaded storage worker.
 ///
@@ -48,21 +46,14 @@ type Collection = Vec<Document>;
 /// partition exclusively, so no synchronization primitives are needed.
 pub struct PartitionWorker {
     id: usize,
-    collections: HashMap<String, Collection>,
     receiver: Receiver<CommandEnvelope>,
     /// Full-text index mirroring this partition's documents.
     ///
     /// Field indexes are created lazily on first insert; a failure to
     /// allocate one is logged and that field is skipped, never fatal.
+    /// The postings live in RAM. The document bodies do not.
     index: SearchIndex,
-    /// Secondary index *declarations* per collection (`createIndexes`).
-    ///
-    /// Metadata only: it keeps `listIndexes` honest and stable for
-    /// drivers that create an index then list it, but nothing is built
-    /// from it yet — lookups still scan the in-memory map. Real index
-    /// construction is Phase 4.
-    declared_indexes: HashMap<String, Vec<Document>>,
-    /// WAL, checkpoint pages, and the buffer pool for this partition.
+    /// WAL, document pages, and the buffer pool for this partition.
     engine: StorageEngine,
 }
 
@@ -76,26 +67,28 @@ impl PartitionWorker {
         let pending = recovery.pending;
         let mut worker = Self {
             id,
-            collections: recovery.collections,
             receiver,
             index: SearchIndex::new(),
-            declared_indexes: recovery.indexes,
             engine,
         };
-        worker.reindex_all();
-        for op in pending {
-            let result = worker.apply(op.into_command());
+        // Replay before building the search index so tokenization sees
+        // the pages after the WAL tail, and each document is indexed once.
+        for record in pending {
+            let result = worker.apply_recorded(record.op.into_command(), false);
             if let PartitionResult::Error { message } = result {
                 LOGGER.warn(format!(
-                    "partition {} skipped a WAL record during recovery: {}",
-                    id, message
+                    "partition {} skipped WAL lsn {} during recovery: {}",
+                    id, record.lsn, message
                 ));
             }
+        }
+        if let Err(err) = worker.reindex_all() {
+            abort_storage(id, err);
         }
         LOGGER.info(format!(
             "Partition {} recovered {} collection(s), lsn {}",
             id,
-            worker.collections.len(),
+            worker.engine.collection_count(),
             worker.engine.last_lsn()
         ));
         worker
@@ -148,13 +141,24 @@ impl PartitionWorker {
         LOGGER.info(format!(
             "Partition worker {} shutting down ({} collections)",
             self.id,
-            self.collections.len()
+            self.engine.collection_count()
         ));
     }
 
-    /// Appends a mutating command to the WAL, applies it, and checkpoints
-    /// when the log has grown past the configured threshold.
-    fn execute(&mut self, command: PartitionCommand) -> PartitionResult {
+    /// Appends a mutating command to the WAL, applies it to pages, and
+    /// checkpoints when the log has grown past the configured threshold.
+    fn execute(&mut self, mut command: PartitionCommand) -> PartitionResult {
+        // An insert without `_id` gets one before the WAL record is
+        // written. Replay then sees the same id and does not store a
+        // second copy. Two identical documents from the client stay
+        // distinct because each call draws a new id.
+        if let PartitionCommand::Insert { documents, .. } = &mut command {
+            for document in documents.iter_mut() {
+                if document.get("_id").is_none() {
+                    document.insert("_id", bson::Bson::ObjectId(bson::oid::ObjectId::new()));
+                }
+            }
+        }
         let appended = if let Some(op) = WalOp::from_command(&command) {
             if let Err(message) = self.engine.append(&op) {
                 LOGGER.error(format!(
@@ -168,7 +172,7 @@ impl PartitionWorker {
             false
         };
 
-        let result = self.apply(command);
+        let result = self.apply_recorded(command, true);
 
         if appended && self.engine.should_checkpoint() {
             if let Err(message) = self.write_checkpoint() {
@@ -181,51 +185,41 @@ impl PartitionWorker {
         result
     }
 
-    /// Executes a command against this partition's data.
+    /// Executes a command against this partition's pages.
     ///
-    /// Callers that already appended a WAL record (or are replaying one)
-    /// use this directly so recovery does not write the log a second time.
-    fn apply(&mut self, command: PartitionCommand) -> PartitionResult {
+    /// `touch_index` is false while replaying the WAL. Recovery builds
+    /// the search index once, after every record has been applied.
+    fn apply_recorded(&mut self, command: PartitionCommand, touch_index: bool) -> PartitionResult {
         match command {
             PartitionCommand::Insert {
                 collection,
                 documents,
             } => {
-                let inserted_count = documents.len() as u32;
-                for document in &documents {
-                    self.index_document(&collection, document);
+                let stored = match self.engine.insert_documents(&collection, documents) {
+                    Ok(stored) => stored,
+                    Err(message) => return PartitionResult::Error { message },
+                };
+                if touch_index {
+                    for document in &stored {
+                        self.index_document(&collection, document);
+                    }
                 }
-                let docs = self.collections.entry(collection).or_default();
-                docs.extend(documents);
-                PartitionResult::Inserted { inserted_count }
+                PartitionResult::Inserted {
+                    inserted_count: stored.len() as u32,
+                }
             }
 
             PartitionCommand::Find { collection, filter } => {
-                let Some(docs) = self.collections.get(&collection) else {
-                    return PartitionResult::Found {
-                        documents: Vec::new(),
-                    };
-                };
-                let matches = docs
-                    .iter()
-                    .filter(|doc| document_matches(doc, &filter))
-                    .cloned()
-                    .collect();
-                PartitionResult::Found { documents: matches }
+                match self.engine.find_documents(&collection, &filter) {
+                    Ok(documents) => PartitionResult::Found { documents },
+                    Err(message) => PartitionResult::Error { message },
+                }
             }
 
             PartitionCommand::Count { collection, filter } => {
-                let count = self
-                    .collections
-                    .get(&collection)
-                    .map(|docs| {
-                        docs.iter()
-                            .filter(|doc| document_matches(doc, &filter))
-                            .count()
-                    })
-                    .unwrap_or(0);
-                PartitionResult::Counted {
-                    count: count as u64,
+                match self.engine.count_documents(&collection, &filter) {
+                    Ok(count) => PartitionResult::Counted { count },
+                    Err(message) => PartitionResult::Error { message },
                 }
             }
 
@@ -235,71 +229,39 @@ impl PartitionWorker {
                 update,
                 multi,
             } => {
-                let Some(docs) = self.collections.get_mut(&collection) else {
-                    return PartitionResult::Modified {
-                        matched_count: 0,
-                        modified_count: 0,
+                let (matched_count, updated) =
+                    match self
+                        .engine
+                        .update_documents(&collection, &filter, &update, multi)
+                    {
+                        Ok(updated) => updated,
+                        Err(message) => return PartitionResult::Error { message },
                     };
-                };
-
-                let mut matched_count = 0u32;
-                let mut modified_count = 0u32;
-                // The index needs the pre-update id to remove the old
-                // entry, so collect it while iterating.
-                let mut updated_ids: Vec<String> = Vec::new();
-                for doc in docs.iter_mut() {
-                    if document_matches(doc, &filter) {
-                        matched_count += 1;
-                        let id = document_id_string(doc);
-                        apply_update(doc, &update);
-                        updated_ids.push(id);
-                        modified_count += 1;
-                        if !multi {
-                            break;
-                        }
+                // `_id` is preserved, so removing and adding the same id
+                // replaces the postings with the new field values.
+                if touch_index {
+                    for doc in &updated {
+                        self.unindex_document(&collection, doc);
+                        self.index_document(&collection, doc);
                     }
                 }
-                // `docs` borrow ends here (NLL); the re-index below
-                // needs `&mut self` again.
-
-                // Re-index the modified documents so search reflects
-                // the new text (`_id` survives updates). The documents
-                // are cloned out of the map so the index methods can
-                // borrow `self` mutably.
-                let updated_docs: Vec<Document> = self
-                    .collections
-                    .get(&collection)
-                    .map(|docs| {
-                        updated_ids
-                            .iter()
-                            .filter_map(|id| {
-                                docs.iter()
-                                    .find(|doc| document_id_string(doc) == *id)
-                                    .cloned()
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                for doc in &updated_docs {
-                    self.unindex_document(&collection, doc);
-                    self.index_document(&collection, doc);
-                }
-
                 PartitionResult::Modified {
                     matched_count,
-                    modified_count,
+                    modified_count: updated.len() as u32,
                 }
             }
 
             PartitionCommand::Drop { collection } => {
-                self.collections.remove(&collection);
-                self.declared_indexes.remove(&collection);
-                if let Err(err) = self.index.remove_collection(&collection) {
-                    LOGGER.warn(format!(
-                        "Failed to drop collection {} from index: {}",
-                        collection, err
-                    ));
+                if let Err(message) = self.engine.drop_collection(&collection) {
+                    return PartitionResult::Error { message };
+                }
+                if touch_index {
+                    if let Err(err) = self.index.remove_collection(&collection) {
+                        LOGGER.warn(format!(
+                            "Failed to drop collection {} from index: {}",
+                            collection, err
+                        ));
+                    }
                 }
                 PartitionResult::Dropped { collection }
             }
@@ -309,24 +271,18 @@ impl PartitionWorker {
                 // this worker drops only the namespaces it owns, plus
                 // their search index entries. Bare namespaces belong
                 // to the "test" database by convention.
-                let prefix = format!("{}.", database);
-                let doomed: Vec<String> = self
-                    .collections
-                    .keys()
-                    .filter(|key| {
-                        key.starts_with(&prefix) || (database == "test" && !key.contains('.'))
-                    })
-                    .cloned()
-                    .collect();
-
-                for key in &doomed {
-                    self.collections.remove(key);
-                    self.declared_indexes.remove(key);
-                    if let Err(err) = self.index.remove_collection(key) {
-                        LOGGER.warn(format!(
-                            "Failed to drop collection {} from index: {}",
-                            key, err
-                        ));
+                let doomed = match self.engine.drop_database(&database) {
+                    Ok(doomed) => doomed,
+                    Err(message) => return PartitionResult::Error { message },
+                };
+                if touch_index {
+                    for key in &doomed {
+                        if let Err(err) = self.index.remove_collection(key) {
+                            LOGGER.warn(format!(
+                                "Failed to drop collection {} from index: {}",
+                                key, err
+                            ));
+                        }
                     }
                 }
                 PartitionResult::DroppedDatabase { database }
@@ -337,12 +293,11 @@ impl PartitionWorker {
                 // create; erroring (instead of a silent no-op) keeps
                 // the operation idempotent for the data: an existing
                 // collection is never recreated or cleared.
-                if self.collections.contains_key(&collection) {
+                if !self.engine.ensure_collection(&collection) {
                     return PartitionResult::Error {
                         message: format!("collection already exists: {}", collection),
                     };
                 }
-                self.collections.insert(collection, Vec::new());
                 PartitionResult::Created
             }
 
@@ -350,7 +305,7 @@ impl PartitionWorker {
                 // MongoDB answers NamespaceExists ("ns not found") for
                 // a collection it does not know; matching that keeps
                 // drivers from rendering a phantom empty collection.
-                if !self.collections.contains_key(&collection) {
+                if !self.engine.contains_collection(&collection) {
                     return PartitionResult::Error {
                         message: format!("ns not found: {}", collection),
                     };
@@ -359,8 +314,8 @@ impl PartitionWorker {
                 // Every collection carries the mandatory `_id_` index,
                 // followed by whatever `createIndexes` declared.
                 let mut indexes = vec![default_id_index()];
-                if let Some(declared) = self.declared_indexes.get(&collection) {
-                    indexes.extend(declared.iter().cloned());
+                if let Some(declared) = self.engine.index_specs(&collection) {
+                    indexes.extend(declared);
                 }
                 PartitionResult::ListedIndexes { indexes }
             }
@@ -373,12 +328,8 @@ impl PartitionWorker {
                 // collection when it is missing. Spring Data relies on
                 // this: it declares indexes at start-up, long before
                 // the first insert.
-                let created_collection = !self.collections.contains_key(&collection);
-                if created_collection {
-                    self.collections.insert(collection.clone(), Vec::new());
-                }
-
-                let declared = self.declared_indexes.entry(collection).or_default();
+                let created_collection = self.engine.ensure_collection(&collection);
+                let mut declared = self.engine.index_specs(&collection).unwrap_or_default();
                 let num_indexes_before = declared.len() as u32 + 1;
 
                 for index in indexes {
@@ -406,9 +357,11 @@ impl PartitionWorker {
                     }
                 }
 
+                let num_indexes_after = declared.len() as u32 + 1;
+                self.engine.set_indexes(&collection, declared);
                 PartitionResult::IndexesCreated {
                     num_indexes_before,
-                    num_indexes_after: declared.len() as u32 + 1,
+                    num_indexes_after,
                     created_collection,
                 }
             }
@@ -430,8 +383,9 @@ impl PartitionWorker {
                 // server-generated `uuid` is omitted). The filter uses
                 // the same equality matcher as every other command.
                 let mut collections: Vec<Document> = self
-                    .collections
-                    .keys()
+                    .engine
+                    .names()
+                    .iter()
                     .filter_map(|key| {
                         let bare = key.strip_prefix(&prefix)?;
                         if bare.is_empty() || bare.contains('.') {
@@ -471,10 +425,10 @@ impl PartitionWorker {
                 // across partitions when it merges the replies.
                 let mut emptiness: std::collections::BTreeMap<String, bool> =
                     std::collections::BTreeMap::new();
-                for (key, docs) in &self.collections {
+                for key in self.engine.names() {
                     let name = key.split_once('.').map_or("test", |(db, _)| db);
                     let entry = emptiness.entry(name.to_string()).or_insert(true);
-                    *entry &= docs.is_empty();
+                    *entry &= self.engine.doc_count(&key) == 0;
                 }
 
                 let databases: Vec<Document> = emptiness
@@ -495,32 +449,21 @@ impl PartitionWorker {
                 // Studio 3T and Compass render a collection's storage
                 // panel from this; a missing namespace is an error so
                 // the tools do not show a phantom zero-size collection.
-                let Some(docs) = self.collections.get(&collection) else {
+                let Some((count, size)) = (match self.engine.bson_size(&collection) {
+                    Ok(stats) => stats,
+                    Err(message) => return PartitionResult::Error { message },
+                }) else {
                     return PartitionResult::Error {
                         message: format!("ns not found: {}", collection),
                     };
                 };
 
-                // `size` is the real serialized footprint: every
-                // document is measured, not estimated.
-                let size: u64 = docs
-                    .iter()
-                    .map(|doc| {
-                        bson::to_vec(doc)
-                            .map(|bytes| bytes.len() as u64)
-                            .unwrap_or(0)
-                    })
-                    .sum();
-                let count = docs.len() as u64;
+                // `size` is the serialized BSON footprint of the documents.
                 let avg_obj_size = size.checked_div(count).unwrap_or(0);
 
-                // Index sizes are declared metadata only (Phase 4
-                // builds the real structures), so they report zero
-                // rather than an invented number.
-                let declared = self
-                    .declared_indexes
-                    .get(&collection)
-                    .map_or(0, |v| v.len());
+                // Index sizes are declared metadata only, so they report
+                // zero rather than an invented number.
+                let declared = self.engine.index_count(&collection);
 
                 PartitionResult::CollectionStats {
                     stats: doc! {
@@ -528,7 +471,7 @@ impl PartitionWorker {
                         "count": count as i64,
                         "size": size as i64,
                         "avgObjSize": avg_obj_size as i64,
-                        // In-memory storage: storage mirrors `size`.
+                        // Document bytes, measured from the BSON bodies.
                         "storageSize": size as i64,
                         "capped": false,
                         "nindexes": (declared + 1) as i64,
@@ -548,23 +491,22 @@ impl PartitionWorker {
                 let mut data_size = 0u64;
                 let mut indexes = 0u64;
 
-                for (key, docs) in &self.collections {
+                for key in self.engine.names() {
                     // Bare namespaces belong to `test` by convention.
                     let owned =
                         key.starts_with(&prefix) || (database == "test" && !key.contains('.'));
                     if !owned {
                         continue;
                     }
+                    let (count, size) = match self.engine.bson_size(&key) {
+                        Ok(Some(stats)) => stats,
+                        Ok(None) => continue,
+                        Err(message) => return PartitionResult::Error { message },
+                    };
                     collections += 1;
-                    objects += docs.len() as u64;
-                    data_size += docs
-                        .iter()
-                        .map(|doc| bson::to_vec(doc).map(|b| b.len() as u64).unwrap_or(0))
-                        .sum::<u64>();
-                    indexes += self
-                        .declared_indexes
-                        .get(key)
-                        .map_or(1, |declared| declared.len() as u64 + 1);
+                    objects += count;
+                    data_size += size;
+                    indexes += self.engine.index_count(&key) as u64 + 1;
                 }
 
                 PartitionResult::DatabaseStats {
@@ -587,21 +529,17 @@ impl PartitionWorker {
                 };
 
                 // The index stores ids, not documents: look each hit up
-                // in the map and apply any non-`$text` predicates the
+                // on its page and apply any non-`$text` predicates the
                 // client also sent.
-                let Some(docs) = self.collections.get(&collection) else {
-                    return PartitionResult::Found {
-                        documents: Vec::new(),
-                    };
-                };
-
-                // (score, document) pairs in BM25 order, so a later
-                // decay re-rank starts from the relevance ordering.
                 let mut ranked: Vec<(f32, Document)> = Vec::with_capacity(hits.len());
                 for hit in hits {
-                    if let Some(doc) = docs.iter().find(|doc| document_id_string(doc) == hit.id) {
-                        if document_matches(doc, &filter) {
-                            ranked.push((hit.score, doc.clone()));
+                    let doc = match self.engine.find_by_id(&collection, &hit.id) {
+                        Ok(doc) => doc,
+                        Err(message) => return PartitionResult::Error { message },
+                    };
+                    if let Some(doc) = doc {
+                        if document_matches(&doc, &filter) {
+                            ranked.push((hit.score, doc));
                         }
                     }
                 }
@@ -620,67 +558,40 @@ impl PartitionWorker {
                 filter,
                 limit,
             } => {
-                let Some(docs) = self.collections.get_mut(&collection) else {
-                    return PartitionResult::Deleted { deleted_count: 0 };
+                let removed = match self.engine.delete_documents(&collection, &filter, limit) {
+                    Ok(removed) => removed,
+                    Err(message) => return PartitionResult::Error { message },
                 };
-
-                // Snapshot the documents about to be removed so they
-                // can be unindexed after the borrow ends.
-                let mut removed_docs: Vec<Document> = Vec::new();
-                let before = docs.len();
-                if limit == 0 {
-                    // deleteMany: drop every match.
-                    docs.retain(|doc| {
-                        let matches = document_matches(doc, &filter);
-                        if matches {
-                            removed_docs.push(doc.clone());
-                        }
-                        !matches
-                    });
-                } else {
-                    // deleteOne (or a bounded delete): stop after `limit`.
-                    let mut removed = 0u32;
-                    docs.retain(|doc| {
-                        let matches = document_matches(doc, &filter) && removed < limit;
-                        if matches {
-                            removed_docs.push(doc.clone());
-                            removed += 1;
-                        }
-                        !matches
-                    });
+                if touch_index {
+                    for doc in &removed {
+                        self.unindex_document(&collection, doc);
+                    }
                 }
-                let deleted_count = (before - docs.len()) as u32;
-                // `docs` borrow ends here (NLL); unindexing below
-                // needs `&mut self` again.
-
-                for doc in &removed_docs {
-                    self.unindex_document(&collection, doc);
+                PartitionResult::Deleted {
+                    deleted_count: removed.len() as u32,
                 }
-
-                PartitionResult::Deleted { deleted_count }
             }
         }
     }
 
-    /// Rebuilds the Tantivy index from the restored working set.
+    /// Rebuilds the Tantivy index by scanning pages one at a time.
     ///
-    /// The search index lives in RAM. Checkpoint pages store documents,
-    /// not postings, so every startup tokenizes the map again.
-    fn reindex_all(&mut self) {
-        let snapshot: Vec<(String, Document)> = self
-            .collections
-            .iter()
-            .flat_map(|(name, docs)| docs.iter().map(|doc| (name.clone(), doc.clone())))
-            .collect();
-        for (collection, document) in snapshot {
-            self.index_document(&collection, &document);
-        }
+    /// The search index lives in RAM. Pages store the documents, not
+    /// the postings, so every startup tokenizes them again.
+    fn reindex_all(&mut self) -> Result<(), String> {
+        let index = &mut self.index;
+        self.engine.for_each_document(|collection, document| {
+            let id = document_id_string(document);
+            let fields = extract_field_values(document);
+            if let Err(err) = index.add(collection, &id, &fields) {
+                LOGGER.warn(format!("Failed to index document {}: {}", id, err));
+            }
+        })
     }
 
-    /// Writes the working set through the buffer pool and truncates the WAL.
+    /// Flushes dirty pages and truncates the WAL they cover.
     fn write_checkpoint(&mut self) -> Result<(), String> {
-        let image = encode_image(&self.collections, &self.declared_indexes)?;
-        self.engine.store_checkpoint(&image)
+        self.engine.checkpoint_pages()
     }
 }
 
@@ -712,7 +623,7 @@ fn default_id_index() -> Document {
 /// within a collection). Documents inserted through internals that
 /// skipped `_id` fall back to a content hash, which keeps the id
 /// stable across index rebuilds.
-fn document_id_string(doc: &Document) -> String {
+pub(super) fn document_id_string(doc: &Document) -> String {
     use bson::Bson;
 
     match doc.get("_id") {
@@ -913,7 +824,7 @@ fn as_number(value: &bson::Bson) -> Option<f64> {
 /// Only the implicit replacement form and the `$set` operator are
 /// supported in Phase 2. Unknown operators leave the document unchanged
 /// and are reported by the caller as a no-op modification.
-fn apply_update(doc: &mut Document, update: &Document) {
+pub(super) fn apply_update(doc: &mut Document, update: &Document) {
     if let Ok(set) = update.get_document("$set") {
         for (key, value) in set {
             doc.insert(key, value.clone());
@@ -1850,7 +1761,10 @@ mod tests {
         router
             .dispatch(PartitionCommand::Insert {
                 collection: "shop.orders".into(),
-                documents: vec![doc! { "sku": "a" }, doc! { "sku": "bb" }],
+                documents: vec![
+                    doc! { "_id": 1, "sku": "a" },
+                    doc! { "_id": 2, "sku": "bb" },
+                ],
             })
             .expect("worker reachable")
             .await
@@ -1868,8 +1782,9 @@ mod tests {
 
                 // `size` must equal the real serialized footprint, not
                 // an estimate: compute it independently here.
-                let expected: i64 = bson::to_vec(&doc! { "sku": "a" }).unwrap().len() as i64
-                    + bson::to_vec(&doc! { "sku": "bb" }).unwrap().len() as i64;
+                let expected: i64 = bson::to_vec(&doc! { "_id": 1, "sku": "a" }).unwrap().len()
+                    as i64
+                    + bson::to_vec(&doc! { "_id": 2, "sku": "bb" }).unwrap().len() as i64;
                 assert_eq!(stats.get_i64("size"), Ok(expected));
                 assert_eq!(stats.get_i64("avgObjSize"), Ok(expected / 2));
                 assert!(!stats.get_bool("capped").unwrap());

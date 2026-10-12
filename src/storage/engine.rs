@@ -1,14 +1,8 @@
 //! Per-partition storage engine: WAL, page store, and buffer pool.
 //!
-//! The worker still serves queries from its in-memory map. This engine
-//! makes that map durable:
-//!
-//! 1. A mutation is appended to the WAL before the map changes.
-//! 2. A checkpoint writes the map into fixed-size pages through the
-//!    buffer pool, records the LSN, and deletes the WAL segments the
-//!    snapshot already covers.
-//! 3. Startup loads those pages and returns the WAL tail for the worker
-//!    to apply.
+//! Documents live in pages. The buffer pool caches the pages a query
+//! is touching. A checkpoint flushes dirty pages and records the LSN;
+//! it does not copy the collection into one BSON image.
 //!
 //! On-disk layout, one directory per partition:
 //!
@@ -18,39 +12,26 @@
 //!   wal/0000000000000001.wal
 //!   pages/0000000000000001.page
 //! ```
-//!
-//! `checkpoint.bin` is the source of truth for which pages belong to the
-//! latest snapshot. A crash while writing new pages leaves the previous
-//! manifest in place; orphan page files are removed on the next open.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-use bson::{doc, Bson, Document};
 
 use crate::config::StorageConfig;
 use crate::logger::LOGGER;
 
 use super::buffer_pool::BufferPool;
 use super::disk::{atomic_write, io_err, PageStore};
-use super::page::{Page, PAGE_HEADER_LEN};
+use super::heap::Heap;
+use super::page::Page;
 use super::wal::{Wal, WalOp, WalRecord};
 
 const MANIFEST_MAGIC: u32 = 0x4348_4B50; // CHKP
 const MANIFEST_VERSION: u32 = 1;
 
-/// Collections or index declarations, keyed by namespace.
-type SnapshotMap = HashMap<String, Vec<Document>>;
-
-/// State loaded from disk, plus the WAL tail the worker still has to apply.
+/// WAL records that still have to be applied to pages.
 pub struct Recovery {
-    /// Collections restored from the last checkpoint.
-    pub collections: SnapshotMap,
-    /// Index declarations restored from the last checkpoint.
-    pub indexes: SnapshotMap,
-    /// Mutations with an LSN above the checkpoint.
-    pub pending: Vec<WalOp>,
+    /// Mutations with an LSN above the catalog watermark.
+    pub pending: Vec<WalRecord>,
 }
 
 struct Manifest {
@@ -63,16 +44,15 @@ struct Manifest {
 /// Durability for one partition thread.
 pub struct StorageEngine {
     partition: usize,
-    page_size: usize,
     sync: bool,
     checkpoint_every: u64,
     checkpoint_on_shutdown: bool,
     appends_since_checkpoint: u64,
-    next_page_id: u64,
     manifest_path: PathBuf,
     wal: Wal,
-    pool: BufferPool,
-    disk: PageStore,
+    pub(super) pool: BufferPool,
+    pub(super) disk: PageStore,
+    pub(super) heap: Heap,
 }
 
 impl StorageEngine {
@@ -99,59 +79,43 @@ impl StorageEngine {
         )?;
         Ok(Self {
             partition,
-            page_size,
             sync: config.wal_fsync,
             checkpoint_every: config.checkpoint_every,
             checkpoint_on_shutdown: config.checkpoint_on_shutdown,
             appends_since_checkpoint: 0,
-            next_page_id: 1,
             manifest_path: root.join("checkpoint.bin"),
             wal,
             pool,
             disk,
+            heap: Heap::empty(page_size),
         })
     }
 
-    /// Loads the latest checkpoint and the WAL records that follow it.
+    /// Opens every page file, overlays the catalog, and returns the WAL
+    /// tail. Page files that are not in the manifest are kept: a crash
+    /// can flush a dirty page before the catalog records it.
     pub fn load(&mut self) -> Result<Recovery, String> {
         let manifest = self.read_manifest()?;
         self.wal.set_next_lsn(manifest.next_lsn);
-        self.next_page_id = manifest.next_page_id.max(1);
-
-        let mut image = Vec::new();
-        for page_id in &manifest.page_ids {
-            let page = self.pool.fetch(*page_id)?;
-            image.extend_from_slice(&page.payload);
-            self.pool.unpin(*page_id)?;
-        }
-        let (collections, indexes) = if image.is_empty() {
-            (HashMap::new(), HashMap::new())
-        } else {
-            decode_image(&image)?
-        };
-
-        // Drop page files that a crashed checkpoint left behind.
-        self.disk.retain(&manifest.page_ids)?;
+        let ids = self.disk.list_ids()?;
+        self.heap.discover(&mut self.pool, &ids)?;
+        self.heap.advance_next_page_id(manifest.next_page_id);
 
         let records = self.wal.replay()?;
+        let applied = self.heap.applied_lsn();
         let pending = records
             .into_iter()
-            .filter(|record| record.lsn > manifest.checkpoint_lsn)
-            .map(|WalRecord { op, .. }| op)
+            .filter(|record| record.lsn > applied)
             .collect::<Vec<_>>();
 
         LOGGER.info(format!(
-            "partition {} loaded checkpoint lsn {}, {} pending wal record(s)",
+            "partition {} loaded catalog lsn {}, {} pending wal record(s)",
             self.partition,
-            manifest.checkpoint_lsn,
+            applied,
             pending.len()
         ));
 
-        Ok(Recovery {
-            collections,
-            indexes,
-            pending,
-        })
+        Ok(Recovery { pending })
     }
 
     /// Appends a mutation. The caller applies it to memory after this returns.
@@ -176,19 +140,14 @@ impl StorageEngine {
         self.wal.last_lsn()
     }
 
-    /// Writes `image` as the new snapshot and drops the WAL it covers.
-    pub fn store_checkpoint(&mut self, image: &[u8]) -> Result<(), String> {
+    /// Flushes dirty pages, records the LSN, and drops the WAL it covers.
+    ///
+    /// The document bodies are already in the page files. This does not
+    /// build a second BSON image of the collections.
+    pub fn checkpoint_pages(&mut self) -> Result<(), String> {
         let lsn = self.wal.last_lsn();
-        let mut page_ids = Vec::new();
-        if !image.is_empty() {
-            let capacity = self.page_size - PAGE_HEADER_LEN;
-            for chunk in image.chunks(capacity) {
-                let id = self.next_page_id;
-                self.next_page_id += 1;
-                self.pool.insert(Page::new(id, lsn, chunk.to_vec()))?;
-                page_ids.push(id);
-            }
-        }
+        self.heap.set_applied_lsn(lsn);
+        self.heap.persist_catalog(&mut self.pool)?;
         self.pool.flush()?;
         let stats = self.pool.stats();
         LOGGER.debug(format!(
@@ -196,10 +155,11 @@ impl StorageEngine {
             self.partition, stats.hits, stats.misses, stats.evictions, stats.pinned
         ));
 
+        let page_ids = self.heap.live_page_ids();
         let manifest = Manifest {
-            checkpoint_lsn: lsn,
+            checkpoint_lsn: self.heap.applied_lsn(),
             next_lsn: self.wal.next_lsn(),
-            next_page_id: self.next_page_id,
+            next_page_id: self.heap.next_page_id(),
             page_ids: page_ids.clone(),
         };
         manifest.write(&self.manifest_path, self.sync)?;
@@ -210,10 +170,132 @@ impl StorageEngine {
         LOGGER.info(format!(
             "partition {} checkpoint lsn {} ({} pages)",
             self.partition,
-            lsn,
+            self.heap.applied_lsn(),
             page_ids.len()
         ));
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn pool_stats(&self) -> super::buffer_pool::PoolStats {
+        self.pool.stats()
+    }
+
+    #[cfg(test)]
+    pub fn retained_documents(&self) -> usize {
+        self.heap.retained_documents()
+    }
+
+    pub fn collection_count(&self) -> usize {
+        self.heap.collection_count()
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.heap.names()
+    }
+
+    pub fn contains_collection(&self, collection: &str) -> bool {
+        self.heap.contains(collection)
+    }
+
+    pub fn doc_count(&self, collection: &str) -> u64 {
+        self.heap.doc_count(collection)
+    }
+
+    pub fn index_specs(&self, collection: &str) -> Option<Vec<bson::Document>> {
+        self.heap.index_specs(collection)
+    }
+
+    pub fn index_count(&self, collection: &str) -> usize {
+        self.heap.index_count(collection)
+    }
+
+    pub fn ensure_collection(&mut self, collection: &str) -> bool {
+        self.heap.ensure_collection(collection)
+    }
+
+    pub fn set_indexes(&mut self, collection: &str, indexes: Vec<bson::Document>) {
+        self.heap.set_indexes(collection, indexes);
+    }
+
+    pub fn insert_documents(
+        &mut self,
+        collection: &str,
+        documents: Vec<bson::Document>,
+    ) -> Result<Vec<bson::Document>, String> {
+        self.heap.insert(&mut self.pool, collection, documents)
+    }
+
+    pub fn find_documents(
+        &mut self,
+        collection: &str,
+        filter: &bson::Document,
+    ) -> Result<Vec<bson::Document>, String> {
+        self.heap.find(&mut self.pool, collection, filter)
+    }
+
+    pub fn count_documents(
+        &mut self,
+        collection: &str,
+        filter: &bson::Document,
+    ) -> Result<u64, String> {
+        self.heap.count(&mut self.pool, collection, filter)
+    }
+
+    pub fn find_by_id(
+        &mut self,
+        collection: &str,
+        id: &str,
+    ) -> Result<Option<bson::Document>, String> {
+        self.heap.find_by_id(&mut self.pool, collection, id)
+    }
+
+    pub fn for_each_document(
+        &mut self,
+        visit: impl FnMut(&str, &bson::Document),
+    ) -> Result<(), String> {
+        self.heap.for_each_document(&mut self.pool, visit)
+    }
+
+    pub fn update_documents(
+        &mut self,
+        collection: &str,
+        filter: &bson::Document,
+        update: &bson::Document,
+        multi: bool,
+    ) -> Result<(u32, Vec<bson::Document>), String> {
+        self.heap.update(
+            &mut self.pool,
+            &self.disk,
+            collection,
+            filter,
+            update,
+            multi,
+        )
+    }
+
+    pub fn delete_documents(
+        &mut self,
+        collection: &str,
+        filter: &bson::Document,
+        limit: u32,
+    ) -> Result<Vec<bson::Document>, String> {
+        self.heap
+            .delete(&mut self.pool, &self.disk, collection, filter, limit)
+    }
+
+    pub fn drop_collection(&mut self, collection: &str) -> Result<bool, String> {
+        self.heap
+            .drop_collection(&mut self.pool, &self.disk, collection)
+    }
+
+    pub fn drop_database(&mut self, database: &str) -> Result<Vec<String>, String> {
+        self.heap
+            .drop_database(&mut self.pool, &self.disk, database)
+    }
+
+    pub fn bson_size(&mut self, collection: &str) -> Result<Option<(u64, u64)>, String> {
+        self.heap.bson_size(&mut self.pool, collection)
     }
 
     fn read_manifest(&self) -> Result<Manifest, String> {
@@ -227,66 +309,6 @@ impl StorageEngine {
         }
         Manifest::read(&self.manifest_path)
     }
-}
-
-/// Serializes the working set into the checkpoint payload.
-pub fn encode_image(collections: &SnapshotMap, indexes: &SnapshotMap) -> Result<Vec<u8>, String> {
-    let mut names: Vec<&String> = collections.keys().collect();
-    names.sort();
-    let mut cols = Document::new();
-    for name in names {
-        let docs = &collections[name];
-        cols.insert(
-            name,
-            Bson::Array(docs.iter().cloned().map(Bson::Document).collect()),
-        );
-    }
-
-    let mut index_names: Vec<&String> = indexes.keys().collect();
-    index_names.sort();
-    let mut idxs = Document::new();
-    for name in index_names {
-        let docs = &indexes[name];
-        idxs.insert(
-            name,
-            Bson::Array(docs.iter().cloned().map(Bson::Document).collect()),
-        );
-    }
-
-    let image = doc! {
-        "collections": cols,
-        "indexes": idxs,
-    };
-    bson::to_vec(&image).map_err(|err| format!("checkpoint encode: {}", err))
-}
-
-fn decode_image(bytes: &[u8]) -> Result<(SnapshotMap, SnapshotMap), String> {
-    let image: Document =
-        bson::from_slice(bytes).map_err(|err| format!("checkpoint decode: {}", err))?;
-    let collections = decode_map(image.get_document("collections").ok())?;
-    let indexes = decode_map(image.get_document("indexes").ok())?;
-    Ok((collections, indexes))
-}
-
-fn decode_map(doc: Option<&Document>) -> Result<SnapshotMap, String> {
-    let mut map = HashMap::new();
-    let Some(doc) = doc else {
-        return Ok(map);
-    };
-    for (name, value) in doc {
-        let array = value
-            .as_array()
-            .ok_or_else(|| format!("checkpoint entry {} is not an array", name))?;
-        let mut docs = Vec::with_capacity(array.len());
-        for item in array {
-            let document = item
-                .as_document()
-                .ok_or_else(|| format!("checkpoint entry {} has a non-document", name))?;
-            docs.push(document.clone());
-        }
-        map.insert(name.clone(), docs);
-    }
-    Ok(map)
 }
 
 impl Manifest {
@@ -376,7 +398,7 @@ mod tests {
     fn config(dir: &Path) -> StorageConfig {
         StorageConfig {
             data_dir: dir.to_string_lossy().into_owned(),
-            page_size: 64,
+            page_size: 512,
             buffer_pool_pages: 2,
             wal_fsync: false,
             wal_segment_bytes: 1024 * 1024,
@@ -411,34 +433,114 @@ mod tests {
 
         let mut engine = StorageEngine::open(0, &config).unwrap();
         let recovery = engine.load().unwrap();
-        assert!(recovery.collections.is_empty());
         assert_eq!(recovery.pending.len(), 1);
-
-        let mut collections = HashMap::new();
-        collections.insert(
-            "db.emp".into(),
-            vec![doc! { "name": "SMITH", "note": "x".repeat(80) }],
-        );
-        let image = encode_image(&collections, &HashMap::new()).unwrap();
-        assert!(
-            image.len() > 32,
-            "the snapshot must span more than one page"
-        );
-        engine.store_checkpoint(&image).unwrap();
+        let WalOp::Insert {
+            collection,
+            documents,
+        } = recovery.pending[0].op.clone()
+        else {
+            panic!("expected the insert record");
+        };
+        engine.insert_documents(&collection, documents).unwrap();
+        engine.checkpoint_pages().unwrap();
         let wal_dir = dir.join("partition-0").join("wal");
         assert!(
             fs::read_dir(&wal_dir).unwrap().next().is_none(),
             "checkpoint truncates the WAL"
         );
+        assert_eq!(engine.retained_documents(), 0);
         drop(engine);
 
         let mut engine = StorageEngine::open(0, &config).unwrap();
         let recovery = engine.load().unwrap();
         assert!(recovery.pending.is_empty());
-        assert_eq!(
-            recovery.collections["db.emp"][0].get_str("name").unwrap(),
-            "SMITH"
+        let found = engine.find_documents("db.emp", &doc! {}).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].get_str("name").unwrap(), "SMITH");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_find_reads_pages_evicted_from_a_small_pool() {
+        let dir = scratch();
+        let config = config(&dir);
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let documents: Vec<_> = (0..6)
+            .map(|n| doc! { "_id": n, "name": format!("row-{n}"), "pad": "p".repeat(400) })
+            .collect();
+        engine.insert_documents("db.t", documents).unwrap();
+        assert_eq!(engine.retained_documents(), 0);
+        let found = engine
+            .find_documents("db.t", &doc! { "name": "row-5" })
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(
+            engine.pool_stats().misses > 0,
+            "a pool of 2 pages must read the rest from disk"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_update_and_delete_of_an_evicted_document() {
+        let dir = scratch();
+        let config = config(&dir);
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let documents: Vec<_> = (0..6)
+            .map(|n| doc! { "_id": n, "name": format!("row-{n}"), "pad": "p".repeat(400) })
+            .collect();
+        engine.insert_documents("db.t", documents).unwrap();
+        engine.checkpoint_pages().unwrap();
+        drop(engine);
+
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let (matched, _) = engine
+            .update_documents(
+                "db.t",
+                &doc! { "name": "row-4" },
+                &doc! { "$set": { "name": "updated" } },
+                false,
+            )
+            .unwrap();
+        assert_eq!(matched, 1);
+        let removed = engine
+            .delete_documents("db.t", &doc! { "name": "row-1" }, 1)
+            .unwrap();
+        assert_eq!(removed.len(), 1);
+        let found = engine.find_documents("db.t", &doc! {}).unwrap();
+        assert_eq!(found.len(), 5);
+        assert!(found
+            .iter()
+            .any(|doc| doc.get_str("name").unwrap() == "updated"));
+        assert!(found
+            .iter()
+            .all(|doc| doc.get_str("name").unwrap() != "row-1"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_overflow_document_round_trips() {
+        let dir = scratch();
+        let config = config(&dir);
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let wide = "w".repeat(800);
+        engine
+            .insert_documents("db.wide", vec![doc! { "_id": "big", "blob": &wide }])
+            .unwrap();
+        let found = engine.find_documents("db.wide", &doc! {}).unwrap();
+        assert_eq!(found[0].get_str("blob").unwrap(), wide);
+        engine.checkpoint_pages().unwrap();
+        drop(engine);
+
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let found = engine.find_documents("db.wide", &doc! {}).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].get_str("blob").unwrap(), wide);
         let _ = fs::remove_dir_all(dir);
     }
 }
