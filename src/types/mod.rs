@@ -73,6 +73,17 @@ pub enum PartitionResult {
         data_size: u64,
         indexes: u64,
     },
+    /// `aggregate` needs a foreign collection this partition does not own.
+    ///
+    /// The network layer loads that collection from its owner and
+    /// retries the pipeline with the documents attached.
+    NeedForeign { namespace: String },
+    /// `$out` produced documents. The network layer writes them with
+    /// a normal insert so the WAL records the mutation.
+    StageOut {
+        namespace: String,
+        documents: Vec<Document>,
+    },
     /// The command could not be executed.
     Error { message: String },
 }
@@ -86,9 +97,27 @@ pub enum PartitionCommand {
         documents: Vec<Document>,
     },
     /// Find documents matching a filter.
+    ///
+    /// `projection`, `sort`, `skip`, and `limit` shape the cursor after
+    /// the filter. `limit == None` means the command did not ask for a
+    /// cap (a find `limit` of 0 is the same thing).
     Find {
         collection: String,
         filter: Document,
+        projection: Option<Document>,
+        sort: Option<Document>,
+        skip: u64,
+        limit: Option<u64>,
+    },
+    /// Run an aggregation pipeline over one collection.
+    ///
+    /// `resolved` holds foreign collections the network layer already
+    /// loaded for `$lookup`. A lookup whose collection hashes to this
+    /// partition is scanned here, from its pages.
+    Aggregate {
+        collection: String,
+        pipeline: Vec<Document>,
+        resolved: Vec<(String, Vec<Document>)>,
     },
     /// Update documents matching a filter.
     ///
@@ -201,6 +230,18 @@ pub struct DecaySpec {
 }
 
 impl PartitionCommand {
+    /// A find with no projection, sort, skip, or limit.
+    pub fn find(collection: impl Into<String>, filter: Document) -> Self {
+        Self::Find {
+            collection: collection.into(),
+            filter,
+            projection: None,
+            sort: None,
+            skip: 0,
+            limit: None,
+        }
+    }
+
     /// Returns the collection name this command targets.
     ///
     /// The collection is the partition routing key: all commands for the
@@ -217,7 +258,8 @@ impl PartitionCommand {
             | PartitionCommand::CreateIndexes { collection, .. }
             | PartitionCommand::ListIndexes { collection }
             | PartitionCommand::CollectionStats { collection }
-            | PartitionCommand::Search { collection, .. } => collection, // Broadcast commands: no single partition owns them.
+            | PartitionCommand::Search { collection, .. }
+            | PartitionCommand::Aggregate { collection, .. } => collection, // Broadcast commands: no single partition owns them.
             PartitionCommand::ListCollections { .. }
             | PartitionCommand::ListDatabases { .. }
             | PartitionCommand::DatabaseStats { .. }
@@ -271,10 +313,7 @@ mod tests {
                 collection: "a".into(),
                 documents: vec![doc! {}],
             },
-            PartitionCommand::Find {
-                collection: "b".into(),
-                filter: doc! {},
-            },
+            PartitionCommand::find("b", doc! {}),
             PartitionCommand::Update {
                 collection: "c".into(),
                 filter: doc! {},

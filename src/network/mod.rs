@@ -365,6 +365,13 @@ async fn execute_command(
         };
     }
 
+    if let Some(explained) = protocol::explain_reply(command) {
+        return match explained {
+            Ok(reply) => reply,
+            Err(message) => bson::doc! { "ok": 0.0, "errmsg": message },
+        };
+    }
+
     match protocol::command_from_document(command) {
         // Collection names hash across partitions, so these commands
         // go to every worker and the replies are merged here.
@@ -372,6 +379,9 @@ async fn execute_command(
         Ok(PartitionCommand::ListDatabases { .. }) => list_databases(command, router).await,
         Ok(PartitionCommand::DropDatabase { .. }) => drop_database(command, router).await,
         Ok(PartitionCommand::DatabaseStats { .. }) => database_stats(command, router).await,
+        Ok(aggregate @ PartitionCommand::Aggregate { .. }) => {
+            execute_aggregate(router, aggregate).await
+        }
         Ok(partition_command) => match router.dispatch(partition_command) {
             Some(rx) => match rx.await {
                 Ok(result) => cursor_ns(command, protocol::reply_document(&result)),
@@ -438,10 +448,7 @@ async fn load_collection_documents(
 ) -> Result<Arc<Vec<bson::Document>>, String> {
     use crate::types::PartitionCommand;
 
-    let find_cmd = PartitionCommand::Find {
-        collection: table_name.to_string(),
-        filter: bson::doc! {},
-    };
+    let find_cmd = PartitionCommand::find(table_name, bson::doc! {});
 
     match router.dispatch(find_cmd) {
         Some(rx) => match rx.await {
@@ -451,6 +458,147 @@ async fn load_collection_documents(
             Err(_) => Err("partition worker dropped the request".into()),
         },
         None => Err("storage partition unavailable".into()),
+    }
+}
+
+/// Runs an aggregation pipeline, resolving `$lookup` across partitions
+/// and writing `$out` through insert so the WAL records it.
+pub(crate) async fn execute_aggregate(
+    router: &PartitionRouter,
+    mut command: PartitionCommand,
+) -> bson::Document {
+    let namespace = match &command {
+        PartitionCommand::Aggregate { collection, .. } => collection.clone(),
+        _ => {
+            return bson::doc! {
+                "ok": 0.0,
+                "errmsg": "expected an aggregate command",
+            };
+        }
+    };
+
+    for _ in 0..8 {
+        let reply = match router.dispatch(command.clone()) {
+            Some(rx) => rx.await,
+            None => {
+                return protocol::reply_document(&PartitionResult::Error {
+                    message: "storage partition unavailable".into(),
+                });
+            }
+        };
+        match reply {
+            Ok(PartitionResult::Found { documents }) => {
+                return cursor_batch(&namespace, documents);
+            }
+            Ok(PartitionResult::NeedForeign { namespace: foreign }) => {
+                let PartitionCommand::Aggregate { resolved, .. } = &mut command else {
+                    break;
+                };
+                if resolved.iter().any(|(name, _)| name == &foreign) {
+                    return protocol::reply_document(&PartitionResult::Error {
+                        message: format!("lookup of '{foreign}' was already loaded"),
+                    });
+                }
+                let documents = match load_collection_documents(router, &foreign).await {
+                    Ok(documents) => (*documents).clone(),
+                    Err(message) => {
+                        return protocol::reply_document(&PartitionResult::Error { message });
+                    }
+                };
+                resolved.push((foreign, documents));
+            }
+            Ok(PartitionResult::StageOut {
+                namespace: target,
+                documents,
+            }) => {
+                if let Err(message) = write_out(router, &target, documents).await {
+                    return protocol::reply_document(&PartitionResult::Error { message });
+                }
+                return cursor_batch(&namespace, Vec::new());
+            }
+            Ok(PartitionResult::Error { message }) => {
+                return protocol::reply_document(&PartitionResult::Error { message });
+            }
+            Ok(_) => {
+                return protocol::reply_document(&PartitionResult::Error {
+                    message: "unexpected aggregate result".into(),
+                });
+            }
+            Err(_) => {
+                return protocol::reply_document(&PartitionResult::Error {
+                    message: "partition worker dropped the request".into(),
+                });
+            }
+        }
+    }
+
+    protocol::reply_document(&PartitionResult::Error {
+        message: "aggregate exceeded the lookup limit".into(),
+    })
+}
+
+async fn write_out(
+    router: &PartitionRouter,
+    namespace: &str,
+    documents: Vec<bson::Document>,
+) -> Result<(), String> {
+    let dropped = dispatch_one(
+        router,
+        PartitionCommand::Drop {
+            collection: namespace.to_string(),
+        },
+    )
+    .await?;
+    if let PartitionResult::Error { message } = dropped {
+        return Err(message);
+    }
+    if documents.is_empty() {
+        let created = dispatch_one(
+            router,
+            PartitionCommand::CreateCollection {
+                collection: namespace.to_string(),
+            },
+        )
+        .await?;
+        if let PartitionResult::Error { message } = created {
+            return Err(message);
+        }
+        return Ok(());
+    }
+    let inserted = dispatch_one(
+        router,
+        PartitionCommand::Insert {
+            collection: namespace.to_string(),
+            documents,
+        },
+    )
+    .await?;
+    if let PartitionResult::Error { message } = inserted {
+        return Err(message);
+    }
+    Ok(())
+}
+
+async fn dispatch_one(
+    router: &PartitionRouter,
+    command: PartitionCommand,
+) -> Result<PartitionResult, String> {
+    match router.dispatch(command) {
+        Some(rx) => rx
+            .await
+            .map_err(|_| "partition worker dropped the request".to_string()),
+        None => Err("storage partition unavailable".to_string()),
+    }
+}
+
+fn cursor_batch(namespace: &str, documents: Vec<bson::Document>) -> bson::Document {
+    bson::doc! {
+        "ok": 1.0,
+        "cursor": {
+            "id": 0i64,
+            "ns": namespace,
+            "firstBatch": documents,
+        },
     }
 }
 
@@ -672,6 +820,7 @@ fn cursor_ns(command: &bson::Document, mut reply: bson::Document) -> bson::Docum
     } else {
         let collection = command
             .get_str("find")
+            .or_else(|_| command.get_str("aggregate"))
             .or_else(|_| command.get_str("count"))
             .unwrap_or("");
         if collection.is_empty() {

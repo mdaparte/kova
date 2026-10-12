@@ -101,6 +101,7 @@ The local source code is modularized into dedicated files inside the `kova/src/`
 * `storage/disk.rs` *(Phase 6)*: Low-level disk I/O for page read/write.
 * `storage/engine.rs` *(Phase 6)*: WAL, buffer pool, page store, and checkpoint.
 * `storage/heap.rs` *(Phase 7)*: Document pages, overflow chains, and the catalog.
+* `storage/aggregate.rs` *(Phase 8)*: Aggregation pipeline and the find cursor shape.
 * `storage/crc.rs` *(Phase 6)*: CRC-32 used by the WAL and page checksums.
 * `storage/mvcc.rs` *(Phase 9)*: Multi-Version Concurrency Control, snapshot reads.
 * `storage/transaction.rs` *(Phase 9)*: Transaction manager (begin/commit/abort, conflict detection, timeout).
@@ -123,7 +124,8 @@ The local source code is modularized into dedicated files inside the `kova/src/`
 5. **Phase 5 (DataFusion SQL):** SQL parsing, plan extraction, `db.runCommand({ sql: "..." })`. ✅ Complete.
 6. **Phase 6 (Disk Storage Engine):** WAL, buffer pool, page store, checkpoint, crash recovery. ✅ Complete.
 7. **Phase 7 (Disk-Resident Collections):** documents live in pages; RAM is the buffer pool. ✅ Complete.
-8. **Phase 8 (Aggregation Pipeline):** `aggregate` with `$match`, `$group`, `$project`, `$sort`, `$limit`, reading pages. ⚪ Planned.
+8. **Phase 8 (Query Language and Aggregation):** remaining find predicates (`$not`, `$regex`, `$type`, `$elemMatch`), projection, sort, skip, limit, update operators (`$unset`, `$inc`, `$push`, `$pull`, `$rename`), and a twelve-stage pipeline (`$match` through `$lookup` and `$out`), reading pages. ✅ Complete.
 9. **Phase 9 (Transactional Storage):** MVCC, ACID transactions, multiple isolation levels. ⚪ Planned.
 10. **Phase 10 (Indexing Subsystem):** B-Tree, Hash, Unique, Sparse indexes, index manager, auto-maintain, query planner integration. ⚪ Planned.
 11. **Phase 11 (Replication & HA):** Oplog, replica sets, heartbeat, election, read preference. ⚪ Planned.
+12. **Phase 12 (On-Disk Page Compression):** zstd on the BSON payload of each page, WiredTiger-style. The WAL stays uncompressed. ⚪ Planned.

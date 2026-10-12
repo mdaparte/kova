@@ -35,6 +35,7 @@ how to produce a change that fits the project.
 | `src/storage/disk.rs` *(Phase 6)* | Low-level disk I/O for page read/write |
 | `src/storage/engine.rs` *(Phase 6)* | WAL, buffer pool, page store, and checkpoint |
 | `src/storage/heap.rs` *(Phase 7)* | Document pages, overflow chains, and the catalog |
+| `src/storage/aggregate.rs` *(Phase 8)* | Aggregation pipeline and the find cursor shape |
 | `src/storage/crc.rs` *(Phase 6)* | CRC-32 used by the WAL and page checksums |
 | `src/storage/mvcc.rs` *(Phase 9)* | Multi-Version Concurrency Control, snapshot reads |
 | `src/storage/transaction.rs` *(Phase 9)* | Transaction manager (begin/commit/abort, conflict detection, timeout) |
@@ -157,10 +158,11 @@ how to produce a change that fits the project.
 | 5 | DataFusion SQL parsing, `db.runCommand({ sql: "..." })`, plan extraction |
 | 6 | Disk storage engine: WAL, buffer pool, page store, hybrid memory+disk |
 | 7 | Disk-resident collections: pages are the database, RAM is the buffer pool |
-| 8 | Aggregation pipeline, reading pages through the buffer pool |
+| 8 | Query language and aggregation pipeline, reading pages through the buffer pool |
 | 9 | Transactional storage: MVCC, ACID, multiple isolation levels |
 | 10 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
 | 11 | Replication & HA: Oplog, replica sets, heartbeat, election |
+| 12 | On-disk page compression: zstd on the BSON payload; WAL stays uncompressed |
 
 ## 12. Test Strategy
 

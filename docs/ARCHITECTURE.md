@@ -246,10 +246,11 @@ about and ignored.
 | 5 | DataFusion SQL parsing, `db.runCommand({ sql: "..." })`, plan extraction |
 | 6 | Disk storage engine: WAL, buffer pool, page store, hybrid memory+disk |
 | 7 | Disk-resident collections: pages are the database, RAM is the buffer pool |
-| 8 | Aggregation pipeline, reading pages through the buffer pool |
+| 8 | Query language and aggregation pipeline, reading pages through the buffer pool |
 | 9 | Transactional storage: MVCC, ACID, multiple isolation levels |
 | 10 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
 | 11 | Replication & HA: Oplog, replica sets, heartbeat, election |
+| 12 | On-disk page compression: zstd on the BSON payload; WAL stays uncompressed |
 
 ---
 

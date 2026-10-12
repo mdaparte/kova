@@ -21,10 +21,11 @@ replication, and multi-model indexing.
 | 5 | Analytical Query Optimization (DataFusion SQL) | ✅ Complete |
 | 6 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | ✅ Complete |
 | 7 | Disk-Resident Collections (pages are the database, RAM is the cache) | ✅ Complete |
-| 8 | MongoDB Aggregation Pipeline | ⚪ Planned |
+| 8 | Query Language and Aggregation Pipeline | ✅ Complete |
 | 9 | Transactional Storage (MVCC + ACID + Isolation) | ⚪ Planned |
 | 10 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ⚪ Planned |
 | 11 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ⚪ Planned |
+| 12 | On-Disk Page Compression (zstd, WiredTiger-style) | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -251,47 +252,99 @@ dirtied. It is not where the document lives.
   and delete of an evicted document, overflow round-trip. SQL tests
   still read through `find`.
 
-## Phase 8 — MongoDB Aggregation Pipeline ⚪ Planned
+## Phase 8 — Query Language and Aggregation Pipeline ✅
 
-Runs after Phase 7. The `aggregate` command reads documents from pages
-through the buffer pool, not from a second in-memory copy. mongosh and
-Compass already send this command; today it is rejected as
-`unsupported command aggregate`.
+`aggregate` reads documents from pages through the buffer pool, one page at
+a time. A leading `$match` is applied during that scan. `find` and `$match`
+share one matcher, and `update` uses the same operator document.
+
+The pipeline is the BSON array on the command, the document mongosh already
+sends. There is no second syntax.
 
 ### 8.1 Command and cursor
 
 - `aggregate` on a collection, with a `pipeline` array and a `cursor`.
 - Reply is a cursor (`firstBatch`), same shape as `find`.
 - An empty pipeline returns the collection.
-- Unknown stages fail the command with the stage name, instead of dropping the filter.
+- An unknown stage or operator fails the command and names what it rejected.
 
-### 8.2 Stages
+### 8.2 Predicates
 
-- `$match` — same predicates as `find` (`$gt`, `$in`, `$and`, `$or`, …).
-- `$project` — include, exclude, and rename fields.
-- `$sort`, `$skip`, `$limit`.
-- `$group` — `_id` plus `$sum`, `$avg`, `$min`, `$max`, `$first`, `$last`.
-- `$count`.
-- `$unwind` on one array field.
+`find` already matches equality and these operators: `$eq`, `$ne`, `$gt`,
+`$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$and`, `$or`, `$nor`.
+Numbers compare across Int32, Int64, and Double. Dates compare by instant.
+This phase adds the rest, and `$match` uses that same function:
 
-### 8.3 Integrated test
+- `$not` — negate one operator document.
+- `$regex` — match a string field.
+- `$type` — match the BSON type of a field.
+- `$elemMatch` — one array element must satisfy every predicate in the
+  subdocument.
 
-After Phase 7, one mongosh session loads the Oracle `emp` sample and checks
-the pipeline against the same question asked in SQL:
+### 8.3 Projection, sort, skip, and limit
+
+`find` today returns every field of every match. A find and a pipeline
+share these:
+
+- Projection: include or exclude fields. `_id` stays unless the projection
+  removes it.
+- Sort on one or more fields.
+- Skip and limit, so a client can page through a result.
+
+### 8.4 Update operators
+
+Replacement and `$set` already work, and `_id` is kept. Add `$unset`,
+`$inc`, `$push`, `$pull`, and `$rename`. An unknown operator is an error,
+not a silent no-op.
+
+### 8.5 Pipeline stages
+
+Twelve stages, in any order the command sends:
+
+- `$match`, `$project`, `$addFields`, `$replaceRoot`.
+- `$group`, `$sort`, `$skip`, `$limit`, `$count`, `$unwind`.
+- `$lookup` reads the foreign collection from the partition that owns it,
+  through the buffer pool. It does not copy either collection into one
+  resident vector.
+- `$out` writes the result into a collection. That write goes through the
+  WAL, like any other insert.
+
+### 8.6 Group accumulators
+
+`$group` accepts `$sum`, `$avg`, `$min`, `$max`, `$count`, `$push`,
+`$addToSet`, `$first`, and `$last`.
+
+### 8.7 Explain
+
+`explain` on a find or an aggregate reports the filter or the pipeline and
+says the read is a collection scan of pages. Choosing an id lookup or an
+index scan is Phase 10, when those indexes exist. Phase 10 extends this
+reply; it does not invent a second explain command.
+
+### 8.8 Integrated test
+
+One mongosh session loads the Oracle `emp` sample and checks the pipeline
+against the same question asked in SQL:
 
 - `$match` on `sal` and `job` returns the same rows as `WHERE`.
 - `$group` by `job` with `$sum` returns the same counts as `GROUP BY`.
+- A projection drops a field the client did not ask for.
+- `$inc` changes `sal`, and a later `$match` sees the new value.
 - A crash-and-restart between the insert and the aggregate still sees the
   documents, read back from pages. The collection must not have been
   loaded entirely into RAM to answer.
 
 ### Phase 8 — Sub-tasks
 
-- [ ] Accept `aggregate` in `command_from_document` and route it to the partition that owns the collection.
-- [ ] Implement `src/aggregate/mod.rs`: run a pipeline over the storage engine's document scan.
-- [ ] Implement `$match`, `$project`, `$sort`, `$skip`, `$limit`, `$count`, `$group`, `$unwind`.
-- [ ] Return a cursor reply from the network layer.
-- [ ] Integration test with mongosh against the Phase 7 engine: seed `emp`, aggregate, compare with SQL, restart, aggregate again.
+- [x] Accept `aggregate` in `command_from_document` and route it to the partition that owns the collection.
+- [x] Add `$not`, `$regex`, `$type`, and `$elemMatch` to the shared matcher. `$match` calls that matcher.
+- [x] Add projection, sort, skip, and limit to `find` and to the pipeline.
+- [x] Add `$unset`, `$inc`, `$push`, `$pull`, and `$rename` to update. Reject an unknown operator.
+- [x] Implement `src/storage/aggregate.rs` over the page scan: `$match`, `$project`, `$addFields`, `$replaceRoot`, `$group`, `$sort`, `$skip`, `$limit`, `$count`, `$unwind`, `$lookup`, `$out`.
+- [x] Implement the nine `$group` accumulators.
+- [x] Return a cursor reply from the network layer.
+- [x] Answer `explain` with the pipeline and a collection scan.
+- [x] Integration test: seed `emp`, compare `$match`/`$group` with SQL, project, `$inc`, `$lookup`, `$out`, restart, aggregate again.
 
 ## Phase 9 — Transactional Storage (MVCC + ACID + Isolation) ⚪ Planned
 
@@ -354,10 +407,10 @@ _Inspiration: GraniteDB (B-Tree, Hash, Unique, Sparse, Index Manager)_
 
 ### 10.3 Query Planner Integration
 
-- The query planner (Phase 5 + DataFusion) consults the index manager to choose
-  the best strategy: ID lookup → index scan → collection scan.
-- Explain plans: `db.runCommand({ explain: { find: "users", filter: { age: { $gt: 25 } } } })`
-  shows the chosen strategy.
+- The query planner consults the index manager to choose the strategy:
+  id lookup, then an index scan, then a collection scan.
+- `explain`, introduced in Phase 8 as a collection scan, reports which of
+  those three strategies ran.
 
 ### Phase 10 — Sub-tasks
 
@@ -412,6 +465,36 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
 - [ ] Integrate oplog with the storage engine (every write appends to the oplog).
 - [ ] Add replication tests: replica set setup, failover, oplog replay, sync.
 
+## Phase 12 — On-Disk Page Compression ⚪ Planned
+
+WiredTiger compresses the pages of a collection (snappy or zstd). Kova pages store the BSON payload uncompressed inside the 16 KB envelope. This phase compresses that payload. The WAL stays the operation log: compression applies to the page file, which is where the documents live.
+
+### 12.1 Codec
+
+- Compress the payload before the page checksum is computed, and decompress after the checksum is verified.
+- A flag in the existing page header records whether the payload is compressed, so a page written by Phase 7 still opens.
+- The default codec is zstd. The choice lives in `kova.toml` and can be overridden by an environment variable.
+
+### 12.2 What is compressed
+
+- Document pages, overflow chunks, and the catalog page. Each page is compressed on its own.
+- The buffer pool caches the decompressed page. A query does not see the compressed bytes.
+- The WAL record stays uncompressed.
+
+### 12.3 Tests
+
+- A page of repetitive BSON occupies fewer bytes on disk than the same page written with compression off.
+- A restart reads the compressed page back to the original documents.
+- An uncompressed page from the current format still decodes.
+
+### Phase 12 — Sub-tasks
+
+- [ ] Add a compression flag to the page header and a zstd codec around the payload.
+- [ ] Compress on flush and decompress on read in the page store.
+- [ ] Keep Phase 7 pages readable when the flag is clear.
+- [ ] Add `page_compression` to `kova.toml`, on by default for new pages.
+- [ ] Tests: smaller file for repetitive documents, restart round-trip, legacy uncompressed page still opens.
+
 ## Architecture Principles
 
 1. **Hybrid memory+disk**: documents live in pages. RAM holds the buffer
@@ -433,10 +516,10 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| `aggregate` is rejected | 8 | Pipeline reads pages through the buffer pool, including after a restart. |
 | No transactions | 9 | MVCC + transaction manager needed. |
 | Indexes are metadata only | 10 | B-Tree + Hash + auto-maintain needed. |
 | No replication | 11 | Oplog + replica sets needed. |
+| Pages are stored uncompressed | 12 | Compress the BSON payload in each page (zstd), the way WiredTiger compresses `.wt` pages. The WAL stays uncompressed. |
 
 ## Architecture Diagram (updated)
 
@@ -494,6 +577,7 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phase 7 is complete: documents live on pages and RAM is the buffer pool.
-Next is the aggregation pipeline (Phase 8), then transactional storage
-(MVCC + ACID), the indexing subsystem, and replication.*
+*Phase 8 is complete: `aggregate` and the shared query language read
+pages through the buffer pool. Next is transactional storage (MVCC +
+ACID), the indexing subsystem, replication, and on-disk page compression
+(Phase 12).*

@@ -543,4 +543,34 @@ mod tests {
         assert_eq!(found[0].get_str("blob").unwrap(), wide);
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn test_aggregate_scan_does_not_retain_documents() {
+        let dir = scratch();
+        let config = config(&dir);
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let documents: Vec<_> = (0..6)
+            .map(|n| doc! { "_id": n, "sal": n, "pad": "p".repeat(400) })
+            .collect();
+        engine.insert_documents("db.emp", documents).unwrap();
+        let input = engine.find_documents("db.emp", &doc! {}).unwrap();
+        assert_eq!(engine.retained_documents(), 0);
+        let output = super::super::aggregate::run(
+            input,
+            &[
+                doc! { "$match": { "sal": { "$gt": 3 } } },
+                doc! { "$count": "n" },
+            ],
+            &mut |_| Ok(super::super::aggregate::Foreign::Ready(Vec::new())),
+        )
+        .unwrap();
+        assert_eq!(engine.retained_documents(), 0);
+        let super::super::aggregate::Output::Docs(rows) = output else {
+            panic!("expected a count");
+        };
+        assert_eq!(rows[0].get_i32("n").unwrap(), 2);
+        assert!(engine.pool_stats().misses > 0);
+        let _ = fs::remove_dir_all(dir);
+    }
 }

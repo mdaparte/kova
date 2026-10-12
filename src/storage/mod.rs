@@ -16,6 +16,7 @@
 //! pages and records the LSN. Startup opens the pages and replays the
 //! WAL tail.
 
+mod aggregate;
 mod buffer_pool;
 mod crc;
 mod disk;
@@ -55,11 +56,19 @@ pub struct PartitionWorker {
     index: SearchIndex,
     /// WAL, document pages, and the buffer pool for this partition.
     engine: StorageEngine,
+    /// How many partitions the router spawned. `$lookup` uses it to
+    /// decide whether the foreign collection lives on this worker.
+    partition_count: usize,
 }
 
 impl PartitionWorker {
     /// Creates a worker and restores its collections from disk.
-    fn new(id: usize, receiver: Receiver<CommandEnvelope>, storage: StorageConfig) -> Self {
+    fn new(
+        id: usize,
+        partition_count: usize,
+        receiver: Receiver<CommandEnvelope>,
+        storage: StorageConfig,
+    ) -> Self {
         let mut engine = StorageEngine::open(id, &storage).unwrap_or_else(|err| {
             abort_storage(id, err);
         });
@@ -70,6 +79,7 @@ impl PartitionWorker {
             receiver,
             index: SearchIndex::new(),
             engine,
+            partition_count,
         };
         // Replay before building the search index so tokenization sees
         // the pages after the WAL tail, and each document is indexed once.
@@ -209,14 +219,43 @@ impl PartitionWorker {
                 }
             }
 
-            PartitionCommand::Find { collection, filter } => {
-                match self.engine.find_documents(&collection, &filter) {
+            PartitionCommand::Find {
+                collection,
+                filter,
+                projection,
+                sort,
+                skip,
+                limit,
+            } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
+                let documents = match self.engine.find_documents(&collection, &filter) {
+                    Ok(documents) => documents,
+                    Err(message) => return PartitionResult::Error { message },
+                };
+                match aggregate::apply_view(
+                    documents,
+                    projection.as_ref(),
+                    sort.as_ref(),
+                    skip,
+                    limit,
+                ) {
                     Ok(documents) => PartitionResult::Found { documents },
                     Err(message) => PartitionResult::Error { message },
                 }
             }
 
+            PartitionCommand::Aggregate {
+                collection,
+                pipeline,
+                resolved,
+            } => self.execute_aggregate(&collection, &pipeline, &resolved),
+
             PartitionCommand::Count { collection, filter } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
                 match self.engine.count_documents(&collection, &filter) {
                     Ok(count) => PartitionResult::Counted { count },
                     Err(message) => PartitionResult::Error { message },
@@ -229,6 +268,12 @@ impl PartitionWorker {
                 update,
                 multi,
             } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
+                if let Err(message) = validate_update(&update) {
+                    return PartitionResult::Error { message };
+                }
                 let (matched_count, updated) =
                     match self
                         .engine
@@ -523,6 +568,9 @@ impl PartitionWorker {
                 filter,
                 options,
             } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
                 let hits = match self.index.search(&collection, &query, &options.boosts) {
                     Ok(hits) => hits,
                     Err(err) => return PartitionResult::Error { message: err },
@@ -558,6 +606,9 @@ impl PartitionWorker {
                 filter,
                 limit,
             } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
                 let removed = match self.engine.delete_documents(&collection, &filter, limit) {
                     Ok(removed) => removed,
                     Err(message) => return PartitionResult::Error { message },
@@ -571,6 +622,56 @@ impl PartitionWorker {
                     deleted_count: removed.len() as u32,
                 }
             }
+        }
+    }
+
+    /// Runs a pipeline. A leading `$match` is applied while the pages
+    /// are scanned, so documents that fail it are not kept. A `$lookup`
+    /// whose collection hashes here is read the same way; any other
+    /// collection is reported back so the network layer can load it.
+    fn execute_aggregate(
+        &mut self,
+        collection: &str,
+        pipeline: &[Document],
+        resolved: &[(String, Vec<Document>)],
+    ) -> PartitionResult {
+        if let Err(message) = aggregate::validate_pipeline(pipeline) {
+            return PartitionResult::Error { message };
+        }
+        let (filter, start) = match aggregate::split_leading_matches(pipeline) {
+            Ok(split) => split,
+            Err(message) => return PartitionResult::Error { message },
+        };
+        let input = match self.engine.find_documents(collection, &filter) {
+            Ok(input) => input,
+            Err(message) => return PartitionResult::Error { message },
+        };
+        let id = self.id;
+        let partitions = self.partition_count.max(1);
+        let outcome = aggregate::run(input, &pipeline[start..], &mut |namespace| {
+            if let Some((_, documents)) = resolved.iter().find(|(name, _)| name == namespace) {
+                return Ok(aggregate::Foreign::Ready(documents.clone()));
+            }
+            let owner = (fnv1a(namespace.as_bytes()) % partitions as u64) as usize;
+            if owner == id {
+                let documents = self.engine.find_documents(namespace, &doc! {})?;
+                return Ok(aggregate::Foreign::Ready(documents));
+            }
+            Ok(aggregate::Foreign::Remote)
+        });
+        match outcome {
+            Ok(aggregate::Output::Docs(documents)) => PartitionResult::Found { documents },
+            Ok(aggregate::Output::Remote { namespace }) => {
+                PartitionResult::NeedForeign { namespace }
+            }
+            Ok(aggregate::Output::Out {
+                namespace,
+                documents,
+            }) => PartitionResult::StageOut {
+                namespace,
+                documents,
+            },
+            Err(message) => PartitionResult::Error { message },
         }
     }
 
@@ -738,21 +839,147 @@ pub(crate) fn document_matches(doc: &Document, filter: &Document) -> bool {
                     .is_none_or(|clause| !document_matches(doc, clause))
             })
         }),
+        "$not" => expected
+            .as_document()
+            .is_some_and(|clause| !document_matches(doc, clause)),
         other if other.starts_with('$') => false,
-        field => value_matches(doc.get(field), expected),
+        field => value_matches(aggregate::get_path(doc, field), expected),
     })
+}
+
+/// Rejects a filter operator this phase does not implement.
+///
+/// `document_matches` treats an unknown operator as "no match" so a
+/// listing filter cannot abort a worker. Commands call this first and
+/// return the name of the operator to the client.
+pub(crate) fn validate_filter(filter: &Document) -> Result<(), String> {
+    for (key, value) in filter {
+        match key.as_str() {
+            "$and" | "$or" | "$nor" => {
+                let items = value
+                    .as_array()
+                    .ok_or_else(|| format!("{key} requires an array"))?;
+                for item in items {
+                    let clause = item
+                        .as_document()
+                        .ok_or_else(|| format!("{key} entries must be documents"))?;
+                    validate_filter(clause)?;
+                }
+            }
+            "$not" => {
+                let clause = value
+                    .as_document()
+                    .ok_or_else(|| "$not requires a query document".to_string())?;
+                validate_filter(clause)?;
+            }
+            other if other.starts_with('$') => {
+                return Err(format!("unknown operator '{other}'"));
+            }
+            _ => validate_predicate(value)?,
+        }
+    }
+    Ok(())
 }
 
 /// Matches one field value against a literal or an operator document.
 fn value_matches(actual: Option<&bson::Bson>, expected: &bson::Bson) -> bool {
+    if let bson::Bson::RegularExpression(regex) = expected {
+        return regex_match(actual, &regex.pattern, Some(regex.options.as_str()));
+    }
     if let bson::Bson::Document(operators) = expected {
         if is_operator_document(operators) {
-            return operators
-                .iter()
-                .all(|(op, operand)| operator_matches(op, actual, operand));
+            return operators_match(actual, operators);
         }
     }
     actual.is_some_and(|value| bson_eq(value, expected))
+}
+
+fn validate_predicate(value: &bson::Bson) -> Result<(), String> {
+    if let bson::Bson::RegularExpression(regex) = value {
+        return compile_regex(&regex.pattern, Some(regex.options.as_str())).map(|_| ());
+    }
+    let bson::Bson::Document(operators) = value else {
+        return Ok(());
+    };
+    if !is_operator_document(operators) {
+        return Ok(());
+    }
+    let has_regex = operators.contains_key("$regex");
+    for (op, operand) in operators {
+        match op.as_str() {
+            "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" => {}
+            "$in" | "$nin" => {
+                if operand.as_array().is_none() {
+                    return Err(format!("{op} requires an array"));
+                }
+            }
+            "$exists" => {
+                if operand.as_bool().is_none() {
+                    return Err("$exists requires a boolean".to_string());
+                }
+            }
+            "$not" => {
+                let inner = operand
+                    .as_document()
+                    .ok_or_else(|| "$not requires an operator document".to_string())?;
+                if !is_operator_document(inner) {
+                    return Err("$not requires an operator document".to_string());
+                }
+                validate_predicate(operand)?;
+            }
+            "$regex" => {
+                let pattern = match operand {
+                    bson::Bson::String(pattern) => pattern.as_str(),
+                    bson::Bson::RegularExpression(regex) => regex.pattern.as_str(),
+                    _ => return Err("$regex requires a string".to_string()),
+                };
+                let options = operators.get_str("$options").ok();
+                compile_regex(pattern, options)?;
+            }
+            "$options" => {
+                if !has_regex {
+                    return Err("$options requires $regex".to_string());
+                }
+                if operand.as_str().is_none() {
+                    return Err("$options requires a string".to_string());
+                }
+            }
+            "$type" => validate_type_operand(operand)?,
+            "$elemMatch" => {
+                let inner = operand
+                    .as_document()
+                    .ok_or_else(|| "$elemMatch requires a document".to_string())?;
+                if is_operator_document(inner) {
+                    validate_predicate(operand)?;
+                } else {
+                    validate_filter(inner)?;
+                }
+            }
+            other => return Err(format!("unknown operator '{other}'")),
+        }
+    }
+    Ok(())
+}
+
+fn operators_match(actual: Option<&bson::Bson>, operators: &Document) -> bool {
+    let options = operators.get_str("$options").ok();
+    operators.iter().all(|(op, operand)| {
+        if op == "$options" {
+            return true;
+        }
+        if op == "$regex" {
+            let (pattern, embedded) = match operand {
+                bson::Bson::String(pattern) => (pattern.as_str(), None),
+                bson::Bson::RegularExpression(regex) => {
+                    (regex.pattern.as_str(), Some(regex.options.as_str()))
+                }
+                _ => return false,
+            };
+            let options = options.or(embedded);
+            return regex_match(actual, pattern, options);
+        }
+        operator_matches(op, actual, operand)
+    })
 }
 
 /// A document is an operator expression when every key starts with `$`.
@@ -780,11 +1007,162 @@ fn operator_matches(op: &str, actual: Option<&bson::Bson>, operand: &bson::Bson)
                 .unwrap_or(true)
         }),
         "$exists" => actual.is_some() == operand.as_bool().unwrap_or(false),
+        "$not" => operand
+            .as_document()
+            .is_some_and(|inner| !value_matches(actual, &bson::Bson::Document(inner.clone()))),
+        "$type" => type_matches(actual, operand),
+        "$elemMatch" => elem_match(actual, operand),
         _ => false,
     }
 }
 
-fn bson_eq(left: &bson::Bson, right: &bson::Bson) -> bool {
+fn regex_match(actual: Option<&bson::Bson>, pattern: &str, options: Option<&str>) -> bool {
+    let Some(bson::Bson::String(text)) = actual else {
+        return false;
+    };
+    compile_regex(pattern, options)
+        .ok()
+        .is_some_and(|regex| regex.is_match(text))
+}
+
+fn compile_regex(pattern: &str, options: Option<&str>) -> Result<regex::Regex, String> {
+    let mut builder = regex::RegexBuilder::new(pattern);
+    if let Some(options) = options {
+        for flag in options.chars() {
+            match flag {
+                'i' => {
+                    builder.case_insensitive(true);
+                }
+                'm' => {
+                    builder.multi_line(true);
+                }
+                's' => {
+                    builder.dot_matches_new_line(true);
+                }
+                'x' => {
+                    builder.ignore_whitespace(true);
+                }
+                other => return Err(format!("unknown regex option '{other}'")),
+            }
+        }
+    }
+    builder
+        .build()
+        .map_err(|err| format!("invalid regex: {err}"))
+}
+
+fn type_matches(actual: Option<&bson::Bson>, operand: &bson::Bson) -> bool {
+    let Some(actual) = actual else {
+        return false;
+    };
+    match operand {
+        bson::Bson::Array(items) => items.iter().any(|item| type_one(actual, item)),
+        other => type_one(actual, other),
+    }
+}
+
+fn type_one(actual: &bson::Bson, operand: &bson::Bson) -> bool {
+    let name = match operand {
+        bson::Bson::String(name) => name.as_str(),
+        bson::Bson::Int32(code) => return type_code(actual) == Some(*code),
+        bson::Bson::Int64(code) => return type_code(actual) == Some(*code as i32),
+        bson::Bson::Double(code) if code.fract() == 0.0 => {
+            return type_code(actual) == Some(*code as i32);
+        }
+        _ => return false,
+    };
+    match name {
+        "double" => matches!(actual, bson::Bson::Double(_)),
+        "string" => matches!(actual, bson::Bson::String(_)),
+        "object" => matches!(actual, bson::Bson::Document(_)),
+        "array" => matches!(actual, bson::Bson::Array(_)),
+        "binData" => matches!(actual, bson::Bson::Binary(_)),
+        "objectId" => matches!(actual, bson::Bson::ObjectId(_)),
+        "bool" => matches!(actual, bson::Bson::Boolean(_)),
+        "date" => matches!(actual, bson::Bson::DateTime(_)),
+        "null" => matches!(actual, bson::Bson::Null),
+        "regex" => matches!(actual, bson::Bson::RegularExpression(_)),
+        "int" => matches!(actual, bson::Bson::Int32(_)),
+        "long" => matches!(actual, bson::Bson::Int64(_)),
+        "decimal" => matches!(actual, bson::Bson::Decimal128(_)),
+        "number" => as_number(actual).is_some(),
+        _ => false,
+    }
+}
+
+fn type_code(value: &bson::Bson) -> Option<i32> {
+    Some(match value {
+        bson::Bson::Double(_) => 1,
+        bson::Bson::String(_) => 2,
+        bson::Bson::Document(_) => 3,
+        bson::Bson::Array(_) => 4,
+        bson::Bson::Binary(_) => 5,
+        bson::Bson::ObjectId(_) => 7,
+        bson::Bson::Boolean(_) => 8,
+        bson::Bson::DateTime(_) => 9,
+        bson::Bson::Null => 10,
+        bson::Bson::RegularExpression(_) => 11,
+        bson::Bson::Int32(_) => 16,
+        bson::Bson::Int64(_) => 18,
+        bson::Bson::Decimal128(_) => 19,
+        _ => return None,
+    })
+}
+
+fn validate_type_operand(operand: &bson::Bson) -> Result<(), String> {
+    let items: Vec<&bson::Bson> = match operand {
+        bson::Bson::Array(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    if items.is_empty() {
+        return Err("$type requires a type name or code".to_string());
+    }
+    for item in items {
+        let known = match item {
+            bson::Bson::String(name) => matches!(
+                name.as_str(),
+                "double"
+                    | "string"
+                    | "object"
+                    | "array"
+                    | "binData"
+                    | "objectId"
+                    | "bool"
+                    | "date"
+                    | "null"
+                    | "regex"
+                    | "int"
+                    | "long"
+                    | "decimal"
+                    | "number"
+            ),
+            bson::Bson::Int32(_) | bson::Bson::Int64(_) => true,
+            bson::Bson::Double(code) => code.fract() == 0.0,
+            _ => false,
+        };
+        if !known {
+            return Err("$type requires a type name or code".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn elem_match(actual: Option<&bson::Bson>, operand: &bson::Bson) -> bool {
+    let (Some(bson::Bson::Array(items)), Some(predicate)) = (actual, operand.as_document()) else {
+        return false;
+    };
+    items.iter().any(|element| {
+        if is_operator_document(predicate) {
+            value_matches(Some(element), operand)
+        } else if let bson::Bson::Document(doc) = element {
+            document_matches(doc, predicate)
+        } else {
+            false
+        }
+    })
+}
+
+pub(super) fn bson_eq(left: &bson::Bson, right: &bson::Bson) -> bool {
     bson_cmp(Some(left), right) == Some(std::cmp::Ordering::Equal) || left == right
 }
 
@@ -793,7 +1171,10 @@ fn bson_eq(left: &bson::Bson, right: &bson::Bson) -> bool {
 /// Numbers compare across widths. Dates compare by instant. Strings compare
 /// lexicographically. A missing field, or two values of different kinds,
 /// is not ordered, so a range operator does not match them.
-fn bson_cmp(actual: Option<&bson::Bson>, expected: &bson::Bson) -> Option<std::cmp::Ordering> {
+pub(super) fn bson_cmp(
+    actual: Option<&bson::Bson>,
+    expected: &bson::Bson,
+) -> Option<std::cmp::Ordering> {
     use bson::Bson;
 
     let actual = actual?;
@@ -821,24 +1202,194 @@ fn as_number(value: &bson::Bson) -> Option<f64> {
 
 /// Applies an update document to `doc`.
 ///
-/// Only the implicit replacement form and the `$set` operator are
-/// supported in Phase 2. Unknown operators leave the document unchanged
-/// and are reported by the caller as a no-op modification.
-pub(super) fn apply_update(doc: &mut Document, update: &Document) {
-    if let Ok(set) = update.get_document("$set") {
-        for (key, value) in set {
-            doc.insert(key, value.clone());
+/// A document whose keys do not start with `$` replaces `doc` and keeps
+/// `_id`. Otherwise every key must be a known operator. Operators run
+/// in a fixed order: `$rename`, `$unset`, `$inc`, `$set`, `$push`,
+/// `$pull`. `$set` therefore overwrites a field `$inc` just changed.
+pub(super) fn apply_update(doc: &mut Document, update: &Document) -> Result<(), String> {
+    validate_update(update)?;
+    if !update.keys().any(|key| key.starts_with('$')) {
+        let id = doc.get("_id").cloned();
+        *doc = update.clone();
+        if let Some(id) = id {
+            doc.insert("_id", id);
         }
-        return;
+        return Ok(());
     }
 
-    // Replacement form: the update document becomes the new document,
-    // preserving the immutable `_id` field.
-    let id = doc.get("_id").cloned();
-    *doc = update.clone();
-    if let Some(id) = id {
-        doc.insert("_id", id);
+    let mut next = doc.clone();
+    if let Ok(rename) = update.get_document("$rename") {
+        for (from, to) in rename {
+            let to = to
+                .as_str()
+                .ok_or_else(|| "$rename targets must be strings".to_string())?;
+            if let Some(value) = aggregate::remove_path(&mut next, from) {
+                aggregate::set_path(&mut next, to, value);
+            }
+        }
     }
+    if let Ok(unset) = update.get_document("$unset") {
+        for key in unset.keys() {
+            aggregate::remove_path(&mut next, key);
+        }
+    }
+    if let Ok(fields) = update.get_array("$unset") {
+        for field in fields {
+            let key = field
+                .as_str()
+                .ok_or_else(|| "$unset entries must be field names".to_string())?;
+            aggregate::remove_path(&mut next, key);
+        }
+    }
+    if let Ok(inc) = update.get_document("$inc") {
+        for (key, delta) in inc {
+            let current = aggregate::get_path(&next, key).cloned();
+            aggregate::set_path(&mut next, key, add_numbers(current.as_ref(), delta)?);
+        }
+    }
+    if let Ok(set) = update.get_document("$set") {
+        for (key, value) in set {
+            aggregate::set_path(&mut next, key, value.clone());
+        }
+    }
+    if let Ok(push) = update.get_document("$push") {
+        for (key, value) in push {
+            push_value(&mut next, key, value)?;
+        }
+    }
+    if let Ok(pull) = update.get_document("$pull") {
+        for (key, value) in pull {
+            pull_value(&mut next, key, value)?;
+        }
+    }
+    *doc = next;
+    Ok(())
+}
+
+pub(super) fn validate_update(update: &Document) -> Result<(), String> {
+    if !update.keys().any(|key| key.starts_with('$')) {
+        return Ok(());
+    }
+    for (key, value) in update {
+        match key.as_str() {
+            "$set" | "$inc" | "$push" | "$pull" | "$rename" => {
+                let fields = value
+                    .as_document()
+                    .ok_or_else(|| format!("{key} requires a document"))?;
+                for (field, operand) in fields {
+                    guard_id(field)?;
+                    match key.as_str() {
+                        "$inc" => {
+                            if as_number(operand).is_none() {
+                                return Err(format!("$inc of '{field}' requires a number"));
+                            }
+                        }
+                        "$rename" => {
+                            let target = operand
+                                .as_str()
+                                .ok_or_else(|| "$rename targets must be strings".to_string())?;
+                            guard_id(target)?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "$unset" => match value {
+                bson::Bson::Document(fields) => {
+                    for field in fields.keys() {
+                        guard_id(field)?;
+                    }
+                }
+                bson::Bson::Array(fields) => {
+                    for field in fields {
+                        let name = field
+                            .as_str()
+                            .ok_or_else(|| "$unset entries must be field names".to_string())?;
+                        guard_id(name)?;
+                    }
+                }
+                _ => return Err("$unset requires a document or an array".to_string()),
+            },
+            other => return Err(format!("unknown operator '{other}'")),
+        }
+    }
+    Ok(())
+}
+
+fn guard_id(path: &str) -> Result<(), String> {
+    if path == "_id" || path.starts_with("_id.") {
+        return Err("the _id field is immutable".to_string());
+    }
+    Ok(())
+}
+
+fn add_numbers(current: Option<&bson::Bson>, delta: &bson::Bson) -> Result<bson::Bson, String> {
+    let current = current.unwrap_or(&bson::Bson::Int32(0));
+    let left = as_number(current).ok_or_else(|| "$inc requires a numeric field".to_string())?;
+    let right = as_number(delta).ok_or_else(|| "$inc requires a number".to_string())?;
+    let sum = left + right;
+    if let (Some(left), Some(right)) = (as_i64(current), as_i64(delta)) {
+        if let Some(exact) = left.checked_add(right) {
+            if matches!(current, bson::Bson::Int32(_))
+                && matches!(delta, bson::Bson::Int32(_))
+                && (i32::MIN as i64..=i32::MAX as i64).contains(&exact)
+            {
+                return Ok(bson::Bson::Int32(exact as i32));
+            }
+            return Ok(bson::Bson::Int64(exact));
+        }
+    }
+    Ok(bson::Bson::Double(sum))
+}
+
+fn as_i64(value: &bson::Bson) -> Option<i64> {
+    match value {
+        bson::Bson::Int32(n) => Some(i64::from(*n)),
+        bson::Bson::Int64(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn push_value(doc: &mut Document, key: &str, value: &bson::Bson) -> Result<(), String> {
+    let mut items = match aggregate::get_path(doc, key) {
+        None => Vec::new(),
+        Some(bson::Bson::Array(items)) => items.clone(),
+        Some(_) => return Err(format!("$push of '{key}' requires an array")),
+    };
+    if let bson::Bson::Document(spec) = value {
+        if let Ok(each) = spec.get_array("$each") {
+            items.extend(each.iter().cloned());
+            aggregate::set_path(doc, key, bson::Bson::Array(items));
+            return Ok(());
+        }
+    }
+    items.push(value.clone());
+    aggregate::set_path(doc, key, bson::Bson::Array(items));
+    Ok(())
+}
+
+fn pull_value(doc: &mut Document, key: &str, value: &bson::Bson) -> Result<(), String> {
+    let Some(bson::Bson::Array(items)) = aggregate::get_path(doc, key).cloned() else {
+        if aggregate::get_path(doc, key).is_none() {
+            return Ok(());
+        }
+        return Err(format!("$pull of '{key}' requires an array"));
+    };
+    let kept = items
+        .into_iter()
+        .filter(|element| !pull_matches(element, value))
+        .collect();
+    aggregate::set_path(doc, key, bson::Bson::Array(kept));
+    Ok(())
+}
+
+fn pull_matches(element: &bson::Bson, spec: &bson::Bson) -> bool {
+    if let bson::Bson::Document(operators) = spec {
+        if is_operator_document(operators) {
+            return value_matches(Some(element), spec);
+        }
+    }
+    bson_eq(element, spec)
 }
 
 /// Routes commands to partition workers by hashing the collection name.
@@ -892,7 +1443,7 @@ impl PartitionRouter {
             let handle = std::thread::Builder::new()
                 .name(format!("kova-partition-{}", id))
                 .spawn(move || {
-                    let mut worker = PartitionWorker::new(id, rx, storage);
+                    let mut worker = PartitionWorker::new(id, partition_count, rx, storage);
                     worker.run();
                 })
                 .expect("failed to spawn partition worker thread");
@@ -1059,10 +1610,7 @@ mod tests {
         ));
 
         let rx = router
-            .dispatch(PartitionCommand::Find {
-                collection: "users".into(),
-                filter: doc! { "name": "Ada" },
-            })
+            .dispatch(PartitionCommand::find("users", doc! { "name": "Ada" }))
             .expect("worker reachable");
         let result = rx.await.expect("worker replied");
 
@@ -1080,10 +1628,7 @@ mod tests {
         let router = router();
 
         let rx = router
-            .dispatch(PartitionCommand::Find {
-                collection: "empty".into(),
-                filter: doc! { "name": "nobody" },
-            })
+            .dispatch(PartitionCommand::find("empty", doc! { "name": "nobody" }))
             .expect("worker reachable");
         let result = rx.await.expect("worker replied");
 
@@ -1129,10 +1674,7 @@ mod tests {
         );
 
         let rx = router
-            .dispatch(PartitionCommand::Find {
-                collection: "users".into(),
-                filter: doc! { "age": 37 },
-            })
+            .dispatch(PartitionCommand::find("users", doc! { "age": 37 }))
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
             PartitionResult::Found { documents } => assert_eq!(documents.len(), 1),
@@ -1695,10 +2237,7 @@ mod tests {
         // Each database sees only its own "orders".
         for db in ["shop", "inventory"] {
             let rx = router
-                .dispatch(PartitionCommand::Find {
-                    collection: format!("{}.orders", db),
-                    filter: doc! {},
-                })
+                .dispatch(PartitionCommand::find(format!("{}.orders", db), doc! {}))
                 .expect("worker reachable");
             match rx.await.expect("worker replied") {
                 PartitionResult::Found { documents } => {
@@ -2038,7 +2577,7 @@ mod tests {
     #[test]
     fn test_apply_update_set_operator() {
         let mut doc = doc! { "name": "Ada", "age": 36 };
-        apply_update(&mut doc, &doc! { "$set": { "age": 37 } });
+        apply_update(&mut doc, &doc! { "$set": { "age": 37 } }).unwrap();
 
         assert_eq!(doc.get_i32("age").unwrap(), 37);
         assert_eq!(doc.get_str("name").unwrap(), "Ada");
@@ -2047,11 +2586,92 @@ mod tests {
     #[test]
     fn test_apply_update_replacement_preserves_id() {
         let mut doc = doc! { "_id": 1, "name": "Ada", "age": 36 };
-        apply_update(&mut doc, &doc! { "name": "Grace" });
+        apply_update(&mut doc, &doc! { "name": "Grace" }).unwrap();
 
         assert_eq!(doc.get_i32("_id").unwrap(), 1);
         assert_eq!(doc.get_str("name").unwrap(), "Grace");
         assert!(doc.get("age").is_none(), "replacement drops old fields");
+    }
+
+    #[test]
+    fn test_document_matches_regex_type_elem_match_and_not() {
+        let doc = doc! {
+            "ename": "SMITH",
+            "sal": 800,
+            "tags": [ { "x": 1 }, { "x": 5 } ],
+        };
+        assert!(document_matches(
+            &doc,
+            &doc! { "ename": { "$regex": "^sm", "$options": "i" } }
+        ));
+        assert!(!document_matches(
+            &doc,
+            &doc! { "ename": { "$regex": "^zz" } }
+        ));
+        assert!(document_matches(&doc, &doc! { "sal": { "$type": "int" } }));
+        assert!(document_matches(
+            &doc,
+            &doc! { "sal": { "$type": "number" } }
+        ));
+        assert!(!document_matches(
+            &doc,
+            &doc! { "ename": { "$type": "int" } }
+        ));
+        assert!(document_matches(
+            &doc,
+            &doc! { "tags": { "$elemMatch": { "x": { "$gt": 4 } } } }
+        ));
+        assert!(!document_matches(
+            &doc,
+            &doc! { "tags": { "$elemMatch": { "x": { "$gt": 9 } } } }
+        ));
+        assert!(document_matches(
+            &doc,
+            &doc! { "sal": { "$not": { "$gt": 1000 } } }
+        ));
+        assert!(document_matches(
+            &doc,
+            &doc! { "$not": { "ename": "KING" } }
+        ));
+        assert!(!document_matches(
+            &doc,
+            &doc! { "$not": { "ename": "SMITH" } }
+        ));
+        let error = validate_filter(&doc! { "sal": { "$bogus": 1 } }).unwrap_err();
+        assert!(error.contains("$bogus"), "{error}");
+    }
+
+    #[test]
+    fn test_apply_update_operators() {
+        let mut doc = doc! {
+            "_id": 1,
+            "name": "Ada",
+            "age": 36,
+            "city": "London",
+            "tags": ["a"],
+        };
+        apply_update(
+            &mut doc,
+            &doc! {
+                "$rename": { "city": "town" },
+                "$unset": { "name": "" },
+                "$inc": { "age": 1 },
+                "$push": { "tags": { "$each": ["b", "c"] } },
+                "$pull": { "tags": "a" },
+            },
+        )
+        .unwrap();
+        assert!(doc.get("name").is_none());
+        assert!(doc.get("city").is_none());
+        assert_eq!(doc.get_str("town").unwrap(), "London");
+        assert_eq!(doc.get_i32("age").unwrap(), 37);
+        let tags = doc.get_array("tags").unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].as_str(), Some("b"));
+        let error = apply_update(&mut doc, &doc! { "$foo": { "age": 1 } }).unwrap_err();
+        assert!(error.contains("$foo"), "{error}");
+        let error = apply_update(&mut doc, &doc! { "$unset": { "_id": "" } }).unwrap_err();
+        assert!(error.contains("_id"), "{error}");
     }
 
     #[test]
@@ -2290,15 +2910,7 @@ mod tests {
         }
 
         let router = PartitionRouter::with_storage(1, config);
-        match dispatch(
-            &router,
-            PartitionCommand::Find {
-                collection: "db.emp".into(),
-                filter: doc! {},
-            },
-        )
-        .await
-        {
+        match dispatch(&router, PartitionCommand::find("db.emp", doc! {})).await {
             PartitionResult::Found { documents } => {
                 assert_eq!(documents.len(), 1);
                 assert_eq!(documents[0].get_str("name").unwrap(), "SMITH");
@@ -2350,5 +2962,259 @@ mod tests {
             other => panic!("expected Found, got {:?}", other),
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn as_number(doc: &Document, key: &str) -> f64 {
+        match doc.get(key) {
+            Some(bson::Bson::Int32(n)) => f64::from(*n),
+            Some(bson::Bson::Int64(n)) => *n as f64,
+            Some(bson::Bson::Double(n)) => *n,
+            other => panic!("{key} is not a number: {other:?}"),
+        }
+    }
+
+    fn batch_of(reply: &Document) -> Vec<Document> {
+        reply
+            .get_document("cursor")
+            .unwrap()
+            .get_array("firstBatch")
+            .unwrap()
+            .iter()
+            .map(|value| value.as_document().unwrap().clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_matches_sql_and_replays_from_the_wal() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, false);
+        let employees = vec![
+            doc! { "_id": 1, "ename": "SMITH", "job": "CLERK", "sal": 800, "deptno": 10 },
+            doc! { "_id": 2, "ename": "ALLEN", "job": "SALESMAN", "sal": 1600, "deptno": 30 },
+            doc! { "_id": 3, "ename": "KING", "job": "PRESIDENT", "sal": 5000, "deptno": 10 },
+            doc! { "_id": 4, "ename": "BLAKE", "job": "MANAGER", "sal": 2850, "deptno": 30 },
+        ];
+        {
+            let router = PartitionRouter::with_storage(1, config.clone());
+            dispatch(
+                &router,
+                PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: employees.clone(),
+                },
+            )
+            .await;
+            dispatch(
+                &router,
+                PartitionCommand::Insert {
+                    collection: "db.dept".into(),
+                    documents: vec![
+                        doc! { "_id": 10, "deptno": 10, "dname": "ACCOUNTING" },
+                        doc! { "_id": 30, "deptno": 30, "dname": "SALES" },
+                    ],
+                },
+            )
+            .await;
+
+            let grouped = crate::network::execute_aggregate(
+                &router,
+                PartitionCommand::Aggregate {
+                    collection: "db.emp".into(),
+                    pipeline: vec![doc! {
+                        "$group": {
+                            "_id": "$job",
+                            "total": { "$sum": "$sal" },
+                            "n": { "$count": {} },
+                        }
+                    }],
+                    resolved: Vec::new(),
+                },
+            )
+            .await;
+            assert_eq!(grouped.get_f64("ok").unwrap(), 1.0);
+
+            let sql = crate::query_engine::execute_sql_query(
+                "SELECT job, SUM(sal) AS total, COUNT(*) AS n FROM emp WHERE sal > 1000 GROUP BY job",
+                &[("emp", std::sync::Arc::new(employees.clone()))],
+            )
+            .await
+            .expect("sql");
+            let mut expected = std::collections::HashMap::new();
+            for row in batch_of(&sql) {
+                expected.insert(
+                    row.get_str("job").unwrap().to_string(),
+                    (as_number(&row, "total"), as_number(&row, "n")),
+                );
+            }
+            let matched = crate::network::execute_aggregate(
+                &router,
+                PartitionCommand::Aggregate {
+                    collection: "db.emp".into(),
+                    pipeline: vec![
+                        doc! { "$match": { "sal": { "$gt": 1000 } } },
+                        doc! { "$group": { "_id": "$job", "total": { "$sum": "$sal" }, "n": { "$count": {} } } },
+                    ],
+                    resolved: Vec::new(),
+                },
+            )
+            .await;
+            let mut actual = std::collections::HashMap::new();
+            for row in batch_of(&matched) {
+                actual.insert(
+                    row.get_str("_id").unwrap().to_string(),
+                    (as_number(&row, "total"), as_number(&row, "n")),
+                );
+            }
+            assert_eq!(actual, expected);
+
+            let projected = crate::network::execute_aggregate(
+                &router,
+                PartitionCommand::Aggregate {
+                    collection: "db.emp".into(),
+                    pipeline: vec![
+                        doc! { "$match": { "ename": "SMITH" } },
+                        doc! { "$project": { "ename": 1, "_id": 0 } },
+                    ],
+                    resolved: Vec::new(),
+                },
+            )
+            .await;
+            let projected = batch_of(&projected);
+            assert_eq!(projected.len(), 1);
+            assert_eq!(projected[0].get_str("ename").unwrap(), "SMITH");
+            assert!(projected[0].get("sal").is_none());
+
+            dispatch(
+                &router,
+                PartitionCommand::Update {
+                    collection: "db.emp".into(),
+                    filter: doc! { "ename": "SMITH" },
+                    update: doc! { "$inc": { "sal": 100 } },
+                    multi: false,
+                },
+            )
+            .await;
+            let raised = crate::network::execute_aggregate(
+                &router,
+                PartitionCommand::Aggregate {
+                    collection: "db.emp".into(),
+                    pipeline: vec![doc! { "$match": { "ename": "SMITH" } }],
+                    resolved: Vec::new(),
+                },
+            )
+            .await;
+            assert_eq!(as_number(&batch_of(&raised)[0], "sal"), 900.0);
+
+            let written = crate::network::execute_aggregate(
+                &router,
+                PartitionCommand::Aggregate {
+                    collection: "db.emp".into(),
+                    pipeline: vec![
+                        doc! { "$match": { "sal": { "$gt": 1000 } } },
+                        doc! { "$out": "db.high" },
+                    ],
+                    resolved: Vec::new(),
+                },
+            )
+            .await;
+            assert_eq!(written.get_f64("ok").unwrap(), 1.0);
+            assert!(batch_of(&written).is_empty());
+
+            let joined = crate::network::execute_aggregate(
+                &router,
+                PartitionCommand::Aggregate {
+                    collection: "db.emp".into(),
+                    pipeline: vec![
+                        doc! { "$match": { "ename": "KING" } },
+                        doc! { "$lookup": {
+                            "from": "db.dept",
+                            "localField": "deptno",
+                            "foreignField": "deptno",
+                            "as": "dept",
+                        } },
+                    ],
+                    resolved: Vec::new(),
+                },
+            )
+            .await;
+            let king = &batch_of(&joined)[0];
+            let dept = king.get_array("dept").unwrap();
+            assert_eq!(dept.len(), 1);
+            assert_eq!(
+                dept[0].as_document().unwrap().get_str("dname").unwrap(),
+                "ACCOUNTING"
+            );
+
+            let rejected = crate::network::execute_aggregate(
+                &router,
+                PartitionCommand::Aggregate {
+                    collection: "db.emp".into(),
+                    pipeline: vec![doc! { "$bogus": 1 }],
+                    resolved: Vec::new(),
+                },
+            )
+            .await;
+            assert_eq!(rejected.get_f64("ok").unwrap(), 0.0);
+            assert!(rejected.get_str("errmsg").unwrap().contains("$bogus"));
+        }
+
+        let router = PartitionRouter::with_storage(1, config);
+        let replayed = crate::network::execute_aggregate(
+            &router,
+            PartitionCommand::Aggregate {
+                collection: "db.emp".into(),
+                pipeline: vec![doc! { "$match": { "ename": "SMITH" } }],
+                resolved: Vec::new(),
+            },
+        )
+        .await;
+        assert_eq!(as_number(&batch_of(&replayed)[0], "sal"), 900.0);
+        match dispatch(&router, PartitionCommand::find("db.high", doc! {})).await {
+            PartitionResult::Found { documents } => assert_eq!(documents.len(), 3),
+            other => panic!("expected the $out collection, got {:?}", other),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_lookup_reads_the_partition_that_owns_the_foreign_collection() {
+        let router = PartitionRouter::new(4);
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![doc! { "_id": 1, "ename": "KING", "deptno": 10 }],
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.dept".into(),
+                documents: vec![doc! { "_id": 10, "deptno": 10, "dname": "ACCOUNTING" }],
+            },
+        )
+        .await;
+        let reply = crate::network::execute_aggregate(
+            &router,
+            PartitionCommand::Aggregate {
+                collection: "db.emp".into(),
+                pipeline: vec![doc! { "$lookup": {
+                    "from": "db.dept",
+                    "localField": "deptno",
+                    "foreignField": "deptno",
+                    "as": "dept",
+                } }],
+                resolved: Vec::new(),
+            },
+        )
+        .await;
+        assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
+        let rows = batch_of(&reply);
+        let dept = rows[0].get_array("dept").unwrap();
+        assert_eq!(
+            dept[0].as_document().unwrap().get_str("dname").unwrap(),
+            "ACCOUNTING"
+        );
     }
 }

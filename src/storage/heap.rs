@@ -426,7 +426,7 @@ impl Heap {
                 let mut doc = self.read_overflow(pool, page_id)?;
                 if document_matches(&doc, filter) {
                     matched += 1;
-                    apply_update(&mut doc, update);
+                    apply_update(&mut doc, update)?;
                     self.rewrite_overflow(pool, disk, collection, page_id, &doc)?;
                     updated.push(doc);
                 }
@@ -437,7 +437,7 @@ impl Heap {
             for doc in &mut docs {
                 if document_matches(doc, filter) && (multi || matched == 0) {
                     matched += 1;
-                    apply_update(doc, update);
+                    apply_update(doc, update)?;
                     updated.push(doc.clone());
                     changed = true;
                     if !multi {

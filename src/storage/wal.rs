@@ -161,6 +161,7 @@ impl WalOp {
                 indexes: indexes.clone(),
             }),
             PartitionCommand::Find { .. }
+            | PartitionCommand::Aggregate { .. }
             | PartitionCommand::Count { .. }
             | PartitionCommand::ListIndexes { .. }
             | PartitionCommand::ListCollections { .. }

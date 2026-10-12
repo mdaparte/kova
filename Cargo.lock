@@ -1716,6 +1716,7 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "datafusion",
+ "regex",
  "serde",
  "tantivy",
  "tokio",

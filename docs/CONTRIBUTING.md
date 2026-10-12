@@ -37,6 +37,7 @@ parser + optimizer), Tantivy (full-text search).
 | `src/storage/crc.rs` | CRC-32 used by the WAL and page checksums |
 | `src/storage/engine.rs` | WAL, buffer pool, page store, and checkpoint |
 | `src/storage/heap.rs` | Document pages, overflow chains, and the catalog |
+| `src/storage/aggregate.rs` | Aggregation pipeline and the find cursor shape |
 | `src/storage/mvcc.rs` *(Phase 9)* | Multi-version concurrency control, snapshot reads |
 | `src/storage/transaction.rs` *(Phase 9)* | Transaction manager (begin/commit/abort, conflict detection, timeout) |
 | `src/search/mod.rs` | Tantivy indexes, tokenizers, relevance queries |
@@ -163,14 +164,17 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   and crash recovery. ✅ Complete.
 - **Phase 7 — Disk-resident collections:** documents live in pages; the buffer
   pool is the only RAM that grows with the cache. ✅ Complete.
-- **Phase 8 — Aggregation pipeline:** `aggregate` with `$match`, `$group`,
-  `$project`, `$sort`, `$limit`, reading pages, tested with mongosh. ⚪ Planned.
+- **Phase 8 — Query language and aggregation:** the remaining find
+  predicates, projection, sort, skip, limit, update operators, and the
+  twelve-stage pipeline, reading pages. ✅ Complete.
 - **Phase 9 — Transactional storage:** MVCC, ACID transactions, multiple
   isolation levels. ⚪ Planned.
 - **Phase 10 — Indexing subsystem:** B-Tree, hash, unique, and sparse indexes,
   index manager, auto-maintain, query planner integration. ⚪ Planned.
 - **Phase 11 — Replication and HA:** oplog, replica sets, heartbeat, election,
   read preference. ⚪ Planned.
+- **Phase 12 — On-disk page compression:** zstd on the BSON payload of each
+  page, WiredTiger-style. The WAL stays uncompressed. ⚪ Planned.
 
 ---
 

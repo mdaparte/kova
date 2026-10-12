@@ -347,9 +347,39 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             });
         }
 
+        let projection = optional_document(command, "projection")?;
+        let sort = optional_document(command, "sort")?;
+        let skip = non_negative_field(command, "skip")?.unwrap_or(0);
+        // A find limit of 0 means "no cap", matching MongoDB.
+        let limit = non_negative_field(command, "limit")?.filter(|limit| *limit > 0);
+
         return Ok(PartitionCommand::Find {
             collection: namespaced(collection),
             filter,
+            projection,
+            sort,
+            skip,
+            limit,
+        });
+    }
+
+    if let Ok(collection) = command.get_str("aggregate") {
+        let values = command
+            .get_array("pipeline")
+            .map_err(|_| "aggregate requires a 'pipeline' array")?;
+        let mut pipeline = Vec::with_capacity(values.len());
+        for value in values {
+            let mut stage = value
+                .as_document()
+                .ok_or_else(|| "aggregate pipeline stages must be documents".to_string())?
+                .clone();
+            namespace_stage(&mut stage, db)?;
+            pipeline.push(stage);
+        }
+        return Ok(PartitionCommand::Aggregate {
+            collection: namespaced(collection),
+            pipeline,
+            resolved: Vec::new(),
         });
     }
 
@@ -512,6 +542,125 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         .map(|key| key.as_str())
         .unwrap_or("<empty>");
     Err(format!("unsupported command '{}'", name))
+}
+
+fn optional_document(command: &Document, key: &str) -> Result<Option<Document>, String> {
+    if !command.contains_key(key) {
+        return Ok(None);
+    }
+    command
+        .get_document(key)
+        .cloned()
+        .map(Some)
+        .map_err(|_| format!("{key} must be a document"))
+}
+
+fn non_negative_field(command: &Document, key: &str) -> Result<Option<u64>, String> {
+    if !command.contains_key(key) {
+        return Ok(None);
+    }
+    let number = match command.get(key) {
+        Some(bson::Bson::Int32(value)) => i64::from(*value),
+        Some(bson::Bson::Int64(value)) => *value,
+        Some(bson::Bson::Double(value)) if value.is_finite() && value.fract() == 0.0 => {
+            *value as i64
+        }
+        _ => return Err(format!("{key} must be an integer")),
+    };
+    if number < 0 {
+        return Err(format!("{key} must be non-negative"));
+    }
+    Ok(Some(number as u64))
+}
+
+/// Rewrites `$lookup.from` and `$out` to `db.collection` so a later
+/// partition lookup uses the same routing key as `find`.
+fn namespace_stage(stage: &mut Document, db: &str) -> Result<(), String> {
+    let rewritten = stage.get_document("$lookup").ok().and_then(|lookup| {
+        let from = lookup.get_str("from").ok()?;
+        let mut lookup = lookup.clone();
+        lookup.insert("from", namespace(db, from));
+        Some(lookup)
+    });
+    if let Some(lookup) = rewritten {
+        stage.insert("$lookup", lookup);
+    }
+    if let Ok(name) = stage.get_str("$out") {
+        stage.insert("$out", namespace(db, name));
+    } else if let Ok(spec) = stage.get_document("$out").cloned() {
+        if let Ok(coll) = spec.get_str("coll") {
+            let target_db = spec.get_str("db").unwrap_or(db);
+            stage.insert("$out", namespace(target_db, coll));
+        }
+    }
+    Ok(())
+}
+
+/// Answers `explain` without running the query.
+///
+/// Phase 8 has no secondary index, so every find, count, and aggregate
+/// is a collection scan of pages. Phase 10 replaces the stage name
+/// when an index can serve the filter.
+pub fn explain_reply(command: &Document) -> Option<Result<Document, String>> {
+    let explained = if command.get_bool("explain").unwrap_or(false)
+        && (command.contains_key("find")
+            || command.contains_key("aggregate")
+            || command.contains_key("count"))
+    {
+        command
+    } else if let Ok(inner) = command.get_document("explain") {
+        inner
+    } else {
+        return None;
+    };
+    Some(explain_plan(command, explained))
+}
+
+fn explain_plan(outer: &Document, inner: &Document) -> Result<Document, String> {
+    let db = outer.get_str("$db").unwrap_or("test");
+    let mut plan = doc! { "stage": "COLLSCAN" };
+    let collection = if let Ok(name) = inner.get_str("find") {
+        if let Ok(filter) = inner.get_document("filter") {
+            plan.insert("filter", filter.clone());
+        }
+        if let Ok(sort) = inner.get_document("sort") {
+            plan.insert("sort", sort.clone());
+        }
+        if let Ok(projection) = inner.get_document("projection") {
+            plan.insert("projection", projection.clone());
+        }
+        name
+    } else if let Ok(name) = inner.get_str("aggregate") {
+        let pipeline = inner
+            .get_array("pipeline")
+            .map_err(|_| "aggregate requires a 'pipeline' array")?
+            .clone();
+        plan.insert("pipeline", pipeline);
+        name
+    } else if let Ok(name) = inner.get_str("count") {
+        if let Ok(filter) = inner.get_document("query") {
+            plan.insert("filter", filter.clone());
+        }
+        name
+    } else {
+        let name = inner
+            .keys()
+            .next()
+            .map(|key| key.as_str())
+            .unwrap_or("<empty>");
+        return Err(format!("explain does not support '{name}'"));
+    };
+
+    Ok(doc! {
+        "ok": 1.0,
+        "queryPlanner": {
+            "plannerVersion": 1i32,
+            "namespace": namespace(db, collection),
+            "indexFilterSet": false,
+            "winningPlan": plan,
+            "rejectedPlans": [],
+        },
+    })
 }
 
 /// Builds the storage-side namespace for one collection.
@@ -917,6 +1066,14 @@ pub fn reply_document(result: &PartitionResult) -> Document {
             "indexSize": 0i64,
             "scaleFactor": 1i32,
             "ok": 1.0,
+        },
+        PartitionResult::NeedForeign { namespace } => doc! {
+            "ok": 0.0,
+            "errmsg": format!("lookup of '{namespace}' was not resolved"),
+        },
+        PartitionResult::StageOut { namespace, .. } => doc! {
+            "ok": 0.0,
+            "errmsg": format!("$out to '{namespace}' was not written"),
         },
         PartitionResult::Error { message } => doc! {
             "ok": 0.0,
@@ -1492,12 +1649,95 @@ mod tests {
         let command = doc! { "find": "users" };
         let parsed = command_from_document(&command).expect("parse");
         match parsed {
-            PartitionCommand::Find { collection, filter } => {
+            PartitionCommand::Find {
+                collection, filter, ..
+            } => {
                 assert_eq!(collection, "users");
                 assert!(filter.is_empty());
             }
             other => panic!("expected Find, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_command_find_reads_cursor_options() {
+        let command = doc! {
+            "find": "emp",
+            "filter": { "sal": { "$gt": 1000 } },
+            "projection": { "ename": 1, "_id": 0 },
+            "sort": { "sal": -1 },
+            "skip": 2,
+            "limit": 5,
+            "$db": "shop",
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Find {
+                collection,
+                projection,
+                sort,
+                skip,
+                limit,
+                ..
+            } => {
+                assert_eq!(collection, "shop.emp");
+                assert_eq!(projection.unwrap().get_i32("ename").unwrap(), 1);
+                assert_eq!(sort.unwrap().get_i32("sal").unwrap(), -1);
+                assert_eq!(skip, 2);
+                assert_eq!(limit, Some(5));
+            }
+            other => panic!("expected Find, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_aggregate_namespaces_lookup_and_out() {
+        let command = doc! {
+            "aggregate": "emp",
+            "pipeline": [
+                { "$lookup": { "from": "dept", "localField": "deptno", "foreignField": "deptno", "as": "dept" } },
+                { "$out": "high" },
+            ],
+            "cursor": {},
+            "$db": "shop",
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Aggregate {
+                collection,
+                pipeline,
+                resolved,
+            } => {
+                assert_eq!(collection, "shop.emp");
+                assert!(resolved.is_empty());
+                assert_eq!(
+                    pipeline[0]
+                        .get_document("$lookup")
+                        .unwrap()
+                        .get_str("from")
+                        .unwrap(),
+                    "shop.dept"
+                );
+                assert_eq!(pipeline[1].get_str("$out").unwrap(), "shop.high");
+            }
+            other => panic!("expected Aggregate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_explain_reports_a_collection_scan() {
+        let reply = explain_reply(&doc! {
+            "explain": { "aggregate": "emp", "pipeline": [ { "$match": { "sal": { "$gt": 1000 } } } ] },
+            "$db": "shop",
+        })
+        .expect("explain")
+        .expect("plan");
+        assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
+        let planner = reply.get_document("queryPlanner").unwrap();
+        assert_eq!(planner.get_str("namespace").unwrap(), "shop.emp");
+        let plan = planner.get_document("winningPlan").unwrap();
+        assert_eq!(plan.get_str("stage").unwrap(), "COLLSCAN");
+        assert_eq!(plan.get_array("pipeline").unwrap().len(), 1);
     }
 
     #[test]
@@ -1618,7 +1858,10 @@ mod tests {
         let reply = special_command(&doc! { "hostInfo": 1.0 }).expect("hostInfo must be answered");
         assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
         assert!(
-            reply.get_str("system").unwrap().contains(std::env::consts::OS),
+            reply
+                .get_str("system")
+                .unwrap()
+                .contains(std::env::consts::OS),
             "system field must contain platform"
         );
         assert!(
