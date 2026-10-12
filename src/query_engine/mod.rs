@@ -16,15 +16,12 @@
 
 use std::sync::Arc;
 
-use bson::{doc, Document};
-use datafusion::common::error::Result as DFResult;
+use bson::Document;
+use datafusion::arrow::array::Array;
+use datafusion::error::Result as DFResult;
 use datafusion::prelude::*;
 
 /// Shared session context that holds registered table providers.
-///
-/// This context is created once at engine startup and shared across all
-/// connections. Each collection is registered as a `MemoryTable` provider,
-/// and DataFusion executes queries against these tables.
 pub type Session = Arc<SessionContext>;
 
 /// Creates a new shared session context.
@@ -33,61 +30,23 @@ pub fn new_session() -> Session {
 }
 
 /// Registers a collection as a DataFusion table.
-///
-/// The collection's documents are exposed as a `MemoryTable` provider,
-/// which DataFusion can query. The table name is the collection name
-/// (e.g. "users"). If the table already exists, it is replaced with the
-/// new data (this is a snapshot, not a live view).
 pub fn register_collection(session: &Session, name: &str, documents: Arc<Vec<Document>>) -> DFResult<()> {
     let table = memory_table::MemoryTable::new(name, documents)?;
     session.register_table(name, Arc::new(table))?;
     Ok(())
 }
 
-/// Executes a SQL query against the session's registered tables.
-///
-/// Returns a BSON document with either `ok: 1` and the result set (as an
-/// array of documents), or `ok: 0` and an error message.
-///
-/// The result set is a `firstBatch` array of documents, each representing
-/// one row of the query result. Column names are taken from the result
-/// schema, and values are converted from Arrow to BSON.
-pub async fn execute_sql(session: &Session, sql: &str) -> DFResult<Document> {
+/// Executes a SQL query against a fresh session pre-seeded with documents.
+pub async fn execute_sql(documents: Arc<Vec<Document>>, table_name: &str, sql: &str) -> DFResult<bson::Document> {
+    let session = new_session();
+    register_collection(&session, table_name, documents.clone())?;
+
     let df = session.sql(sql).await?;
-    let results = df.clone().collect().await?;
+    let results = df.collect().await?;
 
-    let mut rows = Vec::new();
-    for row in results {
-        let mut row_doc = doc! {};
-        for (i, field) in row.schema().fields().iter().enumerate() {
-            let value = row[i];
-            let bson_value = match value {
-                datafusion::arrow::array::ArrayRef::StringArray(arr) => {
-                    let idx = value.as_usize().unwrap_or(0);
-                    Some(arr.value(idx).clone()).into()
-                }
-                datafusion::arrow::array::ArrayRef::Int32Array(arr) => {
-                    let idx = value.as_usize().unwrap_or(0);
-                    arr.value(idx).clone().into()
-                }
-                datafusion::arrow::array::ArrayRef::Int64Array(arr) => {
-                    let idx = value.as_usize().unwrap_or(0);
-                    arr.value(idx).clone().into()
-                }
-                datafusion::arrow::array::ArrayRef::Float64Array(arr) => {
-                    let idx = value.as_usize().unwrap_or(0);
-                    arr.value(idx).clone().into()
-                }
-                value => {
-                    format!("{:?}", value).into()
-                }
-            };
-            row_doc.insert(field.name().clone(), bson_value);
-        }
-        rows.push(row_doc);
-    }
+    let rows = convert_batches_to_bson(&results)?;
 
-    Ok(doc! {
+    Ok(bson::doc! {
         "ok": 1.0,
         "cursor": {
             "id": 0i64,
@@ -95,6 +54,82 @@ pub async fn execute_sql(session: &Session, sql: &str) -> DFResult<Document> {
             "firstBatch": rows,
         },
     })
+}
+
+fn convert_batches_to_bson(batches: &[datafusion::arrow::record_batch::RecordBatch]) -> DFResult<Vec<bson::Document>> {
+    use datafusion::arrow::array::{BooleanArray, Float64Array, Int32Array, Int64Array, StringArray};
+
+    let mut docs = Vec::with_capacity(batches.iter().map(|b| b.num_rows()).sum());
+    for batch in batches {
+        let num_rows = batch.num_rows();
+        let schema = batch.schema();
+        let fields = schema.fields();
+        for row_idx in 0..num_rows {
+            let mut row_doc = bson::doc! {};
+            for (col_idx, field) in fields.iter().enumerate() {
+                let column = batch.column(col_idx);
+                let name = field.name().clone();
+
+                let bson_value = if column.data_type() == &datafusion::arrow::datatypes::DataType::Boolean {
+                    let arr = column.as_any().downcast_ref::<BooleanArray>().ok_or_else(|| {
+                        datafusion::error::DataFusionError::Internal(format!("expected BooleanArray for column {}", name))
+                    })?;
+                    if arr.is_null(row_idx) {
+                        bson::Bson::Null
+                    } else {
+                        bson::Bson::Boolean(arr.value(row_idx))
+                    }
+                } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Int32 {
+                    let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                        datafusion::error::DataFusionError::Internal(format!("expected Int32Array for column {}", name))
+                    })?;
+                    if arr.is_null(row_idx) {
+                        bson::Bson::Null
+                    } else {
+                        bson::Bson::Int32(arr.value(row_idx))
+                    }
+                } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Int64 {
+                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                        datafusion::error::DataFusionError::Internal(format!("expected Int64Array for column {}", name))
+                    })?;
+                    if arr.is_null(row_idx) {
+                        bson::Bson::Null
+                    } else {
+                        bson::Bson::Int64(arr.value(row_idx))
+                    }
+                } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Float64 {
+                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                        datafusion::error::DataFusionError::Internal(format!("expected Float64Array for column {}", name))
+                    })?;
+                    if arr.is_null(row_idx) {
+                        bson::Bson::Null
+                    } else {
+                        bson::Bson::Double(arr.value(row_idx))
+                    }
+                } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Utf8
+                    || column.data_type() == &datafusion::arrow::datatypes::DataType::LargeUtf8
+                {
+                    let arr = column
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(format!("expected StringArray for column {}", name))
+                        })?;
+                    if arr.is_null(row_idx) {
+                        bson::Bson::Null
+                    } else {
+                        bson::Bson::String(arr.value(row_idx).to_string())
+                    }
+                } else {
+                    bson::Bson::String(format!("{:?}", column))
+                };
+
+                row_doc.insert(name, bson_value);
+            }
+            docs.push(row_doc);
+        }
+    }
+    Ok(docs)
 }
 
 /// Converts a DataFusion execution plan to a human-readable description.
@@ -112,15 +147,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_and_query_collection() {
-        let session = new_session();
-
         let docs = Arc::new(vec![
             doc! { "name": "Alice", "age": 30i32 },
             doc! { "name": "Bob", "age": 25i32 },
         ]);
-        register_collection(&session, "users", docs).expect("register table");
 
-        let result = execute_sql(&session, "SELECT * FROM users").await.expect("execute query");
+        let result =
+            execute_sql(docs, "users", "SELECT * FROM users").await.expect("execute query");
         assert_eq!(result.get_f64("ok").unwrap(), 1.0);
 
         let cursor = result.get_document("cursor").expect("cursor");
@@ -130,21 +163,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_select_with_where_clause() {
-        let session = new_session();
-
         let docs = Arc::new(vec![
             doc! { "name": "Alice", "age": 30i32 },
             doc! { "name": "Bob", "age": 25i32 },
             doc! { "name": "Charlie", "age": 35i32 },
         ]);
-        register_collection(&session, "users", docs).expect("register table");
 
-        let result = execute_sql(&session, "SELECT name FROM users WHERE age > 28").await.expect("execute query");
+        let result =
+            execute_sql(docs, "users", "SELECT name FROM users WHERE age > 28")
+                .await
+                .expect("execute query");
         assert_eq!(result.get_f64("ok").unwrap(), 1.0);
 
         let cursor = result.get_document("cursor").expect("cursor");
         let batch = cursor.get_array("firstBatch").expect("firstBatch");
-        let names: Vec<&str> = batch.iter().filter_map(|doc| doc.get_str("name").ok()).collect();
+        let names: Vec<&str> = batch.iter().filter_map(|bson| bson.as_document().and_then(|doc| doc.get_str("name").ok())).collect();
         assert!(names.contains(&"Alice"), "Alice should be in results");
         assert!(names.contains(&"Charlie"), "Charlie should be in results");
         assert!(!names.contains(&"Bob"), "Bob should not be in results");
@@ -152,8 +185,36 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_sql_returns_error() {
-        let session = new_session();
-        let result = execute_sql(&session, "SELECT FROM users").await;
+        let docs = Arc::new(vec![]);
+        let result = execute_sql(docs, "users", "SELECT FROM users").await;
         assert!(result.is_err(), "invalid SQL should fail");
+    }
+
+    #[tokio::test]
+    async fn test_numeric_where_clause() {
+        let docs = Arc::new(vec![
+            doc! { "name": "Alice", "age": 30i32 },
+            doc! { "name": "Bob", "age": 25i32 },
+            doc! { "name": "Charlie", "age": 35i32 },
+        ]);
+
+        let result =
+            execute_sql(docs, "users", "SELECT * FROM users WHERE age > 25")
+                .await
+                .expect("execute query");
+        assert_eq!(result.get_f64("ok").unwrap(), 1.0);
+
+        let cursor = result.get_document("cursor").expect("cursor");
+        let batch = cursor.get_array("firstBatch").expect("firstBatch");
+        // Bob has age 25, so he should be excluded by age > 25.
+        for row in batch.iter() {
+            let row_doc = row.as_document().expect("row");
+            let name = row_doc.get_str("name").expect("name");
+            let age = row_doc.get_i32("age").expect("age");
+            if name == "Bob" {
+                panic!("Bob should not be in results for age > 25");
+            }
+            assert!(age > 25, "row {} has age {}", name, age);
+        }
     }
 }

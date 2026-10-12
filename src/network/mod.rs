@@ -3,10 +3,11 @@
 //! This module owns the connection lifecycle: accept a client, spawn a
 //! Tokio task, read OP_MSG frames, hand them to the storage router and
 //! write the reply back. Raw protocol parsing lives in
-//! [`crate::protocol`]; this file only handles I/O.
+//! [`crate::protocol`]; this file handles I/O and command routing.
 //!
 //! Phase 4 (DataFusion) is wired in through [`crate::query_engine`];
-//! SQL text arriving as an OP_MSG command is parsed and planned there.
+//! SQL text arriving as an OP_MSG command is parsed, planned and executed
+//! there against in-memory collections.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -18,13 +19,14 @@ use tokio::spawn;
 use crate::logger::LOGGER;
 use crate::protocol;
 use crate::query_engine;
+use std::sync::Arc;
+
 use crate::storage::PartitionRouter;
 use crate::types::{PartitionCommand, PartitionResult};
 
-mod wire {
+pub mod wire {
     //! Fixed offsets of the 16-byte MongoDB Wire Protocol header.
 
-    /// Fixed size of the standard MongoDB Wire Protocol header (4 fields of 4 bytes each).
     pub const HEADER_SIZE: usize = 16;
 
     /// Total message length, including the header itself (int32 big-endian).
@@ -85,6 +87,9 @@ mod wire {
     }
 }
 
+/// Size of the standard MongoDB Wire Protocol header (4 fields of 4 bytes each).
+pub const HEADER_SIZE: usize = wire::HEADER_SIZE;
+
 /// Resolves the listening port from the global configuration.
 ///
 /// The port comes from `kova.toml`, overridable with `KOVA_PORT`; an
@@ -102,11 +107,12 @@ static REPLY_REQUEST_ID: AtomicI32 = AtomicI32::new(1);
 /// Connections are accepted asynchronously; each client runs on its own
 /// Tokio task. Commands are forwarded to `router`, whose partition
 /// workers execute them on dedicated OS threads.
-////// ## Port
+///
+/// ## Port
 ///
 /// The default port is `27017` (the standard MongoDB port). It can be
-/// changed in `kova.toml` or overridden with the `KOVA_PORT`
-/// environment variable (environment wins over file).
+/// changed in `kova.toml` or overridden with the `KOVA_PORT` environment
+/// variable (environment wins over file).
 pub async fn start_server(router: PartitionRouter) -> std::io::Result<()> {
     let port = resolve_port();
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
@@ -137,13 +143,16 @@ pub async fn start_server(router: PartitionRouter) -> std::io::Result<()> {
 /// Each iteration reads the 16-byte header, then the remaining
 /// `messageLength - 16` bytes, decodes the OP_MSG body, executes the
 /// command through the router and writes the reply.
-async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std::io::Result<()> {
+async fn handle_client(
+    socket: &mut TcpStream,
+    router: &PartitionRouter,
+) -> std::io::Result<()> {
     loop {
         // ---- header ------------------------------------------------
         // `with_capacity` only reserves memory; the length must be set
         // explicitly so `read_exact` actually fills the 16 bytes.
-        let mut header_buf = BytesMut::with_capacity(wire::HEADER_SIZE);
-        header_buf.resize(wire::HEADER_SIZE, 0);
+        let mut header_buf = BytesMut::with_capacity(HEADER_SIZE);
+        header_buf.resize(HEADER_SIZE, 0);
 
         match socket.read_exact(&mut header_buf).await {
             Ok(_) => {}
@@ -168,7 +177,7 @@ async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std:
         // never exceed the 48 MB limit announced in the `hello` reply.
         // Rejecting a bogus length here keeps the loop aligned instead
         // of allocating a multi-gigabyte buffer for a garbage value.
-        if header.message_length < wire::HEADER_SIZE as u32
+        if header.message_length < HEADER_SIZE as u32
             || header.message_length > protocol::MAX_MESSAGE_SIZE as u32
         {
             return Err(std::io::Error::new(
@@ -184,7 +193,7 @@ async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std:
         // ---- body --------------------------------------------------
         let body_len = header
             .message_length
-            .saturating_sub(wire::HEADER_SIZE as u32) as usize;
+            .saturating_sub(HEADER_SIZE as u32) as usize;
 
         if body_len > 0 {
             let mut body_buf = BytesMut::with_capacity(body_len);
@@ -221,7 +230,9 @@ async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std:
                     header.request_id, header.message_length
                 ));
 
-                if let Err(err) = process_op_query(&header, &body_buf, router, socket).await {
+                if let Err(err) =
+                    process_op_query(&header, &body_buf, router, socket).await
+                {
                     LOGGER.warn(format!("Failed to process OP_QUERY: {}", err));
                 }
             } else {
@@ -324,23 +335,42 @@ async fn execute_command(
         return bson::doc! { "ok": 1.0, "me": local_addr.to_string() };
     }
 
-    // Phase 4: SQL text arrives as an OP_MSG command with the key
-    // "sql". The value is the SQL string; we execute it with DataFusion
-    // and return the result set as a BSON document (or an error).
-    // This is the entry point for SQL queries against in-memory collections.
-    // Real execution over disk-backed storage (Phase 5+) swaps in a different
-    // table provider without changing this path.
-    if let Ok(sql) = command.get_str("sql") {
-        match query_engine::execute_sql(&router.session(), sql).await {
-            Ok(result) => {
-                return result;
-            }
-            Err(err) => {
+    // ---- Phase 4: SQL via db.runCommand({ sql: "..." }) ------------
+    // SQL text arrives as an OP_MSG command with the key "sql".
+    // We extract the referenced collection name from the SQL's FROM clause,
+    // use the command's `$db` to resolve the storage namespace, load the
+    // in-memory documents for that collection, and execute the query with
+    // DataFusion, returning the result set as a BSON document (or an error).
+    if let Ok(sql_text) = command.get_str("sql") {
+        if let Some(table_name) = sql_table_name(sql_text) {
+            let db = command.get_str("$db").unwrap_or("");
+            let collection = if db.is_empty() {
+                table_name.clone()
+            } else {
+                format!("{}.{}", db, table_name)
+            };
+
+            if let Ok(documents) = load_collection_documents(router, &collection).await {
+                match query_engine::execute_sql(documents, &table_name, sql_text).await {
+                    Ok(result) => return result,
+                    Err(err) => {
+                        return bson::doc! {
+                            "ok": 0.0,
+                            "errmsg": err.to_string(),
+                        };
+                    }
+                }
+            } else {
                 return bson::doc! {
                     "ok": 0.0,
-                    "errmsg": err.to_string(),
+                    "errmsg": format!("collection '{}' not found or empty", collection),
                 };
             }
+        } else {
+            return bson::doc! {
+                "ok": 0.0,
+                "errmsg": "could not determine collection name from SQL",
+            };
         }
     }
 
@@ -372,12 +402,63 @@ async fn execute_command(
     }
 }
 
+/// Extracts a table/collection name from a simple SQL FROM clause.
+///
+/// This is intentionally minimal for Phase 4: we look for the first token
+/// after "FROM" (case-insensitive) and return it. It does not handle
+/// joins, subqueries, or complex SQL.
+fn sql_table_name(sql: &str) -> Option<String> {
+    let upper = sql.to_uppercase();
+    let from_pos = upper.find("FROM")?;
+    let after_from = &upper[from_pos + 4..];
+    let trimmed = after_from.trim_start();
+    let end = trimmed
+        .find(|c: char| c.is_whitespace() || c == '(' || c == ',' || c == ';')
+        .unwrap_or(trimmed.len());
+    let name = trimmed[..end].trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Loads all documents from an in-memory collection by dispatching a find
+/// to its partition.
+///
+/// Returns the documents as an `Arc<Vec<Document>>`, or an error if the
+/// collection does not exist or is empty.
+async fn load_collection_documents(
+    router: &PartitionRouter,
+    table_name: &str,
+) -> Result<Arc<Vec<bson::Document>>, String> {
+    use crate::types::PartitionCommand;
+
+    let find_cmd = PartitionCommand::Find {
+        collection: table_name.to_string(),
+        filter: bson::doc! {},
+    };
+
+    match router.dispatch(find_cmd) {
+        Some(rx) => match rx.await {
+            Ok(PartitionResult::Found { documents }) => Ok(Arc::new(documents)),
+            Ok(PartitionResult::Error { message }) => Err(message),
+            Ok(_) => Err("unexpected partition result".into()),
+            Err(_) => Err("partition worker dropped the request".into()),
+        },
+        None => Err("storage partition unavailable".into()),
+    }
+}
+
 /// Broadcasts `listCollections` to every partition and merges the
 /// collection descriptions into a single cursor reply.
 ///
 /// The reply namespace follows MongoDB's own format,
 /// `<db>.$cmd.listCollections`.
-async fn list_collections(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+async fn list_collections(
+    command: &bson::Document,
+    router: &PartitionRouter,
+) -> bson::Document {
     let partition_command = match protocol::command_from_document(command) {
         Ok(partition_command) => partition_command,
         Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
@@ -421,7 +502,10 @@ async fn list_collections(command: &bson::Document, router: &PartitionRouter) ->
 ///
 /// Every worker drops the share of the database it owns; the reply
 /// names the database like MongoDB's own `{dropped: "<db>"}`.
-async fn drop_database(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+async fn drop_database(
+    command: &bson::Document,
+    router: &PartitionRouter,
+) -> bson::Document {
     let partition_command = match protocol::command_from_document(command) {
         Ok(partition_command) => partition_command,
         Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
@@ -457,7 +541,10 @@ async fn drop_database(command: &bson::Document, router: &PartitionRouter) -> bs
 ///
 /// One database's collections hash across partitions, so no single
 /// worker knows the whole picture; the totals are summed here.
-async fn database_stats(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+async fn database_stats(
+    command: &bson::Document,
+    router: &PartitionRouter,
+) -> bson::Document {
     let partition_command = match protocol::command_from_document(command) {
         Ok(partition_command) => partition_command,
         Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
@@ -518,7 +605,10 @@ async fn database_stats(command: &bson::Document, router: &PartitionRouter) -> b
 /// A database may live on several partitions (its collections hash
 /// across workers); the merged entry is `empty` only when every
 /// partition reported it empty.
-async fn list_databases(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+async fn list_databases(
+    command: &bson::Document,
+    router: &PartitionRouter,
+) -> bson::Document {
     let partition_command = match protocol::command_from_document(command) {
         Ok(partition_command) => partition_command,
         Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
@@ -526,12 +616,15 @@ async fn list_databases(command: &bson::Document, router: &PartitionRouter) -> b
 
     // name -> empty; a database is non-empty once any partition says
     // it holds documents.
-    let mut emptiness: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    let mut emptiness: std::collections::BTreeMap<String, bool> =
+        std::collections::BTreeMap::new();
     for rx in router.broadcast(partition_command) {
         match rx.await {
             Ok(PartitionResult::ListedDatabases { databases }) => {
                 for database in databases {
-                    let Some(name) = database.get_str("name").ok().map(str::to_string) else {
+                    let Some(name) =
+                        database.get_str("name").ok().map(str::to_string)
+                    else {
                         continue;
                     };
                     let empty = database.get_bool("empty").unwrap_or(false);
@@ -608,7 +701,7 @@ fn cursor_ns(command: &bson::Document, mut reply: bson::Document) -> bson::Docum
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wire::{MessageHeader, HEADER_SIZE, OP_MSG};
+    use crate::network::wire::{MessageHeader, HEADER_SIZE, OP_MSG};
 
     /// Builds a 16-byte little-endian header with the given fields.
     fn build_header(
@@ -690,7 +783,7 @@ mod tests {
         let mut client = TcpStream::connect(addr).await.expect("connect");
         client.write_all(&frame).await.expect("write request");
 
-        let mut header_buf = [0u8; wire::HEADER_SIZE];
+        let mut header_buf = [0u8; HEADER_SIZE];
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client.read_exact(&mut header_buf),
@@ -701,9 +794,9 @@ mod tests {
 
         let header = MessageHeader::parse(&header_buf);
         assert_eq!(header.op_code, OP_MSG, "reply must be OP_MSG");
-        assert!(header.message_length > wire::HEADER_SIZE as u32);
+        assert!(header.message_length > HEADER_SIZE as u32);
 
-        let body_len = header.message_length as usize - wire::HEADER_SIZE;
+        let body_len = header.message_length as usize - HEADER_SIZE;
         let mut body = vec![0u8; body_len];
         client.read_exact(&mut body).await.expect("reply body");
 
@@ -733,7 +826,7 @@ mod tests {
         client.write_all(&frame).await.expect("write request");
 
         // Read the 16-byte reply header.
-        let mut header_buf = [0u8; wire::HEADER_SIZE];
+        let mut header_buf = [0u8; HEADER_SIZE];
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client.read_exact(&mut header_buf),
@@ -748,10 +841,10 @@ mod tests {
             reply_header.response_to, 1,
             "reply must echo the request id"
         );
-        assert!(reply_header.message_length > wire::HEADER_SIZE as u32);
+        assert!(reply_header.message_length > HEADER_SIZE as u32);
 
         // Read and decode the reply body.
-        let body_len = reply_header.message_length as usize - wire::HEADER_SIZE;
+        let body_len = reply_header.message_length as usize - HEADER_SIZE;
         let mut body = vec![0u8; body_len];
         client.read_exact(&mut body).await.expect("reply body");
 
@@ -836,7 +929,7 @@ mod tests {
         body.extend(bson::to_vec(&bson::doc! { "isMaster": 1i32 }).expect("bson"));
 
         // Build the full frame: little-endian 16-byte header + body.
-        let message_length = (wire::HEADER_SIZE + body.len()) as u32;
+        let message_length = (HEADER_SIZE + body.len()) as u32;
         let mut frame = Vec::from(message_length.to_le_bytes());
         frame.extend_from_slice(&1i32.to_le_bytes()); // requestId
         frame.extend_from_slice(&0i32.to_le_bytes()); // responseTo
@@ -846,7 +939,7 @@ mod tests {
         let mut client = TcpStream::connect(addr).await.expect("connect");
         client.write_all(&frame).await.expect("write request");
 
-        let mut header_buf = [0u8; wire::HEADER_SIZE];
+        let mut header_buf = [0u8; HEADER_SIZE];
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client.read_exact(&mut header_buf),
@@ -862,15 +955,16 @@ mod tests {
             "OP_QUERY must be answered with OP_REPLY"
         );
         assert_eq!(reply_header.response_to, 1, "reply must echo requestId");
-        assert!(reply_header.message_length > wire::HEADER_SIZE as u32);
+        assert!(reply_header.message_length > HEADER_SIZE as u32);
 
         // OP_REPLY body: flags(4) + cursorId(8) + startingFrom(4) +
         // numberReturned(4) + documents.
-        let body_len = reply_header.message_length as usize - wire::HEADER_SIZE;
+        let body_len = reply_header.message_length as usize - HEADER_SIZE;
         let mut body_buf = vec![0u8; body_len];
         client.read_exact(&mut body_buf).await.expect("reply body");
 
-        let number_returned = i32::from_le_bytes(body_buf[16..20].try_into().unwrap());
+        let number_returned =
+            i32::from_le_bytes(body_buf[16..20].try_into().unwrap());
         assert_eq!(number_returned, 1);
 
         let doc: bson::Document = bson::from_slice(&body_buf[20..]).expect("decode reply doc");
@@ -953,7 +1047,7 @@ mod tests {
         let mut client = TcpStream::connect(addr).await.expect("connect");
         client.write_all(&frame).await.expect("write request");
 
-        let mut header_buf = [0u8; wire::HEADER_SIZE];
+        let mut header_buf = [0u8; HEADER_SIZE];
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client.read_exact(&mut header_buf),
@@ -963,7 +1057,7 @@ mod tests {
         .expect("reply header read");
 
         let reply_header = MessageHeader::parse(&header_buf);
-        let body_len = reply_header.message_length as usize - wire::HEADER_SIZE;
+        let body_len = reply_header.message_length as usize - HEADER_SIZE;
         let mut body = vec![0u8; body_len];
         client.read_exact(&mut body).await.expect("reply body");
 

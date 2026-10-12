@@ -5,14 +5,16 @@
 //! plan). Each collection is a `MemoryTable` backed by an `Arc<Vec<Document>>`.
 //!
 //! The provider implements `TableProvider` so DataFusion can read the schema
-//! and acquire a `DataFrame` for query execution.
+//! and acquire an execution plan for query execution.
 
 use std::sync::Arc;
 
-use bson::{doc, Document};
+use bson::Document;
+use datafusion::common::ScalarValue;
+use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DFResult;
-use datafusion::datasource::table::{MemTable, TableProvider};
-use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
+use async_trait::async_trait;
+use datafusion::arrow::datatypes::DataType;
 
 /// A DataFusion table backed by a Kova in-memory collection.
 ///
@@ -21,183 +23,279 @@ use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
 /// the snapshot is consistent for the duration of the query. For writes,
 /// the caller must re-register the table after the write completes.
 ///
-/// The schema is inferred from the documents' top-level fields. All fields
-/// are treated as nullable `UTF8` (string), which is the simplest mapping
-/// and covers the common case of text/ID fields. Numeric fields are also
-/// mapped to `UTF8` for simplicity; a more precise mapping (Int32, Int64,
-/// Double) can be added later when needed.
-///
-/// This provider is read-only: `can_acquire_sample` returns `true`, but
-/// `new_sample` does not support writes through DataFusion. Write operations
-/// go through the MongoDB wire protocol (`insert`, `update`, `delete`), and
-/// the table must be re-registered after the write.
+/// This provider is read-only: writes go through the MongoDB wire protocol
+/// (`insert`, `update`, `delete`), and the table must be re-registered after
+/// the write.
+#[derive(Debug)]
 pub struct MemoryTable {
     /// Collection name (for logging and debugging).
     pub name: String,
     /// The documents in this collection (read-only snapshot).
     pub documents: Arc<Vec<Document>>,
-    /// The inferred schema for this collection.
-    pub schema: SchemaRef,
+    /// The in-memory DataFusion table built from the documents.
+    pub mem_table: Arc<datafusion::datasource::memory::MemTable>,
 }
 
 impl MemoryTable {
     /// Creates a new `MemoryTable` from a collection of documents.
     ///
-    /// The schema is inferred from the documents' top-level field names.
-    /// All fields are mapped to nullable `UTF8` (string), which is the
-    /// simplest correct mapping for text/ID fields. Numeric fields are also
-    /// mapped to `UTF8` for simplicity; a more precise Arrow type mapping
-    /// (Int32, Int64, Double, Timestamp) can be added when needed.
+    /// The schema is inferred from the documents' top-level field names and
+    /// inferred types. Numeric fields are mapped to Int32 / Int64 / Float64
+    /// when possible, strings to Utf8, booleans to Boolean, and everything
+    /// else to Null/Utf8 as a fallback.
     pub fn new(name: &str, documents: Arc<Vec<Document>>) -> DFResult<Self> {
-        let schema = Self::inferred_schema(&documents)?;
+        let inferred = infer_schema(&documents)?;
+        let batches = build_record_batches(&documents, &inferred)?;
+        let partitions: Vec<Vec<_>> = if batches.is_empty() {
+            vec![]
+        } else {
+            vec![batches]
+        };
 
         Ok(Self {
             name: name.to_string(),
             documents,
-            schema,
+            mem_table: Arc::new(datafusion::datasource::memory::MemTable::try_new(
+                inferred.clone(),
+                partitions,
+            )?),
         })
     }
 
-    /// Infers a schema from the documents' top-level fields.
+    /// Converts a `bson::Bson` value to a DataFusion scalar value.
     ///
-    /// All fields are mapped to nullable `UTF8` (string). If there are no
-    /// documents, an empty schema is returned (the table will have no columns).
-    fn inferred_schema(documents: &[Document]) -> DFResult<SchemaRef> {
-        // Collect all field names across all documents.
-        let mut fields = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-
-        for doc in documents {
-            for key in doc.keys() {
-                if seen.insert(key.clone()) {
-                    fields.push((key.clone(), DataType::Utf8.nullable()));
-                }
-            }
-        }
-
-        // If no fields were found, use a default _id column (MongoDB
-        // collections always have _id, even if the documents here lack it).
-        if fields.is_empty() {
-            fields.push(("_id".to_string(), DataType::Utf8.nullable()));
-        }
-
-        let schema = Schema::new(fields);
-        Ok(Arc::new(schema))
-    }
-
-    /// Converts a `bson::Bson` value to a `datafusion::arrow::datatypes::Value`.
-    ///
-    /// This is used when building the record batches for the table. The mapping
-    /// is intentionally simple: everything becomes a string (Utf8). This covers
-    /// the common case of text/ID fields and avoids the complexity of mapping
-    /// every BSON type to its Arrow equivalent.
-    ///
-    /// A more precise mapping (Int32 → Int32, Int64 → Int64, Double → Float64,
-    /// DateTime → Timestamp, etc.) can be added when the queries need numeric
-    /// operations (WHERE age > 25, ORDER BY count, etc.).
-    pub fn bson_to_arrow(value: &bson::Bson) -> datafusion::arrow::datatypes::Value {
-        use datafusion::arrow::datatypes::Value;
+    /// This mapping is intentionally precise for the common primitive types
+    /// (Int32, Int64, Double, Boolean, String, Null), which is what enables
+    /// queries like `WHERE age > 25` and `ORDER BY count` to work correctly.
+    pub fn bson_to_scalar(value: &bson::Bson) -> datafusion::common::ScalarValue {
         use bson::Bson;
+        use datafusion::common::ScalarValue;
 
         match value {
-            Bson::String(s) => Value::Utf8(Some(s.clone())),
-            Bson::Int32(n) => Value::Int32(*n),
-            Bson::Int64(n) => Value::Int64(*n),
-            Bson::Double(d) => Value::Float64(*d),
-            Bson::Boolean(b) => Value::Boolean(*b),
+            Bson::String(s) => ScalarValue::Utf8(Some(s.clone())),
+            Bson::Int32(n) => ScalarValue::Int32(Some(*n)),
+            Bson::Int64(n) => ScalarValue::Int64(Some(*n)),
+            Bson::Double(d) => ScalarValue::Float64(Some(*d)),
+            Bson::Boolean(b) => ScalarValue::Boolean(Some(*b)),
+            Bson::Null => ScalarValue::Null,
             Bson::DateTime(dt) => {
-                let ts = dt.timestamp_millis();
-                Value::Timestamp(ts, datafusion::arrow::datatypes::TimeUnit::Millisecond)
+                ScalarValue::TimestampMillisecond(Some(dt.timestamp_millis()), None)
             }
-            Bson::Null => Value::Null,
-            Bson::Array(_) => Value::Utf8(Some(format!("{:?}", value))),
-            Bson::ObjectId(oid) => Value::Utf8(Some(oid.to_hex())),
-            Bson::Document(_) => Value::Utf8(Some(format!("{:?}", value))),
-            Bson::Binary(_) => Value::Utf8(Some("[binary]".to_string())),
-            Bson::Regex(_, _) => Value::Utf8(Some(format!("{:?}", value))),
-            Bson::DbPointer(_, _) => Value::Utf8(Some(format!("{:?}", value))),
-            Bson::Symbol(_) => Value::Utf8(Some(format!("{:?}", value))),
-            Bson::Timestamp(_) => Value::Utf8(Some(format!("{:?}", value))),
-            Bson::Decimal128(_) => Value::Utf8(Some(format!("{:?}", value))),
+            Bson::ObjectId(oid) => ScalarValue::Utf8(Some(oid.to_hex())),
+            Bson::Array(_) => ScalarValue::Utf8(Some(format!("{:?}", value))),
+            Bson::Document(_) => ScalarValue::Utf8(Some(format!("{:?}", value))),
+            Bson::Binary(_) => ScalarValue::Utf8(Some("[binary]".to_string())),
+            Bson::DbPointer(p) => ScalarValue::Utf8(Some(format!("{:?}", p))),
+            Bson::Symbol(_) => ScalarValue::Utf8(Some(format!("{:?}", value))),
+            Bson::Timestamp(_) => ScalarValue::Utf8(Some(format!("{:?}", value))),
+            Bson::Decimal128(_) => ScalarValue::Utf8(Some(format!("{:?}", value))),
+            _ => ScalarValue::Utf8(Some(format!("{:?}", value))),
         }
-    }
-
-    /// Acquires a `DataFrame` from this table, which DataFusion can then
-    /// execute queries against.
-    ///
-    /// This is called by DataFusion's query planner when the table is used
-    /// in a query. The returned `DataFrame` wraps a `MemTable` that DataFusion
-    /// can read and execute queries against.
-    pub fn to_dataframe(&self) -> DFResult<datafusion::dataframe::DataFrame> {
-        // Build the record batches from the documents.
-        let batches = Self::build_record_batches(&self.documents, &self.schema)?;
-
-        // Create a MemTable from the batches. This implements TableProvider,
-        // so DataFusion can query it.
-        let mem_table = MemTable::try_new(self.schema.clone(), batches)?;
-
-        // Wrap in a DataFrame for DataFusion to execute queries against.
-        let ctx = datafusion::prelude::SessionContext::new();
-        ctx.register_table(&self.name, Arc::new(mem_table))?;
-
-        Ok(ctx.table(&self.name)?)
     }
 }
 
+#[async_trait]
 impl TableProvider for MemoryTable {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
-    fn can_acquire_sample(&self) -> bool {
-        true
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        self.mem_table.schema()
     }
 
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            documents: self.documents.clone(),
-            schema: self.schema.clone(),
+    fn table_type(&self) -> datafusion::logical_expr::TableType {
+        datafusion::logical_expr::TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn datafusion::catalog::Session,
+        projection: Option<&Vec<usize>>,
+        _filters: &[datafusion::logical_expr::Expr],
+        _limit: Option<usize>,
+    ) -> DFResult<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        use datafusion::physical_plan::memory::MemoryExec;
+
+        // Build the record batches from our own documents so we do not depend
+        // on MemTable internals (which are private in this crate).
+        let partitions = build_partitions(&self.documents, &self.schema())?;
+
+        let exec = MemoryExec::try_new(
+            &partitions,
+            self.schema(),
+            projection.map(|p| p.to_vec()),
+        )?;
+
+        Ok(Arc::new(exec))
+    }
+}
+
+/// Builds partition data for `MemoryExec` from the stored documents.
+fn build_partitions(
+    documents: &[Document],
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+) -> DFResult<Vec<Vec<datafusion::arrow::record_batch::RecordBatch>>> {
+    let batches = build_record_batches(documents, schema)?;
+    Ok(vec![batches])
+}
+
+/// Infers a schema from the documents' top-level fields.
+///
+/// Numeric fields are mapped to Int32 / Int64 / Float64 when possible,
+/// strings to Utf8, booleans to Boolean, and most other types to Null as a
+/// safe fallback. If there are no documents, an empty schema is returned
+/// (the table will have no columns).
+fn infer_schema(documents: &[Document]) -> DFResult<datafusion::arrow::datatypes::SchemaRef> {
+    use std::collections::BTreeSet;
+
+    if documents.is_empty() {
+        let schema =
+            datafusion::arrow::datatypes::Schema::new(Vec::<datafusion::arrow::datatypes::Field>::new());
+        return Ok(Arc::new(schema));
+    }
+
+    // Collect every top-level field name that appears in any document.
+    let mut field_names = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for doc in documents {
+        for key in doc.keys() {
+            if seen.insert(key.clone()) {
+                field_names.push(key.clone());
+            }
         }
     }
+
+    if field_names.is_empty() {
+        let schema =
+            datafusion::arrow::datatypes::Schema::new(Vec::<datafusion::arrow::datatypes::Field>::new());
+        return Ok(Arc::new(schema));
+    }
+
+    let fields: Vec<datafusion::arrow::datatypes::Field> = field_names
+        .iter()
+        .map(|key| {
+            let values: Vec<&bson::Bson> =
+                documents.iter().filter_map(|doc| doc.get(key)).collect();
+            let data_type = infer_data_type(&values);
+            datafusion::arrow::datatypes::Field::new(key, data_type, true)
+        })
+        .collect();
+
+    let schema = datafusion::arrow::datatypes::Schema::new(fields);
+    Ok(Arc::new(schema))
+}
+
+/// Infers an Arrow [`DataType`] for a field given the observed BSON values.
+///
+/// Uses the most precise type that fits all observed values. If a field is
+/// missing in some documents, those are ignored for type inference (the field
+/// is nullable).
+fn infer_data_type(values: &[&bson::Bson]) -> datafusion::arrow::datatypes::DataType {
+    use bson::Bson;
+
+    if values.is_empty() {
+        return DataType::Null;
+    }
+
+    let all_int32 = values.iter().all(|v| matches!(v, Bson::Int32(_)));
+    let all_int64 = values.iter().all(|v| matches!(v, Bson::Int64(_)));
+    let all_double = values.iter().all(|v| matches!(v, Bson::Double(_)));
+    let all_bool = values.iter().all(|v| matches!(v, Bson::Boolean(_)));
+    let all_string = values.iter().all(|v| matches!(v, Bson::String(_)));
+
+    if all_int32 {
+        return DataType::Int32;
+    }
+    if all_int64 {
+        return DataType::Int64;
+    }
+    if all_double {
+        return DataType::Float64;
+    }
+    if all_bool {
+        return DataType::Boolean;
+    }
+    if all_string {
+        return DataType::Utf8;
+    }
+
+    // Fallback for mixed/unknown types.
+    DataType::Null
 }
 
 /// Builds record batches from the documents and schema.
 ///
-/// Each document becomes one record in a single batch (for simplicity; for
-/// large collections, this could be split into multiple batches). Each field
-/// in the schema becomes a column in the batch, populated from the document's
-/// value (or `Null` if the document lacks the field).
+/// Each document becomes one row. For each schema field, the column is built
+/// from the matching BSON values converted to scalar values and assembled
+/// with `ScalarValue::iter_to_array`.
+///
+/// To keep nullable columns compatible with the inferred schema, missing
+/// values are represented using the same scalar variant as the column type
+/// (typically `ScalarValue::Utf8(None)` for text fields and
+/// `ScalarValue::Null` for unknown types).
 fn build_record_batches(
     documents: &[Document],
-    schema: &SchemaRef,
-) -> DFResult<Vec<datafusion::arrow::array::ArrayRef>> {
-    use datafusion::arrow::array::{Array, RecordBatch, StringArray};
-    use datafusion::arrow::datatypes::Value;
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+) -> DFResult<Vec<datafusion::arrow::record_batch::RecordBatch>> {
+    use datafusion::common::ScalarValue;
+    use datafusion::arrow::datatypes::DataType;
 
     let num_rows = documents.len();
     if num_rows == 0 {
         return Ok(vec![]);
     }
 
-    // For each column in the schema, build an array of values.
-    let mut arrays = Vec::new();
-    for field in schema.fields() {
-        let values: Vec<Value> = documents
-            .iter()
-            .map(|doc| {
-                doc.get(field.name().as_str())
-                    .map(|bson| MemoryTable::bson_to_arrow(bson))
-                    .unwrap_or(Value::Null)
+    let columns: Vec<datafusion::arrow::array::ArrayRef> = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let scalars: Vec<ScalarValue> = documents
+                .iter()
+                .map(|doc| {
+                    match doc.get(field.name().as_str()) {
+                        Some(bson) => MemoryTable::bson_to_scalar(bson),
+                        None => null_scalar_for_data_type(&field.data_type()),
+                    }
+                })
+                .collect();
+
+
+            ScalarValue::iter_to_array(scalars.into_iter()).unwrap_or_else(|_| {
+                // If iter_to_array still fails (unexpected mixed types), build
+                // a NullArray as a last resort so the query can still run.
+                Arc::new(
+                    datafusion::arrow::array::NullArray::new(num_rows),
+                ) as datafusion::arrow::array::ArrayRef
             })
-            .collect();
+        })
+        .collect();
 
-        // Convert to a StringArray (since all fields are Utf8).
-        let array = StringArray::from(values);
-        arrays.push(array.heap().unwrap().into());
+    let batch = datafusion::arrow::record_batch::RecordBatch::try_new(
+        schema.clone(),
+        columns,
+    )?;
+
+    Ok(vec![batch])
+}
+
+/// Returns a null scalar value that is compatible with the given column type.
+fn null_scalar_for_data_type(data_type: &DataType) -> ScalarValue {
+    match data_type {
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+            ScalarValue::Utf8(None)
+        }
+        DataType::Boolean => ScalarValue::Boolean(None),
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            ScalarValue::Int64(None)
+        }
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            ScalarValue::UInt64(None)
+        }
+        DataType::Float32 | DataType::Float64 => ScalarValue::Float64(None),
+        _ => ScalarValue::Null,
     }
-
-    Ok(arrays)
 }
 
 #[cfg(test)]
@@ -206,19 +304,18 @@ mod tests {
     use bson::doc;
 
     #[test]
-    fn test_memory_table_creates_schema_from_documents() {
+    fn memory_table_creates_schema_from_documents() {
         let docs = Arc::new(vec![
-            doc! { "name": "Alice", "age": 30 },
-            doc! { "name": "Bob", "age": 25, "city": "NYC" },
+            doc! { "name": "Alice", "age": 30i32 },
+            doc! { "name": "Bob", "age": 25i32, "city": "NYC" },
         ]);
 
-        let table = MemoryTable::new("users", &docs).expect("create table");
+        let table = MemoryTable::new("users", docs.clone()).expect("create table");
         assert_eq!(table.name, "users");
         assert_eq!(table.documents.len(), 2);
 
-        // Schema should have all three fields (name, age, city).
-        let field_names: Vec<&str> = table
-            .schema
+        let schema = table.schema();
+        let field_names: Vec<&str> = schema
             .fields()
             .iter()
             .map(|f| f.name().as_str())
@@ -229,38 +326,64 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_table_empty_collection_has_default_schema() {
+    fn memory_table_empty_collection_has_empty_schema() {
         let docs = Arc::new(Vec::<Document>::new());
-        let table = MemoryTable::new("empty", &docs).expect("create table");
+        let table = MemoryTable::new("empty", docs).expect("create table");
 
-        // Should have at least the _id column.
-        assert!(!table.schema.fields().is_empty());
-        assert_eq!(table.schema.fields()[0].name().as_str(), "_id");
+        assert_eq!(table.name, "empty");
+        assert!(table.schema().fields().is_empty());
     }
 
     #[test]
-    fn test_bson_to_arrow_converts_values() {
-        use datafusion::arrow::datatypes::Value;
+    fn bson_to_scalar_converts_primitives() {
+        use bson::Bson;
+        use datafusion::common::ScalarValue;
 
         assert_eq!(
-            MemoryTable::bson_to_arrow(&bson::Bson::String("hello".into())),
-            Value::Utf8(Some("hello".to_string()))
+            MemoryTable::bson_to_scalar(&Bson::String("hello".into())),
+            ScalarValue::Utf8(Some("hello".to_string()))
         );
         assert_eq!(
-            MemoryTable::bson_to_arrow(&bson::Bson::Int32(42)),
-            Value::Int32(42)
+            MemoryTable::bson_to_scalar(&Bson::Int32(42)),
+            ScalarValue::Int32(Some(42))
         );
         assert_eq!(
-            MemoryTable::bson_to_arrow(&bson::Bson::Double(3.14)),
-            Value::Float64(3.14)
+            MemoryTable::bson_to_scalar(&Bson::Int64(7)),
+            ScalarValue::Int64(Some(7))
         );
         assert_eq!(
-            MemoryTable::bson_to_arrow(&bson::Bson::Boolean(true)),
-            Value::Boolean(true)
+            MemoryTable::bson_to_scalar(&Bson::Double(3.14)),
+            ScalarValue::Float64(Some(3.14))
         );
         assert_eq!(
-            MemoryTable::bson_to_arrow(&bson::Bson::Null),
-            Value::Null
+            MemoryTable::bson_to_scalar(&Bson::Boolean(true)),
+            ScalarValue::Boolean(Some(true))
         );
+        assert_eq!(
+            MemoryTable::bson_to_scalar(&Bson::Null),
+            ScalarValue::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_table_scan_returns_results() {
+        use datafusion::prelude::*;
+        use std::sync::Arc;
+
+        let docs = Arc::new(vec![
+            doc! { "name": "Alice", "age": 30i32 },
+            doc! { "name": "Bob", "age": 25i32 },
+        ]);
+        let table = MemoryTable::new("users", docs).expect("create table");
+
+        let ctx = SessionContext::new();
+        ctx.register_table("users", Arc::new(table)).expect("register table");
+
+        let df = ctx.sql("SELECT * FROM users").await.expect("sql");
+        let results = df.collect().await.expect("collect");
+
+        assert_eq!(results.len(), 1);
+        let batch = &results[0];
+        assert_eq!(batch.num_rows(), 2);
     }
 }
