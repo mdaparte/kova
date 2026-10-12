@@ -3217,4 +3217,209 @@ mod tests {
             "ACCOUNTING"
         );
     }
+
+    /// Page 1 of the discretionary-award report in `scripts/bonus-report.js`.
+    ///
+    /// Staff with no `bonus` row (SMITH) drop out at `$unwind`. Departments
+    /// are ordered by the award total, then skipped and limited like a page.
+    fn bonus_report(skip: i32, write: bool) -> Vec<Document> {
+        let mut pipeline = vec![
+            doc! { "$match": { "deptno": { "$in": [10, 20, 30] } } },
+            doc! { "$lookup": {
+                "from": "db.bonus",
+                "localField": "empno",
+                "foreignField": "empno",
+                "as": "awards",
+            } },
+            doc! { "$unwind": "$awards" },
+            doc! { "$lookup": {
+                "from": "db.dept",
+                "localField": "deptno",
+                "foreignField": "deptno",
+                "as": "dept",
+            } },
+            doc! { "$unwind": "$dept" },
+            doc! { "$addFields": {
+                "award": "$awards.comm",
+                "department": "$dept.dname",
+                "location": "$dept.loc",
+            } },
+            doc! { "$project": {
+                "_id": 0,
+                "ename": 1,
+                "job": 1,
+                "sal": 1,
+                "award": 1,
+                "department": 1,
+                "location": 1,
+            } },
+            doc! { "$sort": { "sal": -1 } },
+            doc! { "$group": {
+                "_id": "$department",
+                "location": { "$first": "$location" },
+                "headcount": { "$count": {} },
+                "payroll": { "$sum": "$sal" },
+                "awardTotal": { "$sum": "$award" },
+                "minSal": { "$min": "$sal" },
+                "maxSal": { "$max": "$sal" },
+                "avgSal": { "$avg": "$sal" },
+                "names": { "$push": "$ename" },
+                "jobs": { "$addToSet": "$job" },
+                "highestPaid": { "$first": "$ename" },
+                "lowestPaid": { "$last": "$ename" },
+            } },
+            doc! { "$sort": { "awardTotal": -1, "_id": 1 } },
+            doc! { "$skip": skip },
+            doc! { "$limit": 2 },
+            doc! { "$replaceRoot": { "newRoot": {
+                "department": "$_id",
+                "location": "$location",
+                "headcount": "$headcount",
+                "payroll": "$payroll",
+                "awards": "$awardTotal",
+                "averageSalary": "$avgSal",
+                "salaryBand": { "low": "$minSal", "high": "$maxSal" },
+                "recipients": "$names",
+                "roles": "$jobs",
+                "highestPaid": "$highestPaid",
+                "lowestPaid": "$lowestPaid",
+            } } },
+        ];
+        if write {
+            pipeline.push(doc! { "$out": "db.bonusReport" });
+        }
+        pipeline
+    }
+
+    #[tokio::test]
+    async fn test_bonus_report_pages_departments_by_award() {
+        let router = PartitionRouter::new(4);
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.dept".into(),
+                documents: vec![
+                    doc! { "deptno": 10, "dname": "ACCOUNTING", "loc": "NEW YORK" },
+                    doc! { "deptno": 20, "dname": "RESEARCH", "loc": "DALLAS" },
+                    doc! { "deptno": 30, "dname": "SALES", "loc": "CHICAGO" },
+                    doc! { "deptno": 40, "dname": "OPERATIONS", "loc": "BOSTON" },
+                ],
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![
+                    doc! { "empno": 7369, "ename": "SMITH", "job": "CLERK", "sal": 800, "deptno": 20 },
+                    doc! { "empno": 7499, "ename": "ALLEN", "job": "SALESMAN", "sal": 1600, "deptno": 30 },
+                    doc! { "empno": 7521, "ename": "WARD", "job": "SALESMAN", "sal": 1250, "deptno": 30 },
+                    doc! { "empno": 7654, "ename": "MARTIN", "job": "SALESMAN", "sal": 1250, "deptno": 30 },
+                    doc! { "empno": 7788, "ename": "SCOTT", "job": "ANALYST", "sal": 3000, "deptno": 20 },
+                    doc! { "empno": 7839, "ename": "KING", "job": "PRESIDENT", "sal": 5000, "deptno": 10 },
+                    doc! { "empno": 7934, "ename": "MILLER", "job": "CLERK", "sal": 1300, "deptno": 10 },
+                ],
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.bonus".into(),
+                documents: vec![
+                    doc! { "empno": 7499, "ename": "ALLEN", "job": "SALESMAN", "sal": 1600, "comm": 200 },
+                    doc! { "empno": 7521, "ename": "WARD", "job": "SALESMAN", "sal": 1250, "comm": 150 },
+                    doc! { "empno": 7654, "ename": "MARTIN", "job": "SALESMAN", "sal": 1250, "comm": 100 },
+                    doc! { "empno": 7788, "ename": "SCOTT", "job": "ANALYST", "sal": 3000, "comm": 250 },
+                    doc! { "empno": 7839, "ename": "KING", "job": "PRESIDENT", "sal": 5000, "comm": 500 },
+                    doc! { "empno": 7934, "ename": "MILLER", "job": "CLERK", "sal": 1300, "comm": 80 },
+                ],
+            },
+        )
+        .await;
+
+        let page = crate::network::execute_aggregate(
+            &router,
+            PartitionCommand::Aggregate {
+                collection: "db.emp".into(),
+                pipeline: bonus_report(0, false),
+                resolved: Vec::new(),
+            },
+        )
+        .await;
+        assert_eq!(page.get_f64("ok").unwrap(), 1.0, "{page:?}");
+        let page = batch_of(&page);
+        assert_eq!(page.len(), 2, "{page:?}");
+        assert_eq!(page[0].get_str("department").unwrap(), "ACCOUNTING");
+        assert_eq!(page[0].get_str("location").unwrap(), "NEW YORK");
+        assert_eq!(as_number(&page[0], "awards"), 580.0);
+        assert_eq!(as_number(&page[0], "payroll"), 6300.0);
+        assert_eq!(as_number(&page[0], "headcount"), 2.0);
+        assert_eq!(as_number(&page[0], "averageSalary"), 3150.0);
+        assert_eq!(page[0].get_str("highestPaid").unwrap(), "KING");
+        assert_eq!(page[0].get_str("lowestPaid").unwrap(), "MILLER");
+        let band = page[0].get_document("salaryBand").unwrap();
+        assert_eq!(as_number(band, "low"), 1300.0);
+        assert_eq!(as_number(band, "high"), 5000.0);
+        assert_eq!(
+            page[0]
+                .get_array("recipients")
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["KING", "MILLER"]
+        );
+        assert_eq!(page[1].get_str("department").unwrap(), "SALES");
+        assert_eq!(as_number(&page[1], "awards"), 450.0);
+        assert_eq!(page[1].get_str("highestPaid").unwrap(), "ALLEN");
+
+        let next_page = crate::network::execute_aggregate(
+            &router,
+            PartitionCommand::Aggregate {
+                collection: "db.emp".into(),
+                pipeline: bonus_report(2, false),
+                resolved: Vec::new(),
+            },
+        )
+        .await;
+        let next_page = batch_of(&next_page);
+        assert_eq!(next_page.len(), 1, "{next_page:?}");
+        assert_eq!(next_page[0].get_str("department").unwrap(), "RESEARCH");
+        assert_eq!(as_number(&next_page[0], "awards"), 250.0);
+        assert_eq!(next_page[0].get_str("highestPaid").unwrap(), "SCOTT");
+
+        let written = crate::network::execute_aggregate(
+            &router,
+            PartitionCommand::Aggregate {
+                collection: "db.emp".into(),
+                pipeline: bonus_report(0, true),
+                resolved: Vec::new(),
+            },
+        )
+        .await;
+        assert_eq!(written.get_f64("ok").unwrap(), 1.0, "{written:?}");
+        assert!(batch_of(&written).is_empty());
+        match dispatch(&router, PartitionCommand::find("db.bonusReport", doc! {})).await {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 2);
+                assert_eq!(documents[0].get_str("department").unwrap(), "ACCOUNTING");
+                assert_eq!(documents[1].get_str("department").unwrap(), "SALES");
+            }
+            other => panic!("expected the saved page, got {other:?}"),
+        }
+
+        let counted = crate::network::execute_aggregate(
+            &router,
+            PartitionCommand::Aggregate {
+                collection: "db.bonusReport".into(),
+                pipeline: vec![doc! { "$count": "departmentsOnPage" }],
+                resolved: Vec::new(),
+            },
+        )
+        .await;
+        let counted = batch_of(&counted);
+        assert_eq!(as_number(&counted[0], "departmentsOnPage"), 2.0);
+    }
 }

@@ -4,6 +4,15 @@
 // `select * from emp where sal > 2000` must hit this data.
 // Integers are NumberInt so SQL returns 7369, not 7369.0 (plain JS numbers
 // are doubles). hiredate is a BSON date. Null mgr/comm fields are omitted.
+//
+// How the four collections relate:
+//   emp.deptno  = dept.deptno          (each employee belongs to one department)
+//   emp.mgr     = emp.empno            (manager is another employee; KING has none)
+//   salgrade    has no foreign key. An employee is in a grade when
+//                 losal <= emp.sal <= hisal. It is a range, not an equality join.
+//   bonus       ships empty in Oracle. The rows below are discretionary awards
+//                 keyed by empno so a $lookup can attach them. `comm` here is
+//                 the award amount, not the commission stored on emp.
 
 const database = db.getSiblingDB("db");
 const n = (value) => NumberInt(value);
@@ -43,8 +52,16 @@ const salgrade = database.salgrade.insertMany([
     { grade: n(5), losal: n(3001), hisal: n(9999) },
 ]);
 
-// Oracle ships BONUS empty. Create it so the collection is there to fill in.
-database.createCollection("bonus");
+// Discretionary awards. empno joins back to emp; the other columns match
+// Oracle's BONUS table (ename, job, sal, comm).
+const bonus = database.bonus.insertMany([
+    { empno: n(7499), ename: "ALLEN", job: "SALESMAN", sal: n(1600), comm: n(200) },
+    { empno: n(7521), ename: "WARD", job: "SALESMAN", sal: n(1250), comm: n(150) },
+    { empno: n(7654), ename: "MARTIN", job: "SALESMAN", sal: n(1250), comm: n(100) },
+    { empno: n(7788), ename: "SCOTT", job: "ANALYST", sal: n(3000), comm: n(250) },
+    { empno: n(7839), ename: "KING", job: "PRESIDENT", sal: n(5000), comm: n(500) },
+    { empno: n(7934), ename: "MILLER", job: "CLERK", sal: n(1300), comm: n(80) },
+]);
 
 function inserted(result) {
     if (typeof result.insertedCount === "number") {
@@ -57,4 +74,4 @@ print("seeded database db");
 print("  dept     " + inserted(dept));
 print("  emp      " + inserted(emp));
 print("  salgrade " + inserted(salgrade));
-print("  bonus    0");
+print("  bonus    " + inserted(bonus));
