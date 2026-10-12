@@ -45,7 +45,7 @@ Rust concurrency, memory management, and storage engine design.
 - Full MongoDB command-level compatibility (only the wire protocol minimum
   required to speak with official drivers).
 - SQL query execution against disk-backed tables is out of scope until
-  Phase 5 (DataFusion integrates with storage in Phase 5+).
+  Phase 5. Phase 4 executes SQL against in-memory collections.
 
 ## 4. High-Level Architecture
 

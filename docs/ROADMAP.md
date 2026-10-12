@@ -18,8 +18,8 @@ replication, and multi-model indexing.
 | 2 | Partition Isolation | ✅ Complete |
 | 3 | Full-Text Search Indexing | ✅ Complete |
 | 3.5 | Search Flexibility & Configuration | ✅ Complete |
-| 4 | Analytical Query Optimization (DataFusion SQL) | 🔵 Current |
-| 5 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | ⚪ Planned |
+| 4 | Analytical Query Optimization (DataFusion SQL) | ✅ Complete |
+| 5 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | 🔵 Current |
 | 6 | Transactional Storage (MVCC + ACID + Isolation) | ⚪ Planned |
 | 7 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ⚪ Planned |
 | 8 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ⚪ Planned |
@@ -36,8 +36,8 @@ replication, and multi-model indexing.
   Node driver does not).
 - `messageLength` validated (16 B … 48 MB) before allocation.
 - One `tokio::spawn` task per client; abrupt disconnects logged with peer address.
-- SQL parsing via DataFusion: `db.runCommand({ sql: "..." })` accepted, returns
-  the logical/physical plan or an error. (Phase 4 entry point.)
+- SQL via DataFusion: `db.runCommand({ sql: "..." })` executes against in-memory
+  collections and returns a cursor. (Phase 4.)
 
 ## Phase 2 — Partition Isolation ✅
 
@@ -77,28 +77,29 @@ replication, and multi-model indexing.
 - Non-Mongo warnings: Kova extensions (`$boost`, `$decay`) and unsupported
   operators (`$analyzer`, `$language`) log a WARN when enabled.
 
-## Phase 4 — Analytical Query Optimization (DataFusion SQL) 🔵 Current
+## Phase 4 — Analytical Query Optimization (DataFusion SQL) ✅
 
 - Integrate `Apache DataFusion` (v45).
-- SQL parsing and AST generation via `db.runCommand({ sql: "..." })`.
-- Logical + physical plan extraction and description for debugging.
-- **Next step (this phase):** integrate DataFusion with the storage layer so
-  SQL queries actually execute against data. Start with a **MemoryTable**
-  provider that exposes in-memory collections as DataFusion tables; later
-  (Phase 5+) swap in the disk-backed provider without changing the query path.
+- SQL via `db.runCommand({ sql: "..." })` executes against in-memory collections.
+- `MemoryTable` exposes one collection snapshot as a DataFusion table. A later
+  disk-backed provider (Phase 5+) can replace it without changing the command.
+- `SELECT` without `FROM`, `WHERE`, `COUNT(*)`, and `GROUP BY` return a cursor.
+- `parse_sql()` returns the logical plan for debugging.
+- One `FROM` table per query. Joins and the Mongo aggregation pipeline
+  (`$match`, `$group`, …) are not part of this phase.
 
 ### Phase 4 — Sub-tasks
 
 - [x] Add `datafusion = "45"` dependency.
-- [x] Create `src/query_engine/mod.rs` with `parse_sql()` and `plan_description()`.
+- [x] Create `src/query_engine/mod.rs` with `parse_sql()` and execution.
 - [x] Wire SQL command into `network/mod.rs` (`execute_command` branch on `"sql"` key).
-- [x] Validate `SELECT 1 AS n` returns a plan (EmptyExec).
-- [ ] Integrate DataFusion with in-memory storage (MemoryTable provider).
-- [ ] Execute real SQL queries against stored documents and return result sets.
-- [ ] Validate `SELECT ... FROM ... WHERE ...`, `COUNT(*)`, `GROUP BY`.
-- [ ] Add unit tests for query_engine parsing + execution.
+- [x] Validate `SELECT 1 AS n` returns a row when the query has no `FROM`.
+- [x] Integrate DataFusion with in-memory storage (MemoryTable provider).
+- [x] Execute real SQL queries against stored documents and return result sets.
+- [x] Validate `SELECT ... FROM ... WHERE ...`, `COUNT(*)`, `GROUP BY`.
+- [x] Add unit tests for query_engine parsing + execution.
 
-## Phase 5 — Disk Storage Engine (WAL + Buffer Pool + Page Store) ⚪ Planned
+## Phase 5 — Disk Storage Engine (WAL + Buffer Pool + Page Store) 🔵 Current
 
 _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 
@@ -303,8 +304,6 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
 | No transactions | 6 | MVCC + transaction manager needed. |
 | Indexes are metadata only | 7 | B-Tree + Hash + auto-maintain needed. |
 | No replication | 8 | Oplog + replica sets needed. |
-| SQL only returns plan, not results | 4 (current) | Integrate DataFusion with storage first. |
-| DataFusion has no tables registered | 4 | MemoryTable provider for in-memory collections. |
 
 ## Architecture Diagram (updated)
 
@@ -362,9 +361,7 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Updated to reflect the new direction: disk storage engine (WAL + buffer
-pool + page store, inspired by GraniteDB), hybrid memory+disk architecture,
-transactional storage (MVCC + ACID), indexing subsystem (B-Tree, Hash, Unique,
-Sparse, Full-Text/Tantivy), and replication (oplog + replica sets). Phase 4
-(DataFusion SQL) is current and will integrate with the storage layer as it
-evolves from in-memory to hybrid.*
+*Phase 4 (DataFusion SQL against in-memory collections) is complete. The
+current phase is the disk storage engine (WAL + buffer pool + page store,
+inspired by GraniteDB), then transactional storage (MVCC + ACID), the
+indexing subsystem, and replication.*

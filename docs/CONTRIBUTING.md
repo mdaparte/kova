@@ -161,10 +161,10 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 3 — Search indexing:** `tantivy` integration with hot indexing. ✅ Complete.
 - **Phase 3.5 — Search flexibility:** Per-field indexes, `$text.$boost`, wildcards,
   `$text.$decay`, analyzer config, `kova.toml`. ✅ Complete.
-- **Phase 4 — Analytical Query Optimization:** DataFusion SQL parsing,
-  `db.runCommand({ sql: "..." })`, plan extraction. 🔵 Current.
+- **Phase 4 — Analytical Query Optimization:** DataFusion SQL execution
+  against in-memory collections, including `COUNT(*)` and `GROUP BY`. ✅ Complete.
 - **Phase 5 — Disk Storage Engine:** WAL, buffer pool, page-based storage,
-  hybrid memory+disk architecture. ⚪ Planned.
+  hybrid memory+disk architecture. 🔵 Current.
 - **Phase 6 — Transactional Storage:** MVCC, ACID transactions, multiple
   isolation levels. ⚪ Planned.
 - **Phase 7 — Indexing Subsystem:** B-Tree, Hash, Unique, Sparse indexes,

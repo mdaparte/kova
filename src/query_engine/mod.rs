@@ -17,7 +17,6 @@
 use std::sync::Arc;
 
 use bson::Document;
-use datafusion::arrow::array::Array;
 use datafusion::error::Result as DFResult;
 use datafusion::prelude::*;
 
@@ -40,18 +39,27 @@ pub fn register_collection(
     Ok(())
 }
 
-/// Executes a SQL query against a fresh session pre-seeded with documents.
+/// Executes a SQL query against one collection.
 pub async fn execute_sql(
     documents: Arc<Vec<Document>>,
     table_name: &str,
     sql: &str,
 ) -> DFResult<bson::Document> {
-    let session = new_session();
-    register_collection(&session, table_name, documents.clone())?;
+    execute_sql_query(sql, &[(table_name, documents)]).await
+}
 
+/// Executes SQL against the given tables.
+///
+/// An empty table list is valid: `SELECT 1 AS n` has no `FROM` clause and
+/// must still return a row. Each entry is registered under the collection
+/// name the SQL text uses.
+pub async fn execute_sql_query(
+    sql: &str,
+    tables: &[(&str, Arc<Vec<Document>>)],
+) -> DFResult<bson::Document> {
+    let session = session_with(tables)?;
     let df = session.sql(sql).await?;
     let results = df.collect().await?;
-
     let rows = convert_batches_to_bson(&results)?;
 
     Ok(bson::doc! {
@@ -64,129 +72,39 @@ pub async fn execute_sql(
     })
 }
 
+/// Parses SQL and returns the logical plan, for debugging.
+///
+/// Queries that name a table must pass that table in `tables`; a bare
+/// `SELECT 1` passes an empty slice.
+pub async fn parse_sql(sql: &str, tables: &[(&str, Arc<Vec<Document>>)]) -> DFResult<String> {
+    let session = session_with(tables)?;
+    let df = session.sql(sql).await?;
+    let plan = df.logical_plan().display_indent().to_string();
+    Ok(plan)
+}
+
+fn session_with(tables: &[(&str, Arc<Vec<Document>>)]) -> DFResult<Session> {
+    let session = new_session();
+    for (name, documents) in tables {
+        register_collection(&session, name, Arc::clone(documents))?;
+    }
+    Ok(session)
+}
+
 fn convert_batches_to_bson(
     batches: &[datafusion::arrow::record_batch::RecordBatch],
 ) -> DFResult<Vec<bson::Document>> {
-    use datafusion::arrow::array::{
-        BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
-    };
-
     let mut docs = Vec::with_capacity(batches.iter().map(|b| b.num_rows()).sum());
     for batch in batches {
-        let num_rows = batch.num_rows();
-        let schema = batch.schema();
-        let fields = schema.fields();
-        for row_idx in 0..num_rows {
+        let fields = batch.schema().fields().clone();
+        for row_idx in 0..batch.num_rows() {
             let mut row_doc = bson::doc! {};
             for (col_idx, field) in fields.iter().enumerate() {
-                let column = batch.column(col_idx);
-                let name = field.name().clone();
-
-                let bson_value = if column.data_type()
-                    == &datafusion::arrow::datatypes::DataType::Boolean
-                {
-                    let arr = column
-                        .as_any()
-                        .downcast_ref::<BooleanArray>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(format!(
-                                "expected BooleanArray for column {}",
-                                name
-                            ))
-                        })?;
-                    if arr.is_null(row_idx) {
-                        bson::Bson::Null
-                    } else {
-                        bson::Bson::Boolean(arr.value(row_idx))
-                    }
-                } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Int32 {
-                    let arr = column
-                        .as_any()
-                        .downcast_ref::<Int32Array>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(format!(
-                                "expected Int32Array for column {}",
-                                name
-                            ))
-                        })?;
-                    if arr.is_null(row_idx) {
-                        bson::Bson::Null
-                    } else {
-                        bson::Bson::Int32(arr.value(row_idx))
-                    }
-                } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Int64 {
-                    let arr = column
-                        .as_any()
-                        .downcast_ref::<Int64Array>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(format!(
-                                "expected Int64Array for column {}",
-                                name
-                            ))
-                        })?;
-                    if arr.is_null(row_idx) {
-                        bson::Bson::Null
-                    } else {
-                        bson::Bson::Int64(arr.value(row_idx))
-                    }
-                } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Float64 {
-                    let arr = column
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(format!(
-                                "expected Float64Array for column {}",
-                                name
-                            ))
-                        })?;
-                    if arr.is_null(row_idx) {
-                        bson::Bson::Null
-                    } else {
-                        bson::Bson::Double(arr.value(row_idx))
-                    }
-                } else if matches!(
-                    column.data_type(),
-                    datafusion::arrow::datatypes::DataType::Timestamp(
-                        datafusion::arrow::datatypes::TimeUnit::Millisecond,
-                        _
-                    )
-                ) {
-                    let arr = column
-                        .as_any()
-                        .downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(format!(
-                                "expected TimestampMillisecondArray for column {}",
-                                name
-                            ))
-                        })?;
-                    if arr.is_null(row_idx) {
-                        bson::Bson::Null
-                    } else {
-                        bson::Bson::DateTime(bson::DateTime::from_millis(arr.value(row_idx)))
-                    }
-                } else if column.data_type() == &datafusion::arrow::datatypes::DataType::Utf8
-                    || column.data_type() == &datafusion::arrow::datatypes::DataType::LargeUtf8
-                {
-                    let arr = column
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(format!(
-                                "expected StringArray for column {}",
-                                name
-                            ))
-                        })?;
-                    if arr.is_null(row_idx) {
-                        bson::Bson::Null
-                    } else {
-                        bson::Bson::String(arr.value(row_idx).to_string())
-                    }
-                } else {
-                    bson::Bson::String(format!("{:?}", column))
-                };
-
-                row_doc.insert(name, bson_value);
+                let scalar = datafusion::common::ScalarValue::try_from_array(
+                    batch.column(col_idx).as_ref(),
+                    row_idx,
+                )?;
+                row_doc.insert(field.name().clone(), scalar_to_bson(&scalar)?);
             }
             docs.push(row_doc);
         }
@@ -194,9 +112,43 @@ fn convert_batches_to_bson(
     Ok(docs)
 }
 
-/// Converts a DataFusion execution plan to a human-readable description.
-pub fn plan_description(plan: &Arc<dyn std::any::Any>) -> String {
-    format!("{:?}", plan)
+/// Maps one DataFusion scalar onto BSON.
+///
+/// Aggregates (`COUNT(*)`, `GROUP BY`) produce integer widths the row
+/// scanner does not see on plain `SELECT *`, so the match covers those
+/// widths instead of stringifying the column.
+fn scalar_to_bson(value: &datafusion::common::ScalarValue) -> DFResult<bson::Bson> {
+    use bson::Bson;
+    use datafusion::common::ScalarValue;
+
+    let bson = match value {
+        ScalarValue::Null => Bson::Null,
+        ScalarValue::Boolean(v) => v.map(Bson::Boolean).unwrap_or(Bson::Null),
+        ScalarValue::Int8(v) => v.map(|n| Bson::Int32(i32::from(n))).unwrap_or(Bson::Null),
+        ScalarValue::Int16(v) => v.map(|n| Bson::Int32(i32::from(n))).unwrap_or(Bson::Null),
+        ScalarValue::Int32(v) => v.map(Bson::Int32).unwrap_or(Bson::Null),
+        ScalarValue::Int64(v) => v.map(Bson::Int64).unwrap_or(Bson::Null),
+        ScalarValue::UInt8(v) => v.map(|n| Bson::Int32(i32::from(n))).unwrap_or(Bson::Null),
+        ScalarValue::UInt16(v) => v.map(|n| Bson::Int32(i32::from(n))).unwrap_or(Bson::Null),
+        ScalarValue::UInt32(v) => v.map(|n| Bson::Int64(i64::from(n))).unwrap_or(Bson::Null),
+        ScalarValue::UInt64(v) => v
+            .map(|n| Bson::Int64(i64::try_from(n).unwrap_or(i64::MAX)))
+            .unwrap_or(Bson::Null),
+        ScalarValue::Float32(v) => v.map(|n| Bson::Double(f64::from(n))).unwrap_or(Bson::Null),
+        ScalarValue::Float64(v) => v.map(Bson::Double).unwrap_or(Bson::Null),
+        ScalarValue::Utf8(v) | ScalarValue::LargeUtf8(v) | ScalarValue::Utf8View(v) => {
+            v.clone().map(Bson::String).unwrap_or(Bson::Null)
+        }
+        ScalarValue::TimestampMillisecond(v, _) => v
+            .map(|millis| Bson::DateTime(bson::DateTime::from_millis(millis)))
+            .unwrap_or(Bson::Null),
+        other => {
+            return Err(datafusion::error::DataFusionError::Internal(format!(
+                "SQL result column type is not representable as BSON: {other:?}"
+            )));
+        }
+    };
+    Ok(bson)
 }
 
 /// Module for the MemoryTable provider.
@@ -347,5 +299,96 @@ mod tests {
             }
             assert!(age > 25, "row {} has age {}", name, age);
         }
+    }
+
+    fn sample_users() -> Arc<Vec<Document>> {
+        Arc::new(vec![
+            doc! { "name": "Alice", "age": 30i32, "job": "CLERK" },
+            doc! { "name": "Bob", "age": 25i32, "job": "CLERK" },
+            doc! { "name": "Charlie", "age": 35i32, "job": "MANAGER" },
+        ])
+    }
+
+    fn first_batch(result: &Document) -> Vec<Document> {
+        result
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("firstBatch")
+            .iter()
+            .map(|value| value.as_document().expect("row").clone())
+            .collect()
+    }
+
+    fn number(doc: &Document, key: &str) -> i64 {
+        doc.get_i64(key)
+            .or_else(|_| doc.get_i32(key).map(|n| i64::from(n)))
+            .unwrap_or_else(|_| panic!("{key} is not an integer in {doc:?}"))
+    }
+
+    #[tokio::test]
+    async fn test_select_literal_without_from() {
+        let result = execute_sql_query("SELECT 1 AS n", &[])
+            .await
+            .expect("literal select");
+        assert_eq!(result.get_f64("ok").unwrap(), 1.0);
+        let batch = first_batch(&result);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(number(&batch[0], "n"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_count_star_with_filter() {
+        let result = execute_sql(
+            sample_users(),
+            "users",
+            "SELECT COUNT(*) AS n FROM users WHERE age > 25",
+        )
+        .await
+        .expect("count");
+        let batch = first_batch(&result);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(number(&batch[0], "n"), 2, "Alice and Charlie: {batch:?}");
+    }
+
+    #[tokio::test]
+    async fn test_group_by_counts_each_job() {
+        let result = execute_sql(
+            sample_users(),
+            "users",
+            "SELECT job, COUNT(*) AS n FROM users GROUP BY job",
+        )
+        .await
+        .expect("group by");
+        let batch = first_batch(&result);
+        let counts: std::collections::HashMap<&str, i64> = batch
+            .iter()
+            .map(|row| (row.get_str("job").expect("job"), number(row, "n")))
+            .collect();
+        assert_eq!(counts.get("CLERK"), Some(&2));
+        assert_eq!(counts.get("MANAGER"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn test_parse_sql_describes_the_plan() {
+        let plan = parse_sql("SELECT 1 AS n", &[])
+            .await
+            .expect("parse literal");
+        assert!(
+            plan.to_lowercase().contains("projection"),
+            "plan should name the projection: {plan}"
+        );
+
+        let plan = parse_sql(
+            "SELECT COUNT(*) AS n FROM users WHERE age > 25",
+            &[("users", sample_users())],
+        )
+        .await
+        .expect("parse aggregate");
+        let lower = plan.to_lowercase();
+        assert!(
+            lower.contains("aggregate") || lower.contains("count"),
+            "plan should describe the count: {plan}"
+        );
     }
 }

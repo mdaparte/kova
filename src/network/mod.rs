@@ -335,36 +335,34 @@ async fn execute_command(
     // in-memory documents for that collection, and execute the query with
     // DataFusion, returning the result set as a BSON document (or an error).
     if let Ok(sql_text) = command.get_str("sql") {
-        if let Some(table_name) = sql_table_name(sql_text) {
-            let db = command.get_str("$db").unwrap_or("");
-            let collection = if db.is_empty() {
-                table_name.clone()
-            } else {
-                format!("{}.{}", db, table_name)
-            };
-
-            if let Ok(documents) = load_collection_documents(router, &collection).await {
-                match query_engine::execute_sql(documents, &table_name, sql_text).await {
-                    Ok(result) => return result,
-                    Err(err) => {
-                        return bson::doc! {
-                            "ok": 0.0,
-                            "errmsg": err.to_string(),
-                        };
+        // A query with no FROM (`SELECT 1 AS n`) has no collection to load.
+        // A query that names one collection loads that snapshot and registers
+        // it under the spelling used in the SQL text.
+        let prepared = match sql_table_name(sql_text) {
+            Some(table_name) => {
+                let db = command.get_str("$db").unwrap_or("");
+                let collection = if db.is_empty() {
+                    table_name.clone()
+                } else {
+                    format!("{}.{}", db, table_name)
+                };
+                match load_collection_documents(router, &collection).await {
+                    Ok(documents) => Some((table_name, documents)),
+                    Err(message) => {
+                        return bson::doc! { "ok": 0.0, "errmsg": message };
                     }
                 }
-            } else {
-                return bson::doc! {
-                    "ok": 0.0,
-                    "errmsg": format!("collection '{}' not found or empty", collection),
-                };
             }
-        } else {
-            return bson::doc! {
-                "ok": 0.0,
-                "errmsg": "could not determine collection name from SQL",
-            };
-        }
+            None => None,
+        };
+        let tables: Vec<(&str, std::sync::Arc<Vec<bson::Document>>)> = match &prepared {
+            Some((name, documents)) => vec![(name.as_str(), std::sync::Arc::clone(documents))],
+            None => Vec::new(),
+        };
+        return match query_engine::execute_sql_query(sql_text, &tables).await {
+            Ok(result) => result,
+            Err(err) => bson::doc! { "ok": 0.0, "errmsg": err.to_string() },
+        };
     }
 
     match protocol::command_from_document(command) {
@@ -778,6 +776,89 @@ mod tests {
         assert_eq!(batch.len(), 1, "only Ada is older than 25: {:?}", batch);
         let row = batch[0].as_document().expect("row");
         assert_eq!(row.get_str("name").expect("name"), "Ada");
+    }
+
+    #[tokio::test]
+    async fn test_sql_literal_count_and_group_by() {
+        let router = PartitionRouter::new(1);
+        let local = "127.0.0.1:1".parse().expect("addr");
+
+        let inserted = execute_command(
+            &bson::doc! {
+                "insert": "emp",
+                "$db": "db",
+                "documents": [
+                    { "ename": "SMITH", "job": "CLERK", "sal": 800i32 },
+                    { "ename": "ADAMS", "job": "CLERK", "sal": 1100i32 },
+                    { "ename": "KING", "job": "PRESIDENT", "sal": 5000i32 },
+                ],
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(inserted.get_f64("ok").expect("ok"), 1.0);
+
+        let literal = execute_command(
+            &bson::doc! { "sql": "SELECT 1 AS n", "$db": "db" },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(literal.get_f64("ok").expect("ok"), 1.0, "{literal:?}");
+        let batch = literal
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("firstBatch");
+        assert_eq!(batch.len(), 1);
+
+        let count = execute_command(
+            &bson::doc! {
+                "sql": "select count(*) as n from emp where sal > 1000",
+                "$db": "db",
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(count.get_f64("ok").expect("ok"), 1.0, "{count:?}");
+        let row = count
+            .get_document("cursor")
+            .unwrap()
+            .get_array("firstBatch")
+            .unwrap()[0]
+            .as_document()
+            .unwrap()
+            .clone();
+        let n = row
+            .get_i64("n")
+            .or_else(|_| row.get_i32("n").map(|v| i64::from(v)));
+        assert_eq!(n, Ok(2), "ADAMS and KING: {row:?}");
+
+        let grouped = execute_command(
+            &bson::doc! {
+                "sql": "select job, count(*) as n from emp group by job",
+                "$db": "db",
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(grouped.get_f64("ok").expect("ok"), 1.0, "{grouped:?}");
+        let rows = grouped
+            .get_document("cursor")
+            .unwrap()
+            .get_array("firstBatch")
+            .unwrap();
+        let clerks = rows
+            .iter()
+            .find(|row| row.as_document().and_then(|doc| doc.get_str("job").ok()) == Some("CLERK"));
+        let clerks = clerks.expect("CLERK group").as_document().unwrap();
+        let n = clerks
+            .get_i64("n")
+            .or_else(|_| clerks.get_i32("n").map(|v| i64::from(v)));
+        assert_eq!(n, Ok(2), "{clerks:?}");
     }
 
     #[test]
