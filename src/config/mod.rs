@@ -3,7 +3,8 @@
 //! Configuration is resolved in strict precedence order:
 //!
 //! 1. **Environment variables** (highest) — `KOVA_PORT`, `KOVA_LOG_LEVEL`,
-//!    `KOVA_WARN_NON_MONGO_QUERIES`.
+//!    `KOVA_WARN_NON_MONGO_QUERIES`, `KOVA_DATA_DIR`, `KOVA_PAGE_SIZE`,
+//!    `KOVA_BUFFER_POOL_PAGES`, `KOVA_WAL_FSYNC`.
 //! 2. **Configuration file** — `kova.toml` in the working directory, or
 //!    the path given by `KOVA_CONFIG`.
 //! 3. **Built-in defaults** (lowest).
@@ -34,6 +35,10 @@ const CONFIG_PATH_ENV: &str = "KOVA_CONFIG";
 const PORT_ENV: &str = "KOVA_PORT";
 const LOG_LEVEL_ENV: &str = "KOVA_LOG_LEVEL";
 const WARN_ENV: &str = "KOVA_WARN_NON_MONGO_QUERIES";
+const DATA_DIR_ENV: &str = "KOVA_DATA_DIR";
+const PAGE_SIZE_ENV: &str = "KOVA_PAGE_SIZE";
+const POOL_PAGES_ENV: &str = "KOVA_BUFFER_POOL_PAGES";
+const WAL_FSYNC_ENV: &str = "KOVA_WAL_FSYNC";
 
 /// Default TCP port (the standard MongoDB port).
 const DEFAULT_PORT: u16 = 27018;
@@ -70,6 +75,8 @@ pub struct Config {
     pub warn_on_non_mongo_queries: bool,
     /// Full-text search behavior (Phase 3.5).
     pub search: SearchConfig,
+    /// Disk layout, WAL, and buffer pool (Phase 5).
+    pub storage: StorageConfig,
 }
 
 /// Full-text search configuration.
@@ -94,6 +101,104 @@ impl Default for Config {
             log_level: Level::Info.as_str().to_ascii_lowercase(),
             warn_on_non_mongo_queries: true,
             search: SearchConfig::default(),
+            storage: StorageConfig::default(),
+        }
+    }
+}
+
+fn default_data_dir() -> String {
+    "data".to_string()
+}
+
+fn default_page_size() -> u32 {
+    16 * 1024
+}
+
+fn default_pool_pages() -> usize {
+    4096
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_segment_bytes() -> u64 {
+    16 * 1024 * 1024
+}
+
+fn default_checkpoint_every() -> u64 {
+    128
+}
+
+/// Where the engine writes the WAL, checkpoints, and page files.
+///
+/// One subdirectory per partition lives under [`Self::data_dir`].
+/// Queries still run against the in-memory working set; these files are
+/// what make that working set survive a restart.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct StorageConfig {
+    /// Root directory for every partition (`data` by default).
+    #[serde(default = "default_data_dir")]
+    pub data_dir: String,
+    /// On-disk page size in bytes. Default is 16 KiB.
+    #[serde(default = "default_page_size")]
+    pub page_size: u32,
+    /// How many pages the buffer pool keeps resident.
+    #[serde(default = "default_pool_pages")]
+    pub buffer_pool_pages: usize,
+    /// `fsync` each WAL append before the mutation is applied.
+    #[serde(default = "default_true")]
+    pub wal_fsync: bool,
+    /// Roll the WAL once a segment would pass this many bytes.
+    #[serde(default = "default_segment_bytes")]
+    pub wal_segment_bytes: u64,
+    /// Checkpoint after this many appended records. `0` disables the
+    /// periodic checkpoint; shutdown still snapshots unless
+    /// [`Self::checkpoint_on_shutdown`] is false.
+    #[serde(default = "default_checkpoint_every")]
+    pub checkpoint_every: u64,
+    /// Write a checkpoint when the partition worker stops.
+    #[serde(default = "default_true")]
+    pub checkpoint_on_shutdown: bool,
+    /// Delete `data_dir` when the router is dropped. Tests set this so
+    /// they do not share the server's data directory.
+    #[serde(skip)]
+    pub ephemeral: bool,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            page_size: default_page_size(),
+            buffer_pool_pages: default_pool_pages(),
+            wal_fsync: true,
+            wal_segment_bytes: default_segment_bytes(),
+            checkpoint_every: default_checkpoint_every(),
+            checkpoint_on_shutdown: true,
+            ephemeral: false,
+        }
+    }
+}
+
+impl StorageConfig {
+    /// A private directory under the system temp dir, removed with the router.
+    #[cfg(test)]
+    pub fn ephemeral() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kova-run-{}-{}", std::process::id(), n));
+        let _ = std::fs::create_dir_all(&dir);
+        Self {
+            data_dir: dir.to_string_lossy().into_owned(),
+            page_size: 4096,
+            buffer_pool_pages: 8,
+            wal_fsync: false,
+            wal_segment_bytes: 64 * 1024,
+            checkpoint_every: 10_000,
+            checkpoint_on_shutdown: true,
+            ephemeral: true,
         }
     }
 }
@@ -150,6 +255,25 @@ impl Config {
         if let Some(flag) = env_override(WARN_ENV, parse_bool) {
             self.warn_on_non_mongo_queries = flag;
         }
+        if let Some(dir) = env_override(DATA_DIR_ENV, |raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }) {
+            self.storage.data_dir = dir;
+        }
+        if let Some(page_size) = env_override(PAGE_SIZE_ENV, |raw| raw.trim().parse().ok()) {
+            self.storage.page_size = page_size;
+        }
+        if let Some(pages) = env_override(POOL_PAGES_ENV, |raw| raw.trim().parse().ok()) {
+            self.storage.buffer_pool_pages = pages;
+        }
+        if let Some(flag) = env_override(WAL_FSYNC_ENV, parse_bool) {
+            self.storage.wal_fsync = flag;
+        }
     }
 
     /// Returns the validated minimum log level.
@@ -172,6 +296,37 @@ impl Config {
             return Err(format!(
                 "{}: search.analyzer {:?} must be \"default\" or \"en_stem\"",
                 CONFIG_FILE, self.search.analyzer
+            ));
+        }
+        self.storage.validate()?;
+        Ok(())
+    }
+}
+
+impl StorageConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.data_dir.trim().is_empty() {
+            return Err(format!(
+                "{}: storage.data_dir must not be empty",
+                CONFIG_FILE
+            ));
+        }
+        if self.page_size < 64 || self.page_size > 16 * 1024 * 1024 {
+            return Err(format!(
+                "{}: storage.page_size {} must be between 64 and 16777216",
+                CONFIG_FILE, self.page_size
+            ));
+        }
+        if self.buffer_pool_pages == 0 {
+            return Err(format!(
+                "{}: storage.buffer_pool_pages must be at least 1",
+                CONFIG_FILE
+            ));
+        }
+        if self.wal_segment_bytes < 64 {
+            return Err(format!(
+                "{}: storage.wal_segment_bytes must be at least 64",
+                CONFIG_FILE
             ));
         }
         Ok(())
@@ -215,6 +370,9 @@ mod tests {
         assert_eq!(config.log_level(), Level::Info);
         assert!(config.warn_on_non_mongo_queries);
         assert_eq!(config.search, SearchConfig::default());
+        assert_eq!(config.storage, StorageConfig::default());
+        assert!(config.storage.wal_fsync);
+        assert!(config.storage.checkpoint_on_shutdown);
     }
 
     #[test]
@@ -237,6 +395,33 @@ mod tests {
         assert!(!config.warn_on_non_mongo_queries);
         assert_eq!(config.search.analyzer, "en_stem");
         assert_eq!(config.search.stopwords, vec!["the", "a"]);
+        assert_eq!(config.storage.page_size, 16 * 1024);
+        assert!(config.storage.wal_fsync);
+    }
+
+    #[test]
+    fn test_storage_section_overrides_only_the_keys_it_sets() {
+        let config = Config::from_toml(
+            r#"
+            [storage]
+            page_size = 8192
+            wal_fsync = false
+            "#,
+        )
+        .expect("valid toml");
+        config.validate().expect("storage section is valid");
+        assert_eq!(config.storage.page_size, 8192);
+        assert!(!config.storage.wal_fsync);
+        assert_eq!(config.storage.data_dir, "data");
+        assert_eq!(config.storage.buffer_pool_pages, 4096);
+        assert!(config.storage.checkpoint_on_shutdown);
+    }
+
+    #[test]
+    fn test_storage_page_size_is_rejected_when_too_small() {
+        let config = Config::from_toml("[storage]\npage_size = 16").expect("parse ok");
+        let err = config.validate().expect_err("page size");
+        assert!(err.contains("page_size"), "{}", err);
     }
 
     #[test]

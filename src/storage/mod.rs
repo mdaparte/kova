@@ -9,6 +9,18 @@
 //! Because a partition is confined to one thread, no `Mutex` or
 //! `RwLock` is required on the data structures — this is the core of
 //! the thread-per-core design described in `docs/ARCHITECTURE.md`.
+//!
+//! Durability sits beside that map. Each worker owns a
+//! [`engine::StorageEngine`]: mutations are appended to the WAL before
+//! they touch memory, and a checkpoint writes the map out as pages.
+//! Startup loads the checkpoint and replays the WAL tail.
+
+mod buffer_pool;
+mod crc;
+mod disk;
+mod engine;
+mod page;
+mod wal;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,9 +30,13 @@ use bson::{doc, Document};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use tokio::sync::oneshot;
 
+use crate::config::StorageConfig;
 use crate::logger::LOGGER;
 use crate::search::SearchIndex;
 use crate::types::{CommandEnvelope, DecaySpec, PartitionCommand, PartitionResult};
+
+use self::engine::{encode_image, StorageEngine};
+use self::wal::WalOp;
 
 /// A collection of documents stored by a single partition.
 type Collection = Vec<Document>;
@@ -46,18 +62,43 @@ pub struct PartitionWorker {
     /// from it yet — lookups still scan the in-memory map. Real index
     /// construction is Phase 4.
     declared_indexes: HashMap<String, Vec<Document>>,
+    /// WAL, checkpoint pages, and the buffer pool for this partition.
+    engine: StorageEngine,
 }
 
 impl PartitionWorker {
-    /// Creates a new worker with the given id and command receiver.
-    fn new(id: usize, receiver: Receiver<CommandEnvelope>) -> Self {
-        Self {
+    /// Creates a worker and restores its collections from disk.
+    fn new(id: usize, receiver: Receiver<CommandEnvelope>, storage: StorageConfig) -> Self {
+        let mut engine = StorageEngine::open(id, &storage).unwrap_or_else(|err| {
+            abort_storage(id, err);
+        });
+        let recovery = engine.load().unwrap_or_else(|err| abort_storage(id, err));
+        let pending = recovery.pending;
+        let mut worker = Self {
             id,
-            collections: HashMap::new(),
+            collections: recovery.collections,
             receiver,
             index: SearchIndex::new(),
-            declared_indexes: HashMap::new(),
+            declared_indexes: recovery.indexes,
+            engine,
+        };
+        worker.reindex_all();
+        for op in pending {
+            let result = worker.apply(op.into_command());
+            if let PartitionResult::Error { message } = result {
+                LOGGER.warn(format!(
+                    "partition {} skipped a WAL record during recovery: {}",
+                    id, message
+                ));
+            }
         }
+        LOGGER.info(format!(
+            "Partition {} recovered {} collection(s), lsn {}",
+            id,
+            worker.collections.len(),
+            worker.engine.last_lsn()
+        ));
+        worker
     }
 
     /// Builds the search index entry for one document and adds it.
@@ -95,6 +136,15 @@ impl PartitionWorker {
             let _ = envelope.respond_to.send(result);
         }
 
+        if self.engine.checkpoint_on_shutdown() {
+            if let Err(message) = self.write_checkpoint() {
+                LOGGER.error(format!(
+                    "partition {} shutdown checkpoint failed: {}",
+                    self.id, message
+                ));
+            }
+        }
+
         LOGGER.info(format!(
             "Partition worker {} shutting down ({} collections)",
             self.id,
@@ -102,8 +152,40 @@ impl PartitionWorker {
         ));
     }
 
-    /// Executes a command against this partition's data.
+    /// Appends a mutating command to the WAL, applies it, and checkpoints
+    /// when the log has grown past the configured threshold.
     fn execute(&mut self, command: PartitionCommand) -> PartitionResult {
+        let appended = if let Some(op) = WalOp::from_command(&command) {
+            if let Err(message) = self.engine.append(&op) {
+                LOGGER.error(format!(
+                    "partition {} failed to append WAL record: {}",
+                    self.id, message
+                ));
+                return PartitionResult::Error { message };
+            }
+            true
+        } else {
+            false
+        };
+
+        let result = self.apply(command);
+
+        if appended && self.engine.should_checkpoint() {
+            if let Err(message) = self.write_checkpoint() {
+                LOGGER.error(format!(
+                    "partition {} checkpoint failed: {}",
+                    self.id, message
+                ));
+            }
+        }
+        result
+    }
+
+    /// Executes a command against this partition's data.
+    ///
+    /// Callers that already appended a WAL record (or are replaying one)
+    /// use this directly so recovery does not write the log a second time.
+    fn apply(&mut self, command: PartitionCommand) -> PartitionResult {
         match command {
             PartitionCommand::Insert {
                 collection,
@@ -579,6 +661,36 @@ impl PartitionWorker {
             }
         }
     }
+
+    /// Rebuilds the Tantivy index from the restored working set.
+    ///
+    /// The search index lives in RAM. Checkpoint pages store documents,
+    /// not postings, so every startup tokenizes the map again.
+    fn reindex_all(&mut self) {
+        let snapshot: Vec<(String, Document)> = self
+            .collections
+            .iter()
+            .flat_map(|(name, docs)| docs.iter().map(|doc| (name.clone(), doc.clone())))
+            .collect();
+        for (collection, document) in snapshot {
+            self.index_document(&collection, &document);
+        }
+    }
+
+    /// Writes the working set through the buffer pool and truncates the WAL.
+    fn write_checkpoint(&mut self) -> Result<(), String> {
+        let image = encode_image(&self.collections, &self.declared_indexes)?;
+        self.engine.store_checkpoint(&image)
+    }
+}
+
+/// Logs an unrecoverable storage failure and stops the process.
+///
+/// A bad checkpoint or a WAL checksum error cannot be applied safely.
+/// Continuing with an empty partition would look like data loss.
+fn abort_storage(id: usize, err: String) -> ! {
+    LOGGER.error(format!("partition {} storage engine failed: {}", id, err));
+    std::process::exit(1);
 }
 
 /// Builds the description of the mandatory `_id_` index.
@@ -835,12 +947,28 @@ pub struct PartitionRouter {
 struct RouterInner {
     senders: Vec<Sender<CommandEnvelope>>,
     handles: std::sync::Mutex<Vec<JoinHandle<()>>>,
+    /// Temporary data directory removed after the workers exit.
+    scratch: Option<std::path::PathBuf>,
 }
 
 impl PartitionRouter {
     /// Spawns `partition_count` workers on dedicated OS threads.
+    ///
+    /// The running server uses `kova.toml`. Tests get a private temp
+    /// directory so parallel cases do not share a WAL.
     pub fn new(partition_count: usize) -> Self {
+        Self::with_storage(partition_count, process_storage())
+    }
+
+    /// Spawns workers that persist under `storage.data_dir`.
+    pub fn with_storage(partition_count: usize, storage: StorageConfig) -> Self {
         assert!(partition_count > 0, "at least one partition is required");
+
+        let scratch = if storage.ephemeral {
+            Some(std::path::PathBuf::from(&storage.data_dir))
+        } else {
+            None
+        };
 
         let mut senders = Vec::with_capacity(partition_count);
         let mut handles = Vec::with_capacity(partition_count);
@@ -848,11 +976,12 @@ impl PartitionRouter {
         for id in 0..partition_count {
             let (tx, rx) = unbounded();
             senders.push(tx);
+            let storage = storage.clone();
 
             let handle = std::thread::Builder::new()
                 .name(format!("kova-partition-{}", id))
                 .spawn(move || {
-                    let mut worker = PartitionWorker::new(id, rx);
+                    let mut worker = PartitionWorker::new(id, rx, storage);
                     worker.run();
                 })
                 .expect("failed to spawn partition worker thread");
@@ -869,6 +998,7 @@ impl PartitionRouter {
             inner: Arc::new(RouterInner {
                 senders,
                 handles: std::sync::Mutex::new(handles),
+                scratch,
             }),
         }
     }
@@ -950,12 +1080,32 @@ impl Drop for RouterInner {
     fn drop(&mut self) {
         // Dropping the senders disconnects every worker, which makes
         // their `recv()` loops return and the threads exit cleanly.
+        // Join before deleting a scratch directory: the workers still
+        // fsync their shutdown checkpoint into it.
         self.senders.clear();
         if let Ok(mut handles) = self.handles.lock() {
             for handle in handles.drain(..) {
                 let _ = handle.join();
             }
         }
+        if let Some(path) = self.scratch.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+/// Storage settings for this process.
+///
+/// Tests never touch the server's `data/` directory. The binary reads
+/// `kova.toml` (and `KOVA_DATA_DIR`).
+fn process_storage() -> StorageConfig {
+    #[cfg(test)]
+    {
+        StorageConfig::ephemeral()
+    }
+    #[cfg(not(test))]
+    {
+        crate::config::CONFIG.storage.clone()
     }
 }
 
@@ -2155,5 +2305,135 @@ mod tests {
             }
             other => panic!("expected Found, got {:?}", other),
         }
+    }
+
+    fn durable_config(dir: &std::path::Path, checkpoint_on_shutdown: bool) -> StorageConfig {
+        StorageConfig {
+            data_dir: dir.to_string_lossy().into_owned(),
+            page_size: 512,
+            buffer_pool_pages: 8,
+            wal_fsync: true,
+            wal_segment_bytes: 1024 * 1024,
+            checkpoint_every: 0,
+            checkpoint_on_shutdown,
+            ephemeral: false,
+        }
+    }
+
+    fn scratch_dir() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("kova-part-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    async fn dispatch(router: &PartitionRouter, command: PartitionCommand) -> PartitionResult {
+        router
+            .dispatch(command)
+            .expect("worker reachable")
+            .await
+            .expect("worker replied")
+    }
+
+    #[tokio::test]
+    async fn test_crash_replays_insert_update_and_delete() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, false);
+        {
+            let router = PartitionRouter::with_storage(1, config.clone());
+            dispatch(
+                &router,
+                PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![
+                        doc! { "name": "SMITH", "sal": 800 },
+                        doc! { "name": "KING", "sal": 5000 },
+                    ],
+                },
+            )
+            .await;
+            dispatch(
+                &router,
+                PartitionCommand::Update {
+                    collection: "db.emp".into(),
+                    filter: doc! { "name": "SMITH" },
+                    update: doc! { "$set": { "sal": 900 } },
+                    multi: false,
+                },
+            )
+            .await;
+            dispatch(
+                &router,
+                PartitionCommand::Delete {
+                    collection: "db.emp".into(),
+                    filter: doc! { "name": "KING" },
+                    limit: 1,
+                },
+            )
+            .await;
+        }
+
+        let router = PartitionRouter::with_storage(1, config);
+        match dispatch(
+            &router,
+            PartitionCommand::Find {
+                collection: "db.emp".into(),
+                filter: doc! {},
+            },
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0].get_str("name").unwrap(), "SMITH");
+                assert_eq!(documents[0].get_i32("sal").unwrap(), 900);
+            }
+            other => panic!("expected Found, got {:?}", other),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_survives_without_the_wal() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, true);
+        {
+            let router = PartitionRouter::with_storage(1, config.clone());
+            dispatch(
+                &router,
+                PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "name": "SCOTT", "text": "rustacean" }],
+                },
+            )
+            .await;
+        }
+
+        let wal = dir.join("partition-0").join("wal");
+        assert!(
+            std::fs::read_dir(&wal).unwrap().next().is_none(),
+            "shutdown checkpoint removes WAL segments"
+        );
+
+        let router = PartitionRouter::with_storage(1, config);
+        match dispatch(
+            &router,
+            PartitionCommand::Search {
+                collection: "db.emp".into(),
+                query: "rustacean".into(),
+                filter: doc! {},
+                options: SearchOptions::default(),
+            },
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0].get_str("name").unwrap(), "SCOTT");
+            }
+            other => panic!("expected Found, got {:?}", other),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

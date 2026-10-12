@@ -31,11 +31,11 @@ parser + optimizer), Tantivy (full-text search).
 | `src/protocol/mod.rs` | Message types, opcodes, payload parsing, BSON enumerations, reply building |
 | `src/types/mod.rs` | `PartitionCommand`, document model, query model, shared types |
 | `src/storage/mod.rs` | Partition worker, in-memory storage, `crossbeam-channel` routing |
-| `src/storage/wal.rs` *(Phase 5)* | Write-Ahead Log with CRC32 checksums, LSN tracking, segment rolling |
-| `src/storage/page.rs` *(Phase 5)* | Fixed-size page management with integrity verification |
-| `src/storage/buffer_pool.rs` *(Phase 5)* | LRU page cache with pin/unpin eviction |
-| `src/storage/disk.rs` *(Phase 5)* | Low-level disk I/O for page read/write |
-| `src/storage/engine.rs` *(Phase 5)* | Unified storage (WAL + buffer pool + disk + memory) |
+| `src/storage/wal.rs` | Write-Ahead Log with CRC32 checksums, LSN tracking, segment rolling |
+| `src/storage/page.rs` | Fixed-size page management with integrity verification |
+| `src/storage/buffer_pool.rs` | LRU page cache with pin/unpin eviction |
+| `src/storage/disk.rs` | Low-level disk I/O for page read/write |
+| `src/storage/engine.rs` | Unified storage (WAL + buffer pool + disk + memory) |
 | `src/storage/mvcc.rs` *(Phase 6)* | Multi-Version Concurrency Control, snapshot reads |
 | `src/storage/transaction.rs` *(Phase 6)* | Transaction manager (begin/commit/abort, conflict detection, timeout) |
 | `src/search/mod.rs` | Tantivy indexes, tokenizers, relevance queries |
@@ -164,9 +164,9 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 4 — Analytical Query Optimization:** DataFusion SQL execution
   against in-memory collections, including `COUNT(*)` and `GROUP BY`. ✅ Complete.
 - **Phase 5 — Disk Storage Engine:** WAL, buffer pool, page-based storage,
-  hybrid memory+disk architecture. 🔵 Current.
+  checkpoint, and crash recovery. ✅ Complete.
 - **Phase 5.5 — Aggregation pipeline:** `aggregate` with `$match`, `$group`,
-  `$project`, `$sort`, `$limit`, after disk and WAL, tested with mongosh. ⚪ Planned.
+  `$project`, `$sort`, `$limit`, after disk and WAL, tested with mongosh. 🔵 Current.
 - **Phase 6 — Transactional Storage:** MVCC, ACID transactions, multiple
   isolation levels. ⚪ Planned.
 - **Phase 7 — Indexing Subsystem:** B-Tree, Hash, Unique, Sparse indexes,

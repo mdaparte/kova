@@ -28,3 +28,28 @@ analyzer = "default"
 # Extra stop words removed at index and query time, e.g. ["the", "a"].
 # Empty by default: stop-word removal is language-dependent.
 stopwords = []
+
+[storage]
+# Root directory for the WAL, checkpoint manifest, and page files.
+# Each partition writes under partition-{id}/.
+# Env: KOVA_DATA_DIR
+data_dir = "data"
+
+# Fixed page size in bytes. Checkpoint images that do not fit are split.
+# Env: KOVA_PAGE_SIZE
+page_size = 16384
+
+# Pages kept in the per-partition buffer pool.
+# Env: KOVA_BUFFER_POOL_PAGES
+buffer_pool_pages = 4096
+
+# fsync every WAL append before the change is applied in memory.
+# Env: KOVA_WAL_FSYNC
+wal_fsync = true
+
+# Roll to a new segment once the current one would pass this size.
+wal_segment_bytes = 16777216
+
+# Snapshot the working set after this many mutations. Shutdown also
+# checkpoints. 0 disables the periodic snapshot.
+checkpoint_every = 128

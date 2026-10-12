@@ -40,12 +40,11 @@ Rust concurrency, memory management, and storage engine design.
 
 ## 3. Non-Goals (Current Phase)
 
-- Persistent storage / WAL / crash recovery is out of scope until Phase 5.
 - Sharding across multiple nodes is out of scope until Phase 8 (optional).
 - Full MongoDB command-level compatibility (only the wire protocol minimum
   required to speak with official drivers).
-- SQL query execution against disk-backed tables is out of scope until
-  Phase 5. Phase 4 executes SQL against in-memory collections.
+- Queries read the in-memory working set. Startup restores that set from
+  the checkpoint and the WAL; SQL does not fetch pages on demand.
 
 ## 4. High-Level Architecture
 
@@ -70,7 +69,7 @@ Rust concurrency, memory management, and storage engine design.
 └─────────────┬──────────────┘ └──────────────┬──────────────┘
               │                               │
 ┌─────────────▼───────────────────────────────▼──────────────┐
-│                  Storage Layer (Phase 5+)                   │
+│                     Storage Layer                           │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │              Unified Storage Engine (engine.rs)         │  │
 │  │                                                        │  │
@@ -157,13 +156,12 @@ Rust concurrency, memory management, and storage engine design.
 
 #### 4.3.4 Hybrid Memory + Disk Architecture
 
-- **Hot data in memory:** Frequently accessed documents/collections stay in
-  RAM (the existing in-memory hash maps).
-- **Cold data on disk:** Less-frequently accessed data is paged to disk.
-- **Buffer pool as the bridge:** The buffer pool caches disk pages; the
-  memory hash maps hold the working set.
-- **Query execution:** DataFusion reads from the buffer pool (which reads
-  from disk on miss); after Phase 6, MVCC reads from snapshots.
+- **Hot data in memory:** The partition hash map is the working set. Finds,
+  updates, and SQL read it.
+- **Durability on disk:** Mutations go to the WAL first. A checkpoint writes
+  the map into pages through the buffer pool and truncates that WAL.
+- **Startup:** Load the checkpoint (buffer pool on miss) and replay the WAL
+  tail. Paging individual cold documents out of the hash map is later.
 
 #### 4.3.5 MVCC + Transactions (Phase 6)
 
@@ -231,10 +229,10 @@ about and ignored.
 | `warn_on_non_mongo_queries` | `KOVA_WARN_NON_MONGO_QUERIES` | `true` | WARN on non-Mongo operators |
 | `search.analyzer` | — | `default` | `default` \| `en_stem` |
 | `search.stopwords` | — | `[]` | Stop words removed at index/query time |
-| *(Phase 5+)* `storage.data_dir` | — | `./data/kova` | Directory for disk storage |
-| *(Phase 5+)* `storage.page_size` | — | `16384` | Fixed page size in bytes |
-| *(Phase 5+)* `storage.buffer_pool_pages` | — | `4096` | Buffer pool capacity in pages |
-| *(Phase 5+)* `storage.wal_fsync` | — | `true` | fsync WAL on commit |
+| `storage.data_dir` | `KOVA_DATA_DIR` | `data` | WAL, checkpoint, and page files |
+| `storage.page_size` | `KOVA_PAGE_SIZE` | `16384` | Fixed page size in bytes |
+| `storage.buffer_pool_pages` | `KOVA_BUFFER_POOL_PAGES` | `4096` | Buffer pool capacity in pages |
+| `storage.wal_fsync` | `KOVA_WAL_FSYNC` | `true` | fsync each WAL append |
 
 ## 7. Phases
 

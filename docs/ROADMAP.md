@@ -19,8 +19,8 @@ replication, and multi-model indexing.
 | 3 | Full-Text Search Indexing | ✅ Complete |
 | 3.5 | Search Flexibility & Configuration | ✅ Complete |
 | 4 | Analytical Query Optimization (DataFusion SQL) | ✅ Complete |
-| 5 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | 🔵 Current |
-| 5.5 | MongoDB Aggregation Pipeline | ⚪ Planned |
+| 5 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | ✅ Complete |
+| 5.5 | MongoDB Aggregation Pipeline | 🔵 Current |
 | 6 | Transactional Storage (MVCC + ACID + Isolation) | ⚪ Planned |
 | 7 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ⚪ Planned |
 | 8 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ⚪ Planned |
@@ -100,7 +100,7 @@ replication, and multi-model indexing.
 - [x] Validate `SELECT ... FROM ... WHERE ...`, `COUNT(*)`, `GROUP BY`.
 - [x] Add unit tests for query_engine parsing + execution.
 
-## Phase 5 — Disk Storage Engine (WAL + Buffer Pool + Page Store) 🔵 Current
+## Phase 5 — Disk Storage Engine (WAL + Buffer Pool + Page Store) ✅
 
 _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 
@@ -129,13 +129,16 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 
 ### 5.4 Hybrid Memory + Disk Architecture
 
-- **Hot data in memory**: frequently accessed documents/collections stay in RAM
-  (the existing in-memory hash maps).
-- **Cold data on disk**: less-frequently accessed data is paged to disk.
-- **Buffer pool as the bridge**: the buffer pool caches disk pages; the memory
-  hash maps hold the working set.
-- **Query execution**: DataFusion reads from the buffer pool (which reads from
-  disk on miss); after Phase 6, MVCC reads from snapshots.
+- **Hot data in memory**: the partition hash map is the working set. Finds,
+  updates, and SQL read it.
+- **Durability on disk**: every mutation is appended to that partition's WAL
+  before the map changes. A checkpoint writes the map into fixed-size pages
+  through the buffer pool, then deletes the WAL segments the snapshot covers.
+- **Startup**: load the checkpoint pages (buffer pool on miss) and replay the
+  WAL tail. The search index is rebuilt from the restored documents.
+- **Layout**: `{data_dir}/partition-{id}/checkpoint.bin`, `wal/`, `pages/`.
+- Paging individual cold documents out of the hash map, so a query fetches a
+  page on miss, stays later. This phase restores the whole working set into RAM.
 
 ### 5.5 Durability Guarantees
 
@@ -147,20 +150,20 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 
 ### Phase 5 — Sub-tasks
 
-- [ ] Design the on-disk layout: database directory, collection directories,
+- [x] Design the on-disk layout: database directory, collection directories,
   page files, WAL segments.
-- [ ] Implement `src/storage/wal.rs`: segmented WAL with CRC32 + LSN.
-- [ ] Implement `src/storage/page.rs`: fixed-size page with header/checksum.
-- [ ] Implement `src/storage/buffer_pool.rs`: LRU cache with pin/unpin.
-- [ ] Implement `src/storage/disk.rs`: low-level disk I/O (read/write pages).
-- [ ] Implement `src/storage/engine.rs`: unified storage (WAL + buffer pool +
+- [x] Implement `src/storage/wal.rs`: segmented WAL with CRC32 + LSN.
+- [x] Implement `src/storage/page.rs`: fixed-size page with header/checksum.
+- [x] Implement `src/storage/buffer_pool.rs`: LRU cache with pin/unpin.
+- [x] Implement `src/storage/disk.rs`: low-level disk I/O (read/write pages).
+- [x] Implement `src/storage/engine.rs`: unified storage (WAL + buffer pool +
   disk + in-memory hash maps).
-- [ ] Integrate the disk storage engine with the existing partition workers.
-- [ ] Add durability tests: crash recovery, WAL replay, checkpoint.
-- [ ] Add configuration for `data_dir`, `page_size`, `buffer_pool_pages`,
+- [x] Integrate the disk storage engine with the existing partition workers.
+- [x] Add durability tests: crash recovery, WAL replay, checkpoint.
+- [x] Add configuration for `data_dir`, `page_size`, `buffer_pool_pages`,
   `wal_fsync` in `kova.toml`.
 
-## Phase 5.5 — MongoDB Aggregation Pipeline ⚪ Planned
+## Phase 5.5 — MongoDB Aggregation Pipeline 🔵 Current
 
 Runs after Phase 5. The `aggregate` command reads through the disk storage
 engine (WAL + page store), not a second in-memory copy. mongosh and Compass
@@ -403,7 +406,6 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phase 4 (DataFusion SQL against in-memory collections) is complete. The
-current phase is the disk storage engine (WAL + buffer pool + page store,
-inspired by GraniteDB), then transactional storage (MVCC + ACID), the
-indexing subsystem, and replication.*
+*Phase 5 (WAL, buffer pool, page store) is complete. The current phase is
+the aggregation pipeline (Phase 5.5), then transactional storage (MVCC +
+ACID), the indexing subsystem, and replication.*

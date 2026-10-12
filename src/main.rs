@@ -54,8 +54,12 @@ async fn main() {
     LOGGER.set_min_level(config.log_level());
 
     LOGGER.info(format!(
-        "Kova engine starting (port {}, log level {}, warn_on_non_mongo_queries={})",
-        config.port, config.log_level, config.warn_on_non_mongo_queries
+        "Kova engine starting (port {}, log level {}, data_dir {}, wal_fsync={}, warn_on_non_mongo_queries={})",
+        config.port,
+        config.log_level,
+        config.storage.data_dir,
+        config.storage.wal_fsync,
+        config.warn_on_non_mongo_queries
     ));
 
     let router = storage::PartitionRouter::new(PARTITION_COUNT);
