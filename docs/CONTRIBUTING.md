@@ -165,8 +165,11 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   against in-memory collections, including `COUNT(*)` and `GROUP BY`. ✅ Complete.
 - **Phase 5 — Disk Storage Engine:** WAL, buffer pool, page-based storage,
   checkpoint, and crash recovery. ✅ Complete.
+- **Phase 5b — Disk-resident collections:** documents live in pages; the
+  buffer pool is the only RAM that grows with the cache, not with the
+  database. 🔵 Current.
 - **Phase 5.5 — Aggregation pipeline:** `aggregate` with `$match`, `$group`,
-  `$project`, `$sort`, `$limit`, after disk and WAL, tested with mongosh. 🔵 Current.
+  `$project`, `$sort`, `$limit`, after Phase 5b, tested with mongosh. ⚪ Planned.
 - **Phase 6 — Transactional Storage:** MVCC, ACID transactions, multiple
   isolation levels. ⚪ Planned.
 - **Phase 7 — Indexing Subsystem:** B-Tree, Hash, Unique, Sparse indexes,

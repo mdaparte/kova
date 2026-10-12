@@ -20,7 +20,8 @@ replication, and multi-model indexing.
 | 3.5 | Search Flexibility & Configuration | ✅ Complete |
 | 4 | Analytical Query Optimization (DataFusion SQL) | ✅ Complete |
 | 5 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | ✅ Complete |
-| 5.5 | MongoDB Aggregation Pipeline | 🔵 Current |
+| 5b | Disk-Resident Collections (pages are the database, RAM is the cache) | 🔵 Current |
+| 5.5 | MongoDB Aggregation Pipeline | ⚪ Planned |
 | 6 | Transactional Storage (MVCC + ACID + Isolation) | ⚪ Planned |
 | 7 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ⚪ Planned |
 | 8 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ⚪ Planned |
@@ -82,12 +83,13 @@ replication, and multi-model indexing.
 
 - Integrate `Apache DataFusion` (v45).
 - SQL via `db.runCommand({ sql: "..." })` executes against in-memory collections.
-- `MemoryTable` exposes one collection snapshot as a DataFusion table. A later
-  disk-backed provider (Phase 5+) can replace it without changing the command.
+- `MemoryTable` exposes one collection snapshot as a DataFusion table. Phase 5b
+  replaces that snapshot with a scan that reads pages through the buffer pool.
 - `SELECT` without `FROM`, `WHERE`, `COUNT(*)`, and `GROUP BY` return a cursor.
 - `parse_sql()` returns the logical plan for debugging.
 - One `FROM` table per query. Joins are out of scope. The Mongo aggregation
-  pipeline (`aggregate`, `$match`, `$group`, …) is Phase 5.5, after disk and WAL.
+  pipeline (`aggregate`, `$match`, `$group`, …) is Phase 5.5, after collections
+  live on pages (Phase 5b).
 
 ### Phase 4 — Sub-tasks
 
@@ -137,8 +139,9 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 - **Startup**: load the checkpoint pages (buffer pool on miss) and replay the
   WAL tail. The search index is rebuilt from the restored documents.
 - **Layout**: `{data_dir}/partition-{id}/checkpoint.bin`, `wal/`, `pages/`.
-- Paging individual cold documents out of the hash map, so a query fetches a
-  page on miss, stays later. This phase restores the whole working set into RAM.
+- The page file is a snapshot of the whole map. Startup loads every document
+  back into RAM. A database larger than memory does not fit. Phase 5b is the
+  one that keeps documents on the pages and uses RAM only as a cache.
 
 ### 5.5 Durability Guarantees
 
@@ -163,11 +166,91 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 - [x] Add configuration for `data_dir`, `page_size`, `buffer_pool_pages`,
   `wal_fsync` in `kova.toml`.
 
-## Phase 5.5 — MongoDB Aggregation Pipeline 🔵 Current
+## Phase 5b — Disk-Resident Collections 🔵 Current
 
-Runs after Phase 5. The `aggregate` command reads through the disk storage
-engine (WAL + page store), not a second in-memory copy. mongosh and Compass
-already send this command; today it is rejected as `unsupported command aggregate`.
+Phase 5 made a crash survivable by copying the in-memory map to disk and
+loading that copy back on startup. The map is still the database: `find`,
+`update`, and SQL read it, so the collection has to fit in RAM.
+
+Phase 5b turns that around. The page file is the database. RAM holds the
+buffer pool (default 4096 pages × 16 KB, set by `buffer_pool_pages`) and
+nothing else that grows with the collection. A query that misses the pool
+reads the page from disk. When the pool is full, the least recently used
+unpinned page is written back if it is dirty and then dropped.
+
+The WAL from Phase 5 stays. It records the mutation before the page is
+dirtied. It is not where the document lives.
+
+### 5b.1 Documents live in pages
+
+- A collection is a set of pages, not a `Vec` that must all be resident.
+- Each document is BSON inside a page. The page header gains a slot
+  directory (offset and length of each document).
+- A document larger than the page payload spans overflow pages.
+- Free space in a page is reused. Page ids are not recycled out from
+  under a reader that still has the page pinned.
+- `_id` to page id, and the list of pages in a collection, live in a
+  catalog that is itself stored in pages and cached by the buffer pool.
+  The catalog is not a second copy of every document.
+
+### 5b.2 The buffer pool is the only working set
+
+- `insert`, `find`, `update`, `delete`, and `count` pin pages, read or
+  change the slots, then unpin.
+- A miss reads the page from disk. Eviction writes a dirty page back
+  before reuse.
+- Startup opens the catalog and replays the WAL tail onto the pages it
+  names. It does not materialize every document into a hash map.
+- The partition `HashMap<String, Vec<Document>>` stops being the store.
+
+### 5b.3 Checkpoint
+
+- A checkpoint flushes dirty pages, records the last LSN those pages
+  cover, and deletes the WAL segments behind that LSN.
+- It does not serialize the whole collection into one BSON image.
+- After a crash, flushed pages stay as they are. Recovery applies only
+  the WAL records newer than the checkpoint.
+
+### 5b.4 SQL and search
+
+- DataFusion scans a collection by pulling pages through the buffer pool
+  in batches. The command `db.runCommand({ sql: "..." })` does not change.
+- Tantivy stays an index of tokens in RAM. It is updated on write and
+  rebuilt by scanning pages on startup. It does not keep a second copy
+  of the BSON.
+
+### 5b.5 Tests
+
+- Insert more documents than `buffer_pool_pages` can hold. A later `find`
+  still returns a document that had to be read from disk.
+- Restart, then `find` the same document. The process must not have
+  loaded the whole collection into a `Vec` to answer.
+- `update` and `delete` of a document that was not resident.
+- A document larger than one page round-trips.
+- `SELECT` over that collection returns the same rows as `find`.
+
+### Phase 5b — Sub-tasks
+
+- [ ] Add a slot directory and overflow pages in `src/storage/page.rs`.
+- [ ] Store the collection catalog (page list, free space, `_id` to page
+  id) in pages, cached by the buffer pool.
+- [ ] Route insert, find, update, delete, and count through the buffer
+  pool. Remove the resident `Vec<Document>` as the store.
+- [ ] Change checkpoint to a dirty-page flush plus an LSN, not a full-map
+  BSON image.
+- [ ] Apply the WAL tail to pages on startup, without loading every
+  document into RAM.
+- [ ] Scan pages in batches for DataFusion SQL.
+- [ ] Rebuild the Tantivy index by scanning pages.
+- [ ] Tests: working set larger than the pool, restart, find, update,
+  overflow document, SQL matches find.
+
+## Phase 5.5 — MongoDB Aggregation Pipeline ⚪ Planned
+
+Runs after Phase 5b. The `aggregate` command reads documents from pages
+through the buffer pool, not from a second in-memory copy. mongosh and
+Compass already send this command; today it is rejected as
+`unsupported command aggregate`.
 
 ### 5.5.1 Command and cursor
 
@@ -187,13 +270,14 @@ already send this command; today it is rejected as `unsupported command aggregat
 
 ### 5.5.3 Integrated test
 
-After the WAL engine is in place, one mongosh session loads the Oracle `emp`
-sample and checks the pipeline against the same question asked in SQL:
+After Phase 5b, one mongosh session loads the Oracle `emp` sample and checks
+the pipeline against the same question asked in SQL:
 
 - `$match` on `sal` and `job` returns the same rows as `WHERE`.
 - `$group` by `job` with `$sum` returns the same counts as `GROUP BY`.
 - A crash-and-restart between the insert and the aggregate still sees the
-  documents replayed from the WAL.
+  documents, read back from pages. The collection must not have been
+  loaded entirely into RAM to answer.
 
 ### Phase 5.5 — Sub-tasks
 
@@ -201,7 +285,7 @@ sample and checks the pipeline against the same question asked in SQL:
 - [ ] Implement `src/aggregate/mod.rs`: run a pipeline over the storage engine's document scan.
 - [ ] Implement `$match`, `$project`, `$sort`, `$skip`, `$limit`, `$count`, `$group`, `$unwind`.
 - [ ] Return a cursor reply from the network layer.
-- [ ] Integration test with mongosh against the Phase 5 engine: seed `emp`, aggregate, compare with SQL, restart, aggregate again.
+- [ ] Integration test with mongosh against the Phase 5b engine: seed `emp`, aggregate, compare with SQL, restart, aggregate again.
 
 ## Phase 6 — Transactional Storage (MVCC + ACID + Isolation) ⚪ Planned
 
@@ -343,9 +427,8 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| No disk storage (all in-memory) | 5 | WAL + page store + buffer pool needed. |
-| No durability (crash = data loss) | 5 | WAL + checkpoint fixes this. |
-| `aggregate` is rejected | 5.5 | Pipeline after disk + WAL; tested with mongosh against the WAL engine. |
+| The whole collection is loaded into RAM | 5b | Pages are the database. The buffer pool caches hot pages. A miss reads disk. |
+| `aggregate` is rejected | 5.5 | Pipeline after Phase 5b; mongosh test reads pages, including after a restart. |
 | No transactions | 6 | MVCC + transaction manager needed. |
 | Indexes are metadata only | 7 | B-Tree + Hash + auto-maintain needed. |
 | No replication | 8 | Oplog + replica sets needed. |
@@ -407,5 +490,6 @@ Main entry point: `src/main.rs`.
 ---
 
 *Phase 5 (WAL, buffer pool, page store) is complete. The current phase is
-the aggregation pipeline (Phase 5.5), then transactional storage (MVCC +
-ACID), the indexing subsystem, and replication.*
+5b: documents live on pages and RAM is only the buffer pool. After that,
+the aggregation pipeline (Phase 5.5), transactional storage (MVCC + ACID),
+the indexing subsystem, and replication.*

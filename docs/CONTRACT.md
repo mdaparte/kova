@@ -155,6 +155,8 @@ how to produce a change that fits the project.
 | 3.5 | Per-field boosts, wildcards, decay, analyzer config, `kova.toml` |
 | 4 | DataFusion SQL parsing, `db.runCommand({ sql: "..." })`, plan extraction |
 | 5 | Disk storage engine: WAL, buffer pool, page store, hybrid memory+disk |
+| 5b | Disk-resident collections: pages are the database, RAM is the buffer pool |
+| 5.5 | Aggregation pipeline, reading pages through the buffer pool |
 | 6 | Transactional storage: MVCC, ACID, multiple isolation levels |
 | 7 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
 | 8 | Replication & HA: Oplog, replica sets, heartbeat, election |

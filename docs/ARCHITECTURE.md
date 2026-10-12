@@ -43,8 +43,9 @@ Rust concurrency, memory management, and storage engine design.
 - Sharding across multiple nodes is out of scope until Phase 8 (optional).
 - Full MongoDB command-level compatibility (only the wire protocol minimum
   required to speak with official drivers).
-- Queries read the in-memory working set. Startup restores that set from
-  the checkpoint and the WAL; SQL does not fetch pages on demand.
+- Phase 5b is in scope now: documents stay on pages, and a query reads
+  through the buffer pool. Until that phase lands, startup still loads
+  the whole checkpoint into RAM.
 
 ## 4. High-Level Architecture
 
@@ -160,8 +161,9 @@ Rust concurrency, memory management, and storage engine design.
   updates, and SQL read it.
 - **Durability on disk:** Mutations go to the WAL first. A checkpoint writes
   the map into pages through the buffer pool and truncates that WAL.
-- **Startup:** Load the checkpoint (buffer pool on miss) and replay the WAL
-  tail. Paging individual cold documents out of the hash map is later.
+- **Startup today:** load the checkpoint and replay the WAL tail into the
+  partition map. Phase 5b stops doing that. The page file becomes the
+  database, and startup only opens the catalog plus the WAL tail.
 
 #### 4.3.5 MVCC + Transactions (Phase 6)
 
@@ -244,6 +246,8 @@ about and ignored.
 | 3.5 | Per-field boosts, wildcards, decay, analyzer config, `kova.toml` |
 | 4 | DataFusion SQL parsing, `db.runCommand({ sql: "..." })`, plan extraction |
 | 5 | Disk storage engine: WAL, buffer pool, page store, hybrid memory+disk |
+| 5b | Disk-resident collections: pages are the database, RAM is the buffer pool |
+| 5.5 | Aggregation pipeline, reading pages through the buffer pool |
 | 6 | Transactional storage: MVCC, ACID, multiple isolation levels |
 | 7 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
 | 8 | Replication & HA: Oplog, replica sets, heartbeat, election |
