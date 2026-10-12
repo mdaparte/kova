@@ -687,16 +687,113 @@ fn apply_decay(ranked: &mut [(f32, Document)], spec: &DecaySpec) {
     ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 }
 
-/// Returns `true` when every field in `filter` is present and equal in `doc`.
+/// Returns `true` when `doc` satisfies every predicate in `filter`.
 ///
-/// This is an equality-only matcher: it covers the subset of the MongoDB
-/// query language needed to route and verify Phase 2 commands. Rich
-/// operators (`$gt`, `$in`, ...) arrive with the query engine in Phase 4.
+/// Field predicates are combined with implicit AND, matching MongoDB.
+/// A value that is a document of operators (`{ $gt: 2000 }`) is compared;
+/// anything else must be equal to the stored value. Numbers compare across
+/// Int32, Int64 and Double, so a shell literal `2000` matches a NumberInt.
 /// Shared with the network layer to filter broadcast listings.
 pub(crate) fn document_matches(doc: &Document, filter: &Document) -> bool {
-    filter
-        .iter()
-        .all(|(key, expected)| doc.get(key) == Some(expected))
+    filter.iter().all(|(key, expected)| match key.as_str() {
+        "$and" => expected.as_array().is_some_and(|items| {
+            items.iter().all(|item| {
+                item.as_document()
+                    .is_some_and(|clause| document_matches(doc, clause))
+            })
+        }),
+        "$or" => expected.as_array().is_some_and(|items| {
+            !items.is_empty()
+                && items.iter().any(|item| {
+                    item.as_document()
+                        .is_some_and(|clause| document_matches(doc, clause))
+                })
+        }),
+        "$nor" => expected.as_array().is_some_and(|items| {
+            items.iter().all(|item| {
+                item.as_document()
+                    .is_none_or(|clause| !document_matches(doc, clause))
+            })
+        }),
+        other if other.starts_with('$') => false,
+        field => value_matches(doc.get(field), expected),
+    })
+}
+
+/// Matches one field value against a literal or an operator document.
+fn value_matches(actual: Option<&bson::Bson>, expected: &bson::Bson) -> bool {
+    if let bson::Bson::Document(operators) = expected {
+        if is_operator_document(operators) {
+            return operators
+                .iter()
+                .all(|(op, operand)| operator_matches(op, actual, operand));
+        }
+    }
+    actual.is_some_and(|value| bson_eq(value, expected))
+}
+
+/// A document is an operator expression when every key starts with `$`.
+///
+/// An empty document is a stored value, not an operator list, so equality
+/// still matches a field whose value is `{}`.
+fn is_operator_document(doc: &Document) -> bool {
+    !doc.is_empty() && doc.keys().all(|key| key.starts_with('$'))
+}
+
+fn operator_matches(op: &str, actual: Option<&bson::Bson>, operand: &bson::Bson) -> bool {
+    match op {
+        "$eq" => actual.is_some_and(|value| bson_eq(value, operand)),
+        "$ne" => actual.map(|value| !bson_eq(value, operand)).unwrap_or(true),
+        "$gt" => bson_cmp(actual, operand).is_some_and(|order| order.is_gt()),
+        "$gte" => bson_cmp(actual, operand).is_some_and(|order| order.is_ge()),
+        "$lt" => bson_cmp(actual, operand).is_some_and(|order| order.is_lt()),
+        "$lte" => bson_cmp(actual, operand).is_some_and(|order| order.is_le()),
+        "$in" => operand.as_array().is_some_and(|items| {
+            actual.is_some_and(|value| items.iter().any(|item| bson_eq(value, item)))
+        }),
+        "$nin" => operand.as_array().is_some_and(|items| {
+            actual
+                .map(|value| items.iter().all(|item| !bson_eq(value, item)))
+                .unwrap_or(true)
+        }),
+        "$exists" => actual.is_some() == operand.as_bool().unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn bson_eq(left: &bson::Bson, right: &bson::Bson) -> bool {
+    bson_cmp(Some(left), right) == Some(std::cmp::Ordering::Equal) || left == right
+}
+
+/// Orders two BSON values when they share a comparable type.
+///
+/// Numbers compare across widths. Dates compare by instant. Strings compare
+/// lexicographically. A missing field, or two values of different kinds,
+/// is not ordered, so a range operator does not match them.
+fn bson_cmp(actual: Option<&bson::Bson>, expected: &bson::Bson) -> Option<std::cmp::Ordering> {
+    use bson::Bson;
+
+    let actual = actual?;
+    if let (Some(left), Some(right)) = (as_number(actual), as_number(expected)) {
+        return Some(left.total_cmp(&right));
+    }
+    match (actual, expected) {
+        (Bson::DateTime(left), Bson::DateTime(right)) => {
+            Some(left.timestamp_millis().cmp(&right.timestamp_millis()))
+        }
+        (Bson::String(left), Bson::String(right)) => Some(left.cmp(right)),
+        (Bson::Boolean(left), Bson::Boolean(right)) => Some(left.cmp(right)),
+        _ => None,
+    }
+}
+
+fn as_number(value: &bson::Bson) -> Option<f64> {
+    match value {
+        bson::Bson::Int32(n) => Some(f64::from(*n)),
+        bson::Bson::Int64(n) => Some(*n as f64),
+        bson::Bson::Double(n) => Some(*n),
+        _ => None,
+    }
 }
 
 /// Applies an update document to `doc`.
@@ -1817,6 +1914,60 @@ mod tests {
         assert!(!document_matches(&doc, &doc! { "name": "Grace" }));
         assert!(!document_matches(&doc, &doc! { "missing": 1 }));
         assert!(document_matches(&doc, &doc! {}));
+    }
+
+    #[test]
+    fn test_document_matches_range_and_set_operators() {
+        let smith = doc! { "ename": "SMITH", "job": "CLERK", "sal": 800i32, "deptno": 20i32 };
+        let king = doc! { "ename": "KING", "job": "PRESIDENT", "sal": 5000i32, "deptno": 10i32 };
+
+        assert!(document_matches(&king, &doc! { "sal": { "$gt": 2000 } }));
+        assert!(!document_matches(&smith, &doc! { "sal": { "$gt": 2000 } }));
+        assert!(!document_matches(
+            &smith,
+            &doc! { "sal": { "$gt": 2000.0 } }
+        ));
+        // A double literal from the shell still compares against NumberInt.
+        assert!(document_matches(&king, &doc! { "sal": { "$gte": 5000.0 } }));
+        assert!(document_matches(&smith, &doc! { "sal": { "$lt": 1000 } }));
+        assert!(document_matches(&smith, &doc! { "sal": { "$lte": 800 } }));
+        assert!(document_matches(
+            &smith,
+            &doc! { "job": "CLERK", "sal": { "$lt": 1000 } }
+        ));
+        assert!(document_matches(
+            &smith,
+            &doc! { "job": { "$in": ["CLERK", "MANAGER"] } }
+        ));
+        assert!(!document_matches(
+            &king,
+            &doc! { "job": { "$in": ["CLERK", "MANAGER"] } }
+        ));
+        assert!(document_matches(
+            &king,
+            &doc! { "comm": { "$exists": false } }
+        ));
+        assert!(document_matches(
+            &doc! { "ename": "ALLEN", "comm": 300i32 },
+            &doc! { "comm": { "$exists": true, "$gt": 0 } }
+        ));
+        assert!(document_matches(
+            &smith,
+            &doc! { "$or": [ { "job": "PRESIDENT" }, { "job": "CLERK" } ] }
+        ));
+        assert!(!document_matches(&king, &doc! { "sal": { "$lt": 1000 } }));
+
+        let early = doc! { "hiredate": bson::DateTime::from_millis(345_859_200_000i64) };
+        let late = doc! { "hiredate": bson::DateTime::from_millis(378_691_200_000i64) };
+        let cutoff = bson::DateTime::from_millis(378_691_200_000i64);
+        assert!(!document_matches(
+            &early,
+            &doc! { "hiredate": { "$gt": cutoff } }
+        ));
+        assert!(document_matches(
+            &late,
+            &doc! { "hiredate": { "$gte": cutoff } }
+        ));
     }
 
     #[test]

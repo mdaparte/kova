@@ -65,7 +65,7 @@ Rust concurrency, memory management, and storage engine design.
               │                               │
 ┌─────────────▼─────────────┐ ┌──────────────▼──────────────┐
 │    Query Engine (Phase 4) │ │   Aggregation Pipeline       │
-│   DataFusion SQL parsing + │ │   (Phase 5+) $match,$group,   │
+│   DataFusion SQL parsing + │ │   (Phase 5.5) $match,$group,  │
 │   execution against storage│ │   $project,$sort,$limit...    │
 └─────────────┬──────────────┘ └──────────────┬──────────────┘
               │                               │

@@ -20,6 +20,7 @@ replication, and multi-model indexing.
 | 3.5 | Search Flexibility & Configuration | ✅ Complete |
 | 4 | Analytical Query Optimization (DataFusion SQL) | ✅ Complete |
 | 5 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | 🔵 Current |
+| 5.5 | MongoDB Aggregation Pipeline | ⚪ Planned |
 | 6 | Transactional Storage (MVCC + ACID + Isolation) | ⚪ Planned |
 | 7 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ⚪ Planned |
 | 8 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ⚪ Planned |
@@ -85,8 +86,8 @@ replication, and multi-model indexing.
   disk-backed provider (Phase 5+) can replace it without changing the command.
 - `SELECT` without `FROM`, `WHERE`, `COUNT(*)`, and `GROUP BY` return a cursor.
 - `parse_sql()` returns the logical plan for debugging.
-- One `FROM` table per query. Joins and the Mongo aggregation pipeline
-  (`$match`, `$group`, …) are not part of this phase.
+- One `FROM` table per query. Joins are out of scope. The Mongo aggregation
+  pipeline (`aggregate`, `$match`, `$group`, …) is Phase 5.5, after disk and WAL.
 
 ### Phase 4 — Sub-tasks
 
@@ -158,6 +159,46 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 - [ ] Add durability tests: crash recovery, WAL replay, checkpoint.
 - [ ] Add configuration for `data_dir`, `page_size`, `buffer_pool_pages`,
   `wal_fsync` in `kova.toml`.
+
+## Phase 5.5 — MongoDB Aggregation Pipeline ⚪ Planned
+
+Runs after Phase 5. The `aggregate` command reads through the disk storage
+engine (WAL + page store), not a second in-memory copy. mongosh and Compass
+already send this command; today it is rejected as `unsupported command aggregate`.
+
+### 5.5.1 Command and cursor
+
+- `aggregate` on a collection, with a `pipeline` array and a `cursor`.
+- Reply is a cursor (`firstBatch`), same shape as `find`.
+- An empty pipeline returns the collection.
+- Unknown stages fail the command with the stage name, instead of dropping the filter.
+
+### 5.5.2 Stages
+
+- `$match` — same predicates as `find` (`$gt`, `$in`, `$and`, `$or`, …).
+- `$project` — include, exclude, and rename fields.
+- `$sort`, `$skip`, `$limit`.
+- `$group` — `_id` plus `$sum`, `$avg`, `$min`, `$max`, `$first`, `$last`.
+- `$count`.
+- `$unwind` on one array field.
+
+### 5.5.3 Integrated test
+
+After the WAL engine is in place, one mongosh session loads the Oracle `emp`
+sample and checks the pipeline against the same question asked in SQL:
+
+- `$match` on `sal` and `job` returns the same rows as `WHERE`.
+- `$group` by `job` with `$sum` returns the same counts as `GROUP BY`.
+- A crash-and-restart between the insert and the aggregate still sees the
+  documents replayed from the WAL.
+
+### Phase 5.5 — Sub-tasks
+
+- [ ] Accept `aggregate` in `command_from_document` and route it to the partition that owns the collection.
+- [ ] Implement `src/aggregate/mod.rs`: run a pipeline over the storage engine's document scan.
+- [ ] Implement `$match`, `$project`, `$sort`, `$skip`, `$limit`, `$count`, `$group`, `$unwind`.
+- [ ] Return a cursor reply from the network layer.
+- [ ] Integration test with mongosh against the Phase 5 engine: seed `emp`, aggregate, compare with SQL, restart, aggregate again.
 
 ## Phase 6 — Transactional Storage (MVCC + ACID + Isolation) ⚪ Planned
 
@@ -301,6 +342,7 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
 |-----|-------|-------|
 | No disk storage (all in-memory) | 5 | WAL + page store + buffer pool needed. |
 | No durability (crash = data loss) | 5 | WAL + checkpoint fixes this. |
+| `aggregate` is rejected | 5.5 | Pipeline after disk + WAL; tested with mongosh against the WAL engine. |
 | No transactions | 6 | MVCC + transaction manager needed. |
 | Indexes are metadata only | 7 | B-Tree + Hash + auto-maintain needed. |
 | No replication | 8 | Oplog + replica sets needed. |
@@ -323,7 +365,7 @@ _Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
               │                               │
 ┌─────────────▼─────────────┐ ┌──────────────▼──────────────┐
 │     Query Engine (Phase 4)│ │   Aggregation Pipeline       │
-│  DataFusion SQL parsing +  │ │  (Phase 5+) $match,$group,   │
+│  DataFusion SQL parsing +  │ │  (Phase 5.5) $match,$group,  │
 │  execution against storage │ │  $project,$sort,$limit...    │
 └─────────────┬──────────────┘ └──────────────┬──────────────┘
               │                               │
