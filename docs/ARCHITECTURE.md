@@ -166,29 +166,46 @@ Rust concurrency, memory management, and storage engine design.
 
 #### 4.3.5 MVCC + Transactions (Phase 9)
 
-- **MVCC:** Each document version gets a timestamp/LSN. Snapshot reads see
-  the database as of a point in time. Garbage collection of old versions.
-- **Transactions:** `beginTransaction`, `commit`, `abort` commands.
-  Atomicity via WAL + MVCC. Consistency via optional schema validation.
-  Isolation levels: Read Uncommitted, Read Committed, Repeatable Read,
-  Snapshot, Serializable.
-- **Conflict Detection:** Write-write conflicts abort the later transaction.
-- **Timeout Enforcement:** Automatic transaction abort on timeout.
+- **MVCC:** The page holds the latest committed document. An in-memory
+  chain keeps older images, each stamped with the LSN that replaced it.
+  A snapshot reads the image that was current at its LSN. Garbage
+  collection drops an image once every open snapshot is past it.
+  Restart drops the chains: no snapshot is still open.
+- **Transactions:** `beginTransaction`, `commit`, and `abort`, routed to
+  the partition that owns the named collection. Writes stay in the
+  transaction until commit, which appends one WAL record and then
+  dirties pages. Abort discards the writes.
+- **Isolation:** Read Uncommitted, Read Committed, Repeatable Read,
+  Snapshot, and Serializable. Write-write conflicts abort the later
+  transaction. Serializable also aborts when a document it read was
+  committed by someone else.
+- **Consistency:** `collMod` can attach a validator (`required` fields
+  and `bsonType`). Insert and update reject a document that fails it,
+  before the WAL record is written.
+- **Timeout:** `timeoutMs` aborts the transaction on its next statement.
+  `0` expires it immediately.
 
 ### 4.4 Indexing Subsystem (Phase 10)
 
-- **B-Tree Indexes:** Ordered indexes for range queries + composite key support.
-- **Hash Indexes:** O(1) exact-match lookups.
-- **Unique Constraints:** Enforce uniqueness across indexed fields.
-- **Sparse Indexes:** Skip documents missing the indexed field.
-- **Full-Text Indexes (Tantivy):** Already integrated (Phase 3/4). The
-  index manager creates, drops, and auto-maintains full-text indexes
-  alongside other index types.
-- **Index Manager:** Creates, drops, and auto-maintains indexes. Indexes are
-  updated on insert/update/delete. Index metadata stored in disk storage.
-- **Query Planner Integration:** The query planner (Phase 5 + DataFusion)
-  consults the index manager to choose the best strategy: ID lookup → index
-  scan → collection scan. `explain` plans show the chosen strategy.
+Document pages stay the database. Each secondary index is an in-memory
+B-tree or hash, rebuilt at startup by scanning pages through the buffer
+pool. The catalog page stores the index spec. Entries point at the
+document id. The fetch reads pages and keeps the ids the index named,
+because an update can move a document between pages.
+
+- **B-Tree:** an equality prefix and one range on the next field. Keys
+  are ascending. `10` and `10.0` share a key.
+- **Hash:** `{ field: "hashed" }`, exact match on that one field.
+- **Unique:** checked on a copy before the WAL append. A collision
+  returns an error containing `duplicate` and does not write.
+- **Sparse:** documents missing an indexed field are omitted from that
+  index.
+- **Full-text:** Tantivy, maintained on insert, update, and delete.
+  A `"text"` key in `createIndexes` is rejected.
+- **Planner:** `_id` equality is `IDHACK`, a covered predicate is
+  `IXSCAN`, and the rest is `COLLSCAN`. `explain` reports that stage.
+  Reads inside an open transaction stay on the snapshot. A SQL `WHERE`
+  of one comparison uses the same choice before DataFusion runs.
 
 ### 4.5 Replication (Phase 11)
 

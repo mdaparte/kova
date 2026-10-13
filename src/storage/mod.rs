@@ -22,7 +22,9 @@ mod crc;
 mod disk;
 mod engine;
 mod heap;
+mod mvcc;
 mod page;
+mod transaction;
 mod wal;
 
 use std::sync::Arc;
@@ -33,11 +35,14 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use tokio::sync::oneshot;
 
 use crate::config::StorageConfig;
+use crate::index::{Access, IndexManager};
 use crate::logger::LOGGER;
 use crate::search::SearchIndex;
 use crate::types::{CommandEnvelope, DecaySpec, PartitionCommand, PartitionResult};
 
 use self::engine::StorageEngine;
+use self::mvcc::{validate_document, VersionStore};
+use self::transaction::{TransactionManager, View, Write};
 use self::wal::WalOp;
 
 /// A single-threaded storage worker.
@@ -59,6 +64,15 @@ pub struct PartitionWorker {
     /// How many partitions the router spawned. `$lookup` uses it to
     /// decide whether the foreign collection lives on this worker.
     partition_count: usize,
+    /// Older committed images that an open snapshot can still read.
+    versions: VersionStore,
+    /// Writes that have not been committed. One partition thread, so
+    /// this map needs no lock.
+    transactions: TransactionManager,
+    /// B-tree and hash indexes. Rebuilt from document pages at startup,
+    /// then updated on every committed write. The catalog remembers
+    /// which indexes exist.
+    indexes: IndexManager,
 }
 
 impl PartitionWorker {
@@ -80,11 +94,20 @@ impl PartitionWorker {
             index: SearchIndex::new(),
             engine,
             partition_count,
+            versions: VersionStore::new(),
+            transactions: TransactionManager::new(),
+            indexes: IndexManager::new(),
         };
         // Replay before building the search index so tokenization sees
         // the pages after the WAL tail, and each document is indexed once.
         for record in pending {
-            let result = worker.apply_recorded(record.op.into_command(), false);
+            let result = record
+                .op
+                .into_commands()
+                .into_iter()
+                .map(|command| worker.apply_recorded(command, false))
+                .find(|result| matches!(result, PartitionResult::Error { .. }))
+                .unwrap_or(PartitionResult::Created);
             if let PartitionResult::Error { message } = result {
                 LOGGER.warn(format!(
                     "partition {} skipped WAL lsn {} during recovery: {}",
@@ -158,6 +181,15 @@ impl PartitionWorker {
     /// Appends a mutating command to the WAL, applies it to pages, and
     /// checkpoints when the log has grown past the configured threshold.
     fn execute(&mut self, mut command: PartitionCommand) -> PartitionResult {
+        if matches!(
+            command,
+            PartitionCommand::BeginTransaction { .. }
+                | PartitionCommand::CommitTransaction { .. }
+                | PartitionCommand::AbortTransaction { .. }
+                | PartitionCommand::Transactional { .. }
+        ) {
+            return self.execute_transaction(command);
+        }
         // An insert without `_id` gets one before the WAL record is
         // written. Replay then sees the same id and does not store a
         // second copy. Two identical documents from the client stay
@@ -168,6 +200,16 @@ impl PartitionWorker {
                     document.insert("_id", bson::Bson::ObjectId(bson::oid::ObjectId::new()));
                 }
             }
+        }
+        if let Err(message) = self.screen_schema(&command) {
+            return PartitionResult::Error { message };
+        }
+        let images = match self.committed_images(&command) {
+            Ok(images) => images,
+            Err(message) => return PartitionResult::Error { message },
+        };
+        if let Err(message) = self.guard_indexes(&command, &images) {
+            return PartitionResult::Error { message };
         }
         let appended = if let Some(op) = WalOp::from_command(&command) {
             if let Err(message) = self.engine.append(&op) {
@@ -181,8 +223,13 @@ impl PartitionWorker {
         } else {
             false
         };
+        let lsn = self.engine.last_lsn();
 
         let result = self.apply_recorded(command, true);
+        if appended && !matches!(result, PartitionResult::Error { .. }) {
+            self.observe_committed(&images, lsn);
+            self.sync_indexes(&images);
+        }
 
         if appended && self.engine.should_checkpoint() {
             if let Err(message) = self.write_checkpoint() {
@@ -230,7 +277,7 @@ impl PartitionWorker {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
                 }
-                let documents = match self.engine.find_documents(&collection, &filter) {
+                let documents = match self.planned_documents(&collection, &filter) {
                     Ok(documents) => documents,
                     Err(message) => return PartitionResult::Error { message },
                 };
@@ -256,7 +303,13 @@ impl PartitionWorker {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
                 }
-                match self.engine.count_documents(&collection, &filter) {
+                let count = match self.indexes.access(&collection, &filter) {
+                    Access::Collection => self.engine.count_documents(&collection, &filter),
+                    Access::Id { .. } | Access::Index { .. } => self
+                        .planned_documents(&collection, &filter)
+                        .map(|documents| documents.len() as u64),
+                };
+                match count {
                     Ok(count) => PartitionResult::Counted { count },
                     Err(message) => PartitionResult::Error { message },
                 }
@@ -301,6 +354,7 @@ impl PartitionWorker {
                     return PartitionResult::Error { message };
                 }
                 if touch_index {
+                    self.indexes.drop_collection(&collection);
                     if let Err(err) = self.index.remove_collection(&collection) {
                         LOGGER.warn(format!(
                             "Failed to drop collection {} from index: {}",
@@ -321,6 +375,7 @@ impl PartitionWorker {
                     Err(message) => return PartitionResult::Error { message },
                 };
                 if touch_index {
+                    self.indexes.drop_database(&database);
                     for key in &doomed {
                         if let Err(err) = self.index.remove_collection(key) {
                             LOGGER.warn(format!(
@@ -374,41 +429,69 @@ impl PartitionWorker {
                 // this: it declares indexes at start-up, long before
                 // the first insert.
                 let created_collection = self.engine.ensure_collection(&collection);
-                let mut declared = self.engine.index_specs(&collection).unwrap_or_default();
+                let previous = self.engine.index_specs(&collection).unwrap_or_default();
+                let mut declared = previous.clone();
                 let num_indexes_before = declared.len() as u32 + 1;
-
-                for index in indexes {
-                    // MongoDB keys declarations by name; re-declaring
-                    // an existing name replaces it *in place* so the
-                    // listing keeps a stable order.
-                    let name = index
-                        .get_str("name")
-                        .ok()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("kova_index_{}", declared.len()));
-
-                    let mut spec = index;
-                    spec.insert("name", name.clone());
-                    // Version 2 is what modern MongoDB reports for
-                    // freshly created indexes; drivers check it.
-                    spec.entry("v".to_string()).or_insert(bson::Bson::Int32(2));
-
-                    match declared
-                        .iter()
-                        .position(|existing| existing.get_str("name") == Ok(name.as_str()))
-                    {
-                        Some(position) => declared[position] = spec,
-                        None => declared.push(spec),
-                    }
-                }
-
+                merge_index_specs(&mut declared, &indexes);
                 let num_indexes_after = declared.len() as u32 + 1;
                 self.engine.set_indexes(&collection, declared);
+                if touch_index {
+                    if let Err(message) = self.install_indexes(&collection) {
+                        self.engine.set_indexes(&collection, previous);
+                        let _ = self.install_indexes(&collection);
+                        return PartitionResult::Error { message };
+                    }
+                }
                 PartitionResult::IndexesCreated {
                     num_indexes_before,
                     num_indexes_after,
                     created_collection,
                 }
+            }
+
+            PartitionCommand::DropIndexes { collection, index } => {
+                if !self.engine.contains_collection(&collection) {
+                    return PartitionResult::Error {
+                        message: format!("ns not found: {}", collection),
+                    };
+                }
+                if index == "_id_" {
+                    return PartitionResult::Error {
+                        message: "cannot drop the _id index".into(),
+                    };
+                }
+                let mut declared = self.engine.index_specs(&collection).unwrap_or_default();
+                let n_indexes_was = declared.len() as u32 + 1;
+                if index == "*" {
+                    declared.clear();
+                } else {
+                    let before = declared.len();
+                    declared.retain(|spec| spec.get_str("name") != Ok(index.as_str()));
+                    if declared.len() == before {
+                        return PartitionResult::Error {
+                            message: format!("index not found: {index}"),
+                        };
+                    }
+                }
+                self.engine.set_indexes(&collection, declared);
+                if touch_index {
+                    if let Err(message) = self.indexes.drop_index(&collection, &index) {
+                        return PartitionResult::Error { message };
+                    }
+                }
+                PartitionResult::IndexesDropped { n_indexes_was }
+            }
+
+            PartitionCommand::Explain { collection, filter } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
+                let (stage, index_name) = match self.indexes.access(&collection, &filter) {
+                    Access::Id { .. } => ("IDHACK".to_string(), Some("_id_".to_string())),
+                    Access::Index { name, .. } => ("IXSCAN".to_string(), Some(name)),
+                    Access::Collection => ("COLLSCAN".to_string(), None),
+                };
+                PartitionResult::Plan { stage, index_name }
             }
 
             PartitionCommand::ListCollections { database, filter } => {
@@ -601,6 +684,26 @@ impl PartitionWorker {
                 }
             }
 
+            PartitionCommand::CollMod {
+                collection,
+                validator,
+            } => {
+                if !self.engine.contains_collection(&collection) {
+                    return PartitionResult::Error {
+                        message: format!("ns not found: {collection}"),
+                    };
+                }
+                self.engine.set_validator(&collection, validator);
+                PartitionResult::Created
+            }
+
+            PartitionCommand::BeginTransaction { .. }
+            | PartitionCommand::CommitTransaction { .. }
+            | PartitionCommand::AbortTransaction { .. }
+            | PartitionCommand::Transactional { .. } => PartitionResult::Error {
+                message: "transaction command reached the page apply path".into(),
+            },
+
             PartitionCommand::Delete {
                 collection,
                 filter,
@@ -642,7 +745,7 @@ impl PartitionWorker {
             Ok(split) => split,
             Err(message) => return PartitionResult::Error { message },
         };
-        let input = match self.engine.find_documents(collection, &filter) {
+        let input = match self.planned_documents(collection, &filter) {
             Ok(input) => input,
             Err(message) => return PartitionResult::Error { message },
         };
@@ -675,11 +778,17 @@ impl PartitionWorker {
         }
     }
 
-    /// Rebuilds the Tantivy index by scanning pages one at a time.
+    /// Rebuilds Tantivy and the secondary indexes by scanning pages.
     ///
-    /// The search index lives in RAM. Pages store the documents, not
-    /// the postings, so every startup tokenizes them again.
+    /// Both structures live in RAM. Pages store the documents, and the
+    /// catalog stores which indexes exist, so every startup walks the
+    /// pages once for each structure.
     fn reindex_all(&mut self) -> Result<(), String> {
+        self.indexes = IndexManager::new();
+        for name in self.engine.names() {
+            let specs = self.engine.index_specs(&name).unwrap_or_default();
+            self.indexes.declare(&name, &specs)?;
+        }
         let index = &mut self.index;
         self.engine.for_each_document(|collection, document| {
             let id = document_id_string(document);
@@ -687,12 +796,808 @@ impl PartitionWorker {
             if let Err(err) = index.add(collection, &id, &fields) {
                 LOGGER.warn(format!("Failed to index document {}: {}", id, err));
             }
+        })?;
+        let indexes = &mut self.indexes;
+        self.engine.for_each_document(|collection, document| {
+            let id = document_id_string(document);
+            if let Err(err) = indexes.insert(collection, &id, document) {
+                LOGGER.warn(format!(
+                    "Failed to update secondary index for {}: {}",
+                    id, err
+                ));
+            }
         })
+    }
+
+    /// Runs `beginTransaction`, `commit`, `abort`, or a statement that
+    /// belongs to an open transaction. Nothing here is written to a
+    /// page until commit.
+    fn execute_transaction(&mut self, command: PartitionCommand) -> PartitionResult {
+        match command {
+            PartitionCommand::BeginTransaction {
+                txn_id,
+                isolation,
+                timeout_ms,
+                ..
+            } => {
+                let parsed = match transaction::Isolation::parse(&isolation) {
+                    Ok(parsed) => parsed,
+                    Err(message) => return PartitionResult::Error { message },
+                };
+                match self
+                    .transactions
+                    .begin(txn_id, parsed, timeout_ms, self.engine.last_lsn())
+                {
+                    Ok(txn_id) => {
+                        LOGGER.info(format!(
+                            "partition {} transaction {} begin isolation {}",
+                            self.id, txn_id, isolation
+                        ));
+                        PartitionResult::Transaction { txn_id }
+                    }
+                    Err(message) => PartitionResult::Error { message },
+                }
+            }
+            PartitionCommand::CommitTransaction { txn_id, .. } => {
+                let writes = match self.transactions.commit(txn_id, &self.versions) {
+                    Ok(writes) => writes,
+                    Err(message) => {
+                        LOGGER.warn(format!("partition {} {}", self.id, message));
+                        self.versions.gc(self.transactions.oldest_snapshot());
+                        return PartitionResult::Error { message };
+                    }
+                };
+                if let Err(message) = self.apply_commit(&writes) {
+                    LOGGER.error(format!(
+                        "partition {} transaction {} commit failed: {}",
+                        self.id, txn_id, message
+                    ));
+                    return PartitionResult::Error { message };
+                }
+                LOGGER.info(format!(
+                    "partition {} transaction {} commit",
+                    self.id, txn_id
+                ));
+                PartitionResult::Transaction { txn_id }
+            }
+            PartitionCommand::AbortTransaction { txn_id, .. } => {
+                match self.transactions.abort(txn_id) {
+                    Ok(()) => {
+                        LOGGER.info(format!(
+                            "partition {} transaction {} abort",
+                            self.id, txn_id
+                        ));
+                        self.versions.gc(self.transactions.oldest_snapshot());
+                        PartitionResult::Transaction { txn_id }
+                    }
+                    Err(message) => PartitionResult::Error { message },
+                }
+            }
+            PartitionCommand::Transactional { txn_id, inner } => {
+                self.in_transaction(txn_id, *inner)
+            }
+            _ => PartitionResult::Error {
+                message: "transaction command reached the wrong path".into(),
+            },
+        }
+    }
+
+    /// Appends every staged write as one WAL record, then applies it.
+    fn apply_commit(&mut self, writes: &[Write]) -> Result<(), String> {
+        if writes.is_empty() {
+            self.versions.gc(self.transactions.oldest_snapshot());
+            return Ok(());
+        }
+        self.rehearse_writes(writes)?;
+        let ops = writes.iter().map(wal_op_for).collect::<Vec<_>>();
+        self.engine.append(&WalOp::Transaction { ops })?;
+        let lsn = self.engine.last_lsn();
+        for write in writes {
+            let result = self.apply_recorded(command_for(write), true);
+            if let PartitionResult::Error { message } = result {
+                return Err(message);
+            }
+        }
+        for write in writes {
+            self.versions.note(
+                &write.collection,
+                &write.id,
+                lsn,
+                write.page_previous.clone(),
+                write.after.is_none(),
+            );
+            if let Some(previous) = &write.page_previous {
+                self.indexes.remove(&write.collection, &write.id, previous);
+            }
+            if let Some(after) = &write.after {
+                self.indexes.insert(&write.collection, &write.id, after)?;
+            }
+        }
+        self.versions.gc(self.transactions.oldest_snapshot());
+        if self.engine.should_checkpoint() {
+            self.write_checkpoint()?;
+        }
+        Ok(())
+    }
+
+    fn in_transaction(&mut self, txn_id: u64, command: PartitionCommand) -> PartitionResult {
+        match command {
+            PartitionCommand::Insert {
+                collection,
+                mut documents,
+            } => {
+                for document in &mut documents {
+                    if document.get("_id").is_none() {
+                        document.insert("_id", bson::Bson::ObjectId(bson::oid::ObjectId::new()));
+                    }
+                }
+                if let Err(message) = self.validate_docs(&collection, &documents) {
+                    return PartitionResult::Error { message };
+                }
+                let mut view = match self.collection_view(txn_id, &collection) {
+                    Ok(view) => view,
+                    Err(message) => return PartitionResult::Error { message },
+                };
+                let mut inserted = 0u32;
+                for document in documents {
+                    let id = document_id_string(&document);
+                    if view
+                        .iter()
+                        .any(|existing| document_id_string(existing) == id)
+                    {
+                        continue;
+                    }
+                    let staged = self.stage_write(txn_id, &collection, &id, Some(document.clone()));
+                    if let Err(message) = staged {
+                        return PartitionResult::Error { message };
+                    }
+                    view.push(document);
+                    inserted += 1;
+                }
+                PartitionResult::Inserted {
+                    inserted_count: inserted,
+                }
+            }
+            PartitionCommand::Find {
+                collection,
+                filter,
+                projection,
+                sort,
+                skip,
+                limit,
+            } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
+                let documents = match self.matching(txn_id, &collection, &filter) {
+                    Ok(documents) => documents,
+                    Err(message) => return PartitionResult::Error { message },
+                };
+                match aggregate::apply_view(
+                    documents,
+                    projection.as_ref(),
+                    sort.as_ref(),
+                    skip,
+                    limit,
+                ) {
+                    Ok(documents) => PartitionResult::Found { documents },
+                    Err(message) => PartitionResult::Error { message },
+                }
+            }
+            PartitionCommand::Count { collection, filter } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
+                match self.matching(txn_id, &collection, &filter) {
+                    Ok(documents) => PartitionResult::Counted {
+                        count: documents.len() as u64,
+                    },
+                    Err(message) => PartitionResult::Error { message },
+                }
+            }
+            PartitionCommand::Update {
+                collection,
+                filter,
+                update,
+                multi,
+            } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
+                if let Err(message) = validate_update(&update) {
+                    return PartitionResult::Error { message };
+                }
+                let view = match self.collection_view(txn_id, &collection) {
+                    Ok(view) => view,
+                    Err(message) => return PartitionResult::Error { message },
+                };
+                let mut matched = 0u32;
+                let mut modified = 0u32;
+                for document in view {
+                    if !document_matches(&document, &filter) {
+                        continue;
+                    }
+                    matched += 1;
+                    let mut updated = document.clone();
+                    if let Err(message) = apply_update(&mut updated, &update) {
+                        return PartitionResult::Error { message };
+                    }
+                    if let Err(message) = self.validate_docs(&collection, &[updated.clone()]) {
+                        return PartitionResult::Error { message };
+                    }
+                    let id = document_id_string(&document);
+                    if let Err(message) = self.stage_write(txn_id, &collection, &id, Some(updated))
+                    {
+                        return PartitionResult::Error { message };
+                    }
+                    modified += 1;
+                    if !multi {
+                        break;
+                    }
+                }
+                PartitionResult::Modified {
+                    matched_count: matched,
+                    modified_count: modified,
+                }
+            }
+            PartitionCommand::Delete {
+                collection,
+                filter,
+                limit,
+            } => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
+                let view = match self.collection_view(txn_id, &collection) {
+                    Ok(view) => view,
+                    Err(message) => return PartitionResult::Error { message },
+                };
+                let mut deleted = 0u32;
+                for document in view {
+                    if limit > 0 && deleted >= limit {
+                        break;
+                    }
+                    if !document_matches(&document, &filter) {
+                        continue;
+                    }
+                    let id = document_id_string(&document);
+                    if let Err(message) = self.stage_write(txn_id, &collection, &id, None) {
+                        return PartitionResult::Error { message };
+                    }
+                    deleted += 1;
+                }
+                PartitionResult::Deleted {
+                    deleted_count: deleted,
+                }
+            }
+            PartitionCommand::Aggregate {
+                collection,
+                pipeline,
+                resolved,
+            } => self.aggregate_in_transaction(txn_id, &collection, &pipeline, &resolved),
+            _ => PartitionResult::Error {
+                message: "this command cannot run inside a transaction".into(),
+            },
+        }
+    }
+
+    fn aggregate_in_transaction(
+        &mut self,
+        txn_id: u64,
+        collection: &str,
+        pipeline: &[Document],
+        resolved: &[(String, Vec<Document>)],
+    ) -> PartitionResult {
+        if pipeline.iter().any(|stage| stage.contains_key("$out")) {
+            return PartitionResult::Error {
+                message: "$out is not allowed inside a transaction".into(),
+            };
+        }
+        let documents = match self.collection_view(txn_id, collection) {
+            Ok(documents) => documents,
+            Err(message) => return PartitionResult::Error { message },
+        };
+        for document in &documents {
+            let id = document_id_string(document);
+            let lsn = self.base_lsn(txn_id, collection, &id);
+            self.transactions.note_read(txn_id, collection, &id, lsn);
+        }
+        let id = self.id;
+        let partitions = self.partition_count.max(1);
+        let outcome = aggregate::run(documents, pipeline, &mut |namespace| {
+            if let Some((_, documents)) = resolved.iter().find(|(name, _)| name == namespace) {
+                return Ok(aggregate::Foreign::Ready(documents.clone()));
+            }
+            let owner = (fnv1a(namespace.as_bytes()) % partitions as u64) as usize;
+            if owner == id {
+                let documents = self.collection_view(txn_id, namespace)?;
+                return Ok(aggregate::Foreign::Ready(documents));
+            }
+            Ok(aggregate::Foreign::Remote)
+        });
+        match outcome {
+            Ok(aggregate::Output::Docs(documents)) => PartitionResult::Found { documents },
+            Ok(aggregate::Output::Remote { namespace }) => {
+                PartitionResult::NeedForeign { namespace }
+            }
+            Ok(aggregate::Output::Out { .. }) => PartitionResult::Error {
+                message: "$out is not allowed inside a transaction".into(),
+            },
+            Err(message) => PartitionResult::Error { message },
+        }
+    }
+
+    /// Documents the statement is allowed to see, including its own writes.
+    fn collection_view(&mut self, txn_id: u64, collection: &str) -> Result<Vec<Document>, String> {
+        let now = self.engine.last_lsn();
+        let view = self.transactions.view(txn_id, now)?;
+        let pages = self.engine.find_documents(collection, &doc! {})?;
+        let mut rows: Vec<(String, Document)> = Vec::new();
+        match view {
+            View::Dirty => {
+                for document in pages {
+                    rows.push((document_id_string(&document), document));
+                }
+                for (id, after) in self.transactions.dirty_writes(txn_id, collection) {
+                    overlay(&mut rows, id, after);
+                }
+            }
+            View::Snapshot { lsn } => {
+                for document in pages {
+                    let id = document_id_string(&document);
+                    if let Some(visible) =
+                        self.versions.visible(collection, &id, lsn, Some(&document))
+                    {
+                        rows.push((id, visible));
+                    }
+                }
+                for ghost in self.versions.ghosts(collection, lsn) {
+                    let id = document_id_string(&ghost);
+                    if rows.iter().all(|(seen, _)| seen != &id) {
+                        rows.push((id, ghost));
+                    }
+                }
+            }
+        }
+        for (id, after) in self.transactions.own_writes(txn_id, collection) {
+            overlay(&mut rows, id, after);
+        }
+        Ok(rows.into_iter().map(|(_, document)| document).collect())
+    }
+
+    /// Filter matches, recorded for serializable validation.
+    fn matching(
+        &mut self,
+        txn_id: u64,
+        collection: &str,
+        filter: &Document,
+    ) -> Result<Vec<Document>, String> {
+        let documents = self.collection_view(txn_id, collection)?;
+        let matched: Vec<Document> = documents
+            .into_iter()
+            .filter(|document| document_matches(document, filter))
+            .collect();
+        for document in &matched {
+            let id = document_id_string(document);
+            let lsn = self.base_lsn(txn_id, collection, &id);
+            self.transactions.note_read(txn_id, collection, &id, lsn);
+        }
+        Ok(matched)
+    }
+
+    fn stage_write(
+        &mut self,
+        txn_id: u64,
+        collection: &str,
+        id: &str,
+        after: Option<Document>,
+    ) -> Result<(), String> {
+        let base_lsn = self.base_lsn(txn_id, collection, id);
+        self.transactions
+            .note_read(txn_id, collection, id, base_lsn);
+        let page_previous = self.engine.find_by_id(collection, id)?;
+        self.transactions.stage(
+            txn_id,
+            Write {
+                collection: collection.to_string(),
+                id: id.to_string(),
+                base_lsn,
+                page_previous,
+                after,
+            },
+        )
+    }
+
+    fn base_lsn(&mut self, txn_id: u64, collection: &str, id: &str) -> u64 {
+        let now = self.engine.last_lsn();
+        let snapshot = match self.transactions.view(txn_id, now) {
+            Ok(View::Snapshot { lsn }) => lsn,
+            _ => now,
+        };
+        self.versions.visible_lsn(collection, id, snapshot)
+    }
+
+    fn validate_docs(&self, collection: &str, documents: &[Document]) -> Result<(), String> {
+        let Some(schema) = self.engine.validator(collection) else {
+            return Ok(());
+        };
+        for document in documents {
+            validate_document(document, &schema)?;
+        }
+        Ok(())
+    }
+
+    /// Rejects an auto-commit write that breaks the collection validator.
+    /// The check runs before the WAL append.
+    fn screen_schema(&mut self, command: &PartitionCommand) -> Result<(), String> {
+        match command {
+            PartitionCommand::Insert {
+                collection,
+                documents,
+            } => self.validate_docs(collection, documents),
+            PartitionCommand::Update {
+                collection,
+                filter,
+                update,
+                multi,
+            } => {
+                let Some(schema) = self.engine.validator(collection) else {
+                    return Ok(());
+                };
+                let mut documents = self.engine.find_documents(collection, filter)?;
+                if !multi {
+                    documents.truncate(1);
+                }
+                for document in &mut documents {
+                    apply_update(document, update)?;
+                    validate_document(document, &schema)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Images that an auto-commit is about to replace. Captured before
+    /// the page changes so a snapshot taken earlier can still read them.
+    fn committed_images(
+        &mut self,
+        command: &PartitionCommand,
+    ) -> Result<Vec<CommittedImage>, String> {
+        match command {
+            PartitionCommand::Insert {
+                collection,
+                documents,
+            } => {
+                let mut images = Vec::new();
+                for document in documents {
+                    let id = document_id_string(document);
+                    if self.engine.find_by_id(collection, &id)?.is_some() {
+                        continue;
+                    }
+                    images.push(CommittedImage {
+                        collection: collection.clone(),
+                        id,
+                        previous: None,
+                        after: Some(document.clone()),
+                        deleted: false,
+                    });
+                }
+                Ok(images)
+            }
+            PartitionCommand::Update {
+                collection,
+                filter,
+                update,
+                multi,
+            } => {
+                let mut documents = self.engine.find_documents(collection, filter)?;
+                if !multi {
+                    documents.truncate(1);
+                }
+                let mut images = Vec::new();
+                for document in documents {
+                    let id = document_id_string(&document);
+                    let mut after = document.clone();
+                    apply_update(&mut after, update)?;
+                    images.push(CommittedImage {
+                        collection: collection.clone(),
+                        id,
+                        previous: Some(document),
+                        after: Some(after),
+                        deleted: false,
+                    });
+                }
+                Ok(images)
+            }
+            PartitionCommand::Delete {
+                collection,
+                filter,
+                limit,
+            } => {
+                let mut documents = self.engine.find_documents(collection, filter)?;
+                if *limit > 0 {
+                    documents.truncate(*limit as usize);
+                }
+                Ok(images_of(collection, documents, true))
+            }
+            PartitionCommand::Drop { collection } => {
+                let documents = self.engine.find_documents(collection, &doc! {})?;
+                Ok(images_of(collection, documents, true))
+            }
+            PartitionCommand::DropDatabase { database } => {
+                let prefix = format!("{database}.");
+                let names = self.engine.names();
+                let mut images = Vec::new();
+                for name in names {
+                    let owned =
+                        name.starts_with(&prefix) || (database == "test" && !name.contains('.'));
+                    if !owned {
+                        continue;
+                    }
+                    let documents = self.engine.find_documents(&name, &doc! {})?;
+                    images.extend(images_of(&name, documents, true));
+                }
+                Ok(images)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn observe_committed(&mut self, images: &[CommittedImage], lsn: u64) {
+        for image in images {
+            self.versions.note(
+                &image.collection,
+                &image.id,
+                lsn,
+                image.previous.clone(),
+                image.deleted,
+            );
+        }
+        self.versions.gc(self.transactions.oldest_snapshot());
     }
 
     /// Flushes dirty pages and truncates the WAL they cover.
     fn write_checkpoint(&mut self) -> Result<(), String> {
         self.engine.checkpoint_pages()
+    }
+
+    /// Rejects a unique violation before the WAL is appended.
+    fn guard_indexes(
+        &mut self,
+        command: &PartitionCommand,
+        images: &[CommittedImage],
+    ) -> Result<(), String> {
+        self.rehearse_images(images)?;
+        self.preview_indexes(command)
+    }
+
+    fn rehearse_images(&self, images: &[CommittedImage]) -> Result<(), String> {
+        let mut grouped: std::collections::HashMap<
+            String,
+            Vec<(String, Option<Document>, Option<Document>)>,
+        > = std::collections::HashMap::new();
+        for image in images {
+            grouped.entry(image.collection.clone()).or_default().push((
+                image.id.clone(),
+                image.previous.clone(),
+                image.after.clone(),
+            ));
+        }
+        for (collection, changes) in grouped {
+            self.indexes.rehearse(&collection, &changes)?;
+        }
+        Ok(())
+    }
+
+    fn rehearse_writes(&self, writes: &[Write]) -> Result<(), String> {
+        let mut grouped: std::collections::HashMap<
+            String,
+            Vec<(String, Option<Document>, Option<Document>)>,
+        > = std::collections::HashMap::new();
+        for write in writes {
+            grouped.entry(write.collection.clone()).or_default().push((
+                write.id.clone(),
+                write.page_previous.clone(),
+                write.after.clone(),
+            ));
+        }
+        for (collection, changes) in grouped {
+            self.indexes.rehearse(&collection, &changes)?;
+        }
+        Ok(())
+    }
+
+    fn preview_indexes(&mut self, command: &PartitionCommand) -> Result<(), String> {
+        let PartitionCommand::CreateIndexes {
+            collection,
+            indexes,
+        } = command
+        else {
+            return Ok(());
+        };
+        let mut declared = self.engine.index_specs(collection).unwrap_or_default();
+        merge_index_specs(&mut declared, indexes);
+        let documents = self.engine.find_documents(collection, &doc! {})?;
+        let pairs = documents
+            .into_iter()
+            .map(|document| (document_id_string(&document), document))
+            .collect::<Vec<_>>();
+        self.indexes.preview(collection, &declared, &pairs)
+    }
+
+    fn install_indexes(&mut self, collection: &str) -> Result<(), String> {
+        let specs = self.engine.index_specs(collection).unwrap_or_default();
+        let documents = self.engine.find_documents(collection, &doc! {})?;
+        let pairs = documents
+            .into_iter()
+            .map(|document| (document_id_string(&document), document))
+            .collect::<Vec<_>>();
+        self.indexes.declare(collection, &specs)?;
+        self.indexes.rebuild(collection, &pairs)
+    }
+
+    fn sync_indexes(&mut self, images: &[CommittedImage]) {
+        for image in images {
+            if let Some(previous) = &image.previous {
+                self.indexes.remove(&image.collection, &image.id, previous);
+            }
+            if let Some(after) = &image.after {
+                if let Err(message) = self.indexes.insert(&image.collection, &image.id, after) {
+                    LOGGER.warn(format!(
+                        "partition {} index update for {} failed: {}",
+                        self.id, image.id, message
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Reads through the index when one covers `filter`.
+    ///
+    /// An id lookup and an index scan still read pages. The index only
+    /// chooses which ids to keep. A transaction snapshot does not use
+    /// this path: it reads the version chain instead.
+    fn planned_documents(
+        &mut self,
+        collection: &str,
+        filter: &Document,
+    ) -> Result<Vec<Document>, String> {
+        match self.indexes.access(collection, filter) {
+            Access::Collection => self.engine.find_documents(collection, filter),
+            Access::Id { id } => {
+                let mut documents = Vec::new();
+                if let Some(document) = self.engine.find_by_id(collection, &id)? {
+                    if document_matches(&document, filter) {
+                        documents.push(document);
+                    }
+                }
+                Ok(documents)
+            }
+            Access::Index { ids, .. } => self.engine.find_ids(collection, &ids, filter),
+        }
+    }
+}
+
+/// A document an auto-commit is about to replace, plus the image it
+/// will leave behind. Captured before the page changes.
+struct CommittedImage {
+    collection: String,
+    id: String,
+    previous: Option<Document>,
+    /// The document after the write. `None` on delete.
+    after: Option<Document>,
+    deleted: bool,
+}
+
+fn merge_index_specs(declared: &mut Vec<Document>, incoming: &[Document]) {
+    for index in incoming {
+        let name = index
+            .get_str("name")
+            .ok()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("kova_index_{}", declared.len()));
+        let mut spec = index.clone();
+        spec.insert("name", name.clone());
+        spec.entry("v".to_string()).or_insert(bson::Bson::Int32(2));
+        match declared
+            .iter()
+            .position(|existing| existing.get_str("name") == Ok(name.as_str()))
+        {
+            Some(position) => declared[position] = spec,
+            None => declared.push(spec),
+        }
+    }
+}
+
+fn images_of(collection: &str, documents: Vec<Document>, deleted: bool) -> Vec<CommittedImage> {
+    documents
+        .into_iter()
+        .map(|document| {
+            let id = document_id_string(&document);
+            CommittedImage {
+                collection: collection.to_string(),
+                id,
+                previous: Some(document),
+                after: None,
+                deleted,
+            }
+        })
+        .collect()
+}
+
+fn overlay(rows: &mut Vec<(String, Document)>, id: String, after: Option<Document>) {
+    if let Some(after) = after {
+        if let Some(slot) = rows.iter_mut().find(|(seen, _)| seen == &id) {
+            *slot = (id, after);
+        } else {
+            rows.push((id, after));
+        }
+    } else {
+        rows.retain(|(seen, _)| seen != &id);
+    }
+}
+
+fn id_filter(document: &Document) -> Document {
+    match document.get("_id") {
+        Some(id) => doc! { "_id": id.clone() },
+        None => doc! {},
+    }
+}
+
+fn wal_op_for(write: &Write) -> WalOp {
+    match &write.after {
+        Some(after) if write.page_previous.is_none() => WalOp::Insert {
+            collection: write.collection.clone(),
+            documents: vec![after.clone()],
+        },
+        Some(after) => WalOp::Update {
+            collection: write.collection.clone(),
+            filter: id_filter(after),
+            update: after.clone(),
+            multi: false,
+        },
+        None => WalOp::Delete {
+            collection: write.collection.clone(),
+            filter: id_filter(write.page_previous.as_ref().unwrap_or(&Document::new())),
+            limit: 1,
+        },
+    }
+}
+
+fn command_for(write: &Write) -> PartitionCommand {
+    match wal_op_for(write) {
+        WalOp::Insert {
+            collection,
+            documents,
+        } => PartitionCommand::Insert {
+            collection,
+            documents,
+        },
+        WalOp::Update {
+            collection,
+            filter,
+            update,
+            multi,
+        } => PartitionCommand::Update {
+            collection,
+            filter,
+            update,
+            multi,
+        },
+        WalOp::Delete {
+            collection,
+            filter,
+            limit,
+        } => PartitionCommand::Delete {
+            collection,
+            filter,
+            limit,
+        },
+        _ => PartitionCommand::Count {
+            collection: write.collection.clone(),
+            filter: doc! {},
+        },
     }
 }
 
@@ -3486,5 +4391,705 @@ mod tests {
         .await;
         let counted = batch_of(&counted);
         assert_eq!(as_number(&counted[0], "departmentsOnPage"), 2.0);
+    }
+
+    fn txn_id(result: PartitionResult) -> u64 {
+        match result {
+            PartitionResult::Transaction { txn_id } => txn_id,
+            other => panic!("expected a transaction id, got {other:?}"),
+        }
+    }
+
+    fn begin(isolation: &str, timeout_ms: Option<u64>) -> PartitionCommand {
+        PartitionCommand::BeginTransaction {
+            collection: "db.emp".into(),
+            txn_id: 0,
+            isolation: isolation.into(),
+            timeout_ms,
+        }
+    }
+
+    async fn sal_of(router: &PartitionRouter, txn: Option<u64>) -> i32 {
+        let find = PartitionCommand::find("db.emp", doc! {});
+        let find = match txn {
+            Some(txn_id) => PartitionCommand::Transactional {
+                txn_id,
+                inner: Box::new(find),
+            },
+            None => find,
+        };
+        let result = dispatch(router, find).await;
+        match result {
+            PartitionResult::Found { documents } => documents[0].get_i32("sal").unwrap(),
+            other => panic!("expected a document, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_hides_later_writes_until_commit() {
+        let router = PartitionRouter::new(1);
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![doc! { "_id": 1, "sal": 800 }],
+            },
+        )
+        .await;
+        let txn = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        dispatch(
+            &router,
+            PartitionCommand::Update {
+                collection: "db.emp".into(),
+                filter: doc! { "_id": 1 },
+                update: doc! { "$set": { "sal": 900 } },
+                multi: false,
+            },
+        )
+        .await;
+        assert_eq!(sal_of(&router, Some(txn)).await, 800);
+        assert_eq!(sal_of(&router, None).await, 900);
+
+        let inserted = dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: txn,
+                inner: Box::new(PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![
+                        doc! { "_id": 2, "name": "A" },
+                        doc! { "_id": 3, "name": "B" },
+                    ],
+                }),
+            },
+        )
+        .await;
+        assert!(matches!(
+            inserted,
+            PartitionResult::Inserted { inserted_count: 2 }
+        ));
+        dispatch(
+            &router,
+            PartitionCommand::AbortTransaction {
+                collection: "db.emp".into(),
+                txn_id: txn,
+            },
+        )
+        .await;
+        match dispatch(&router, PartitionCommand::find("db.emp", doc! {})).await {
+            PartitionResult::Found { documents } => assert_eq!(documents.len(), 1),
+            other => panic!("abort leaked a document: {other:?}"),
+        }
+
+        let txn = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: txn,
+                inner: Box::new(PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "_id": 4, "name": "KEPT" }],
+                }),
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::CommitTransaction {
+                collection: "db.emp".into(),
+                txn_id: txn,
+            },
+        )
+        .await;
+        match dispatch(&router, PartitionCommand::find("db.emp", doc! { "_id": 4 })).await {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents[0].get_str("name").unwrap(), "KEPT")
+            }
+            other => panic!("commit did not publish the insert: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_conflict_aborts_the_later_transaction() {
+        let router = PartitionRouter::new(1);
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![doc! { "_id": 1, "sal": 1 }],
+            },
+        )
+        .await;
+        let first = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        let second = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        let update = |txn_id, sal| PartitionCommand::Transactional {
+            txn_id,
+            inner: Box::new(PartitionCommand::Update {
+                collection: "db.emp".into(),
+                filter: doc! { "_id": 1 },
+                update: doc! { "$set": { "sal": sal } },
+                multi: false,
+            }),
+        };
+        dispatch(&router, update(first, 2)).await;
+        dispatch(&router, update(second, 3)).await;
+        assert!(matches!(
+            dispatch(
+                &router,
+                PartitionCommand::CommitTransaction {
+                    collection: "db.emp".into(),
+                    txn_id: first,
+                },
+            )
+            .await,
+            PartitionResult::Transaction { .. }
+        ));
+        match dispatch(
+            &router,
+            PartitionCommand::CommitTransaction {
+                collection: "db.emp".into(),
+                txn_id: second,
+            },
+        )
+        .await
+        {
+            PartitionResult::Error { message } => {
+                assert!(message.contains("write conflict"), "{message}")
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(sal_of(&router, None).await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_read_committed_sees_the_next_statement() {
+        let router = PartitionRouter::new(1);
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![doc! { "_id": 1, "sal": 1 }],
+            },
+        )
+        .await;
+        let txn = txn_id(dispatch(&router, begin("readCommitted", None)).await);
+        assert_eq!(sal_of(&router, Some(txn)).await, 1);
+        dispatch(
+            &router,
+            PartitionCommand::Update {
+                collection: "db.emp".into(),
+                filter: doc! { "_id": 1 },
+                update: doc! { "$set": { "sal": 9 } },
+                multi: false,
+            },
+        )
+        .await;
+        assert_eq!(sal_of(&router, Some(txn)).await, 9);
+    }
+
+    #[tokio::test]
+    async fn test_serializable_aborts_when_a_read_changes() {
+        let router = PartitionRouter::new(1);
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![doc! { "_id": "a", "n": 1 }, doc! { "_id": "b", "n": 1 }],
+            },
+        )
+        .await;
+        let reader = txn_id(dispatch(&router, begin("serializable", None)).await);
+        dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: reader,
+                inner: Box::new(PartitionCommand::find("db.emp", doc! { "_id": "a" })),
+            },
+        )
+        .await;
+        let writer = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: writer,
+                inner: Box::new(PartitionCommand::Update {
+                    collection: "db.emp".into(),
+                    filter: doc! { "_id": "a" },
+                    update: doc! { "$set": { "n": 2 } },
+                    multi: false,
+                }),
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::CommitTransaction {
+                collection: "db.emp".into(),
+                txn_id: writer,
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: reader,
+                inner: Box::new(PartitionCommand::Update {
+                    collection: "db.emp".into(),
+                    filter: doc! { "_id": "b" },
+                    update: doc! { "$set": { "n": 2 } },
+                    multi: false,
+                }),
+            },
+        )
+        .await;
+        match dispatch(
+            &router,
+            PartitionCommand::CommitTransaction {
+                collection: "db.emp".into(),
+                txn_id: reader,
+            },
+        )
+        .await
+        {
+            PartitionResult::Error { message } => {
+                assert!(message.contains("serialization"), "{message}")
+            }
+            other => panic!("expected a serialization conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_repeatable_read_stays_put_and_read_uncommitted_sees_dirty_writes() {
+        let router = PartitionRouter::new(1);
+        let repeatable = txn_id(dispatch(&router, begin("repeatableRead", None)).await);
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![doc! { "_id": 1, "sal": 1 }],
+            },
+        )
+        .await;
+        assert_eq!(sal_of(&router, Some(repeatable)).await, 1);
+        dispatch(
+            &router,
+            PartitionCommand::Update {
+                collection: "db.emp".into(),
+                filter: doc! { "_id": 1 },
+                update: doc! { "$set": { "sal": 5 } },
+                multi: false,
+            },
+        )
+        .await;
+        assert_eq!(sal_of(&router, Some(repeatable)).await, 1);
+
+        let reader = txn_id(dispatch(&router, begin("readUncommitted", None)).await);
+        let writer = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: writer,
+                inner: Box::new(PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "_id": 2, "sal": 7 }],
+                }),
+            },
+        )
+        .await;
+        match dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: reader,
+                inner: Box::new(PartitionCommand::find("db.emp", doc! { "_id": 2 })),
+            },
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => assert_eq!(documents.len(), 1),
+            other => panic!("read uncommitted missed the dirty insert: {other:?}"),
+        }
+        dispatch(
+            &router,
+            PartitionCommand::AbortTransaction {
+                collection: "db.emp".into(),
+                txn_id: writer,
+            },
+        )
+        .await;
+        match dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: reader,
+                inner: Box::new(PartitionCommand::find("db.emp", doc! { "_id": 2 })),
+            },
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => assert!(documents.is_empty()),
+            other => panic!("aborted write stayed visible: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_timeout_and_validator_reject_the_write() {
+        let router = PartitionRouter::new(1);
+        let txn = txn_id(dispatch(&router, begin("snapshot", Some(0))).await);
+        match dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: txn,
+                inner: Box::new(PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "_id": 1, "ename": "LATE" }],
+                }),
+            },
+        )
+        .await
+        {
+            PartitionResult::Error { message } => assert!(message.contains("timeout"), "{message}"),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+
+        dispatch(
+            &router,
+            PartitionCommand::CreateCollection {
+                collection: "db.emp".into(),
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::CollMod {
+                collection: "db.emp".into(),
+                validator: doc! { "required": ["ename"] },
+            },
+        )
+        .await;
+        match dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![doc! { "_id": 1, "sal": 1 }],
+            },
+        )
+        .await
+        {
+            PartitionResult::Error { message } => assert!(message.contains("ename"), "{message}"),
+            other => panic!("expected a schema error, got {other:?}"),
+        }
+        assert!(matches!(
+            dispatch(
+                &router,
+                PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "_id": 1, "ename": "KING" }],
+                },
+            )
+            .await,
+            PartitionResult::Inserted { inserted_count: 1 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_commit_survives_restart_and_abort_does_not() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, false);
+        {
+            let router = PartitionRouter::with_storage(1, config.clone());
+            let txn = txn_id(dispatch(&router, begin("snapshot", None)).await);
+            dispatch(
+                &router,
+                PartitionCommand::Transactional {
+                    txn_id: txn,
+                    inner: Box::new(PartitionCommand::Insert {
+                        collection: "db.emp".into(),
+                        documents: vec![doc! { "_id": 1, "name": "KEPT" }],
+                    }),
+                },
+            )
+            .await;
+            dispatch(
+                &router,
+                PartitionCommand::CommitTransaction {
+                    collection: "db.emp".into(),
+                    txn_id: txn,
+                },
+            )
+            .await;
+            let txn = txn_id(dispatch(&router, begin("snapshot", None)).await);
+            dispatch(
+                &router,
+                PartitionCommand::Transactional {
+                    txn_id: txn,
+                    inner: Box::new(PartitionCommand::Insert {
+                        collection: "db.emp".into(),
+                        documents: vec![doc! { "_id": 2, "name": "LOST" }],
+                    }),
+                },
+            )
+            .await;
+        }
+
+        let router = PartitionRouter::with_storage(1, config);
+        match dispatch(&router, PartitionCommand::find("db.emp", doc! {})).await {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0].get_str("name").unwrap(), "KEPT");
+            }
+            other => panic!("expected the committed document, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn seed_indexed_emp(router: &PartitionRouter) {
+        dispatch(
+            router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![
+                    doc! { "_id": 1i32, "ename": "SMITH", "job": "CLERK", "sal": 800i32 },
+                    doc! { "_id": 2i32, "ename": "ALLEN", "job": "SALESMAN", "sal": 1600i32 },
+                    doc! { "_id": 3i32, "ename": "KING", "job": "PRESIDENT", "sal": 5000i32 },
+                    doc! { "_id": 4i32, "job": "CLERK" },
+                ],
+            },
+        )
+        .await;
+        let created = dispatch(
+            router,
+            PartitionCommand::CreateIndexes {
+                collection: "db.emp".into(),
+                indexes: vec![
+                    doc! { "name": "sal_1", "key": { "sal": 1i32 } },
+                    doc! { "name": "job_hashed", "key": { "job": "hashed" } },
+                    doc! { "name": "ename_1", "key": { "ename": 1i32 }, "unique": true, "sparse": true },
+                ],
+            },
+        )
+        .await;
+        assert!(
+            matches!(created, PartitionResult::IndexesCreated { .. }),
+            "indexes should build, got {created:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_range_hash_id_and_collection_scan() {
+        let router = router();
+        seed_indexed_emp(&router).await;
+
+        match dispatch(
+            &router,
+            PartitionCommand::find("db.emp", doc! { "sal": { "$gt": 1000i32 } }),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                let mut names: Vec<_> = documents
+                    .iter()
+                    .map(|document| document.get_str("ename").unwrap().to_string())
+                    .collect();
+                names.sort();
+                assert_eq!(names, vec!["ALLEN".to_string(), "KING".to_string()]);
+            }
+            other => panic!("expected the salary range, got {other:?}"),
+        }
+
+        match dispatch(
+            &router,
+            PartitionCommand::find("db.emp", doc! { "job": "CLERK" }),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 2, "the clerk without a name stays");
+            }
+            other => panic!("expected both clerks, got {other:?}"),
+        }
+
+        match dispatch(
+            &router,
+            PartitionCommand::Explain {
+                collection: "db.emp".into(),
+                filter: doc! { "sal": { "$gt": 1000i32 } },
+            },
+        )
+        .await
+        {
+            PartitionResult::Plan { stage, index_name } => {
+                assert_eq!(stage, "IXSCAN");
+                assert_eq!(index_name.as_deref(), Some("sal_1"));
+            }
+            other => panic!("expected an index scan, got {other:?}"),
+        }
+
+        match dispatch(
+            &router,
+            PartitionCommand::Explain {
+                collection: "db.emp".into(),
+                filter: doc! { "_id": 3i32 },
+            },
+        )
+        .await
+        {
+            PartitionResult::Plan { stage, index_name } => {
+                assert_eq!(stage, "IDHACK");
+                assert_eq!(index_name.as_deref(), Some("_id_"));
+            }
+            other => panic!("expected an id lookup, got {other:?}"),
+        }
+
+        match dispatch(
+            &router,
+            PartitionCommand::Explain {
+                collection: "db.emp".into(),
+                filter: doc! { "deptno": 10i32 },
+            },
+        )
+        .await
+        {
+            PartitionResult::Plan { stage, index_name } => {
+                assert_eq!(stage, "COLLSCAN");
+                assert!(index_name.is_none());
+            }
+            other => panic!("expected a collection scan, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unique_index_rejects_a_duplicate_before_the_write() {
+        let router = router();
+        seed_indexed_emp(&router).await;
+        let rejected = dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![doc! { "_id": 5i32, "ename": "SMITH", "sal": 1i32 }],
+            },
+        )
+        .await;
+        match rejected {
+            PartitionResult::Error { message } => {
+                assert!(message.contains("duplicate"), "{message}")
+            }
+            other => panic!("expected a duplicate key, got {other:?}"),
+        }
+        match dispatch(
+            &router,
+            PartitionCommand::find("db.emp", doc! { "ename": "SMITH" }),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => assert_eq!(documents.len(), 1),
+            other => panic!("expected the original SMITH, got {other:?}"),
+        }
+        match dispatch(
+            &router,
+            PartitionCommand::find("db.emp", doc! { "_id": 5i32 }),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => assert!(documents.is_empty()),
+            other => panic!("expected the rejected id to be absent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_and_drop_keep_the_index_honest() {
+        let router = router();
+        seed_indexed_emp(&router).await;
+        dispatch(
+            &router,
+            PartitionCommand::Update {
+                collection: "db.emp".into(),
+                filter: doc! { "ename": "SMITH" },
+                update: doc! { "$set": { "sal": 2000i32 } },
+                multi: false,
+            },
+        )
+        .await;
+        match dispatch(
+            &router,
+            PartitionCommand::find("db.emp", doc! { "sal": { "$gt": 1000i32 } }),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                let mut names: Vec<_> = documents
+                    .iter()
+                    .map(|document| document.get_str("ename").unwrap().to_string())
+                    .collect();
+                names.sort();
+                assert_eq!(
+                    names,
+                    vec!["ALLEN".to_string(), "KING".to_string(), "SMITH".to_string()]
+                );
+            }
+            other => panic!("expected SMITH in the new range, got {other:?}"),
+        }
+
+        let dropped = dispatch(
+            &router,
+            PartitionCommand::DropIndexes {
+                collection: "db.emp".into(),
+                index: "sal_1".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                dropped,
+                PartitionResult::IndexesDropped { n_indexes_was: 4 }
+            ),
+            "got {dropped:?}"
+        );
+        match dispatch(
+            &router,
+            PartitionCommand::Explain {
+                collection: "db.emp".into(),
+                filter: doc! { "sal": { "$gt": 1000i32 } },
+            },
+        )
+        .await
+        {
+            PartitionResult::Plan { stage, .. } => assert_eq!(stage, "COLLSCAN"),
+            other => panic!("expected a collection scan after the drop, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_index_survives_restart() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, true);
+        {
+            let router = PartitionRouter::with_storage(1, config.clone());
+            seed_indexed_emp(&router).await;
+        }
+        let router = PartitionRouter::with_storage(1, config);
+        match dispatch(
+            &router,
+            PartitionCommand::find("db.emp", doc! { "sal": { "$gt": 1000i32 } }),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => assert_eq!(documents.len(), 2),
+            other => panic!("expected the range after restart, got {other:?}"),
+        }
+        match dispatch(
+            &router,
+            PartitionCommand::Explain {
+                collection: "db.emp".into(),
+                filter: doc! { "sal": { "$gt": 1000i32 } },
+            },
+        )
+        .await
+        {
+            PartitionResult::Plan { stage, index_name } => {
+                assert_eq!(stage, "IXSCAN");
+                assert_eq!(index_name.as_deref(), Some("sal_1"));
+            }
+            other => panic!("expected the index after restart, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

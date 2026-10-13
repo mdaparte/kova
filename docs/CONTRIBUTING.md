@@ -168,9 +168,9 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   predicates, projection, sort, skip, limit, update operators, and the
   twelve-stage pipeline, reading pages. ✅ Complete.
 - **Phase 9 — Transactional storage:** MVCC, ACID transactions, multiple
-  isolation levels. ⚪ Planned.
+  isolation levels. ✅ Complete.
 - **Phase 10 — Indexing subsystem:** B-Tree, hash, unique, and sparse indexes,
-  index manager, auto-maintain, query planner integration. ⚪ Planned.
+  rebuilt from document pages and maintained on every write. ✅ Complete.
 - **Phase 11 — Replication and HA:** oplog, replica sets, heartbeat, election,
   read preference. ⚪ Planned.
 - **Phase 12 — On-disk page compression:** zstd on the BSON payload of each

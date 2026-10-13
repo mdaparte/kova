@@ -22,8 +22,8 @@ replication, and multi-model indexing.
 | 6 | Disk Storage Engine (WAL + Buffer Pool + Page Store) | ✅ Complete |
 | 7 | Disk-Resident Collections (pages are the database, RAM is the cache) | ✅ Complete |
 | 8 | Query Language and Aggregation Pipeline | ✅ Complete |
-| 9 | Transactional Storage (MVCC + ACID + Isolation) | ⚪ Planned |
-| 10 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ⚪ Planned |
+| 9 | Transactional Storage (MVCC + ACID + Isolation) | ✅ Complete |
+| 10 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ✅ Complete |
 | 11 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ⚪ Planned |
 | 12 | On-Disk Page Compression (zstd, WiredTiger-style) | ⚪ Planned |
 
@@ -318,10 +318,9 @@ Twelve stages, in any order the command sends:
 
 ### 8.7 Explain
 
-`explain` on a find or an aggregate reports the filter or the pipeline and
-says the read is a collection scan of pages. Choosing an id lookup or an
-index scan is Phase 10, when those indexes exist. Phase 10 extends this
-reply; it does not invent a second explain command.
+`explain` on a find or an aggregate reports the filter or the pipeline.
+The stage is `IDHACK`, `IXSCAN`, or `COLLSCAN`, chosen by the worker that
+owns the collection's indexes.
 
 ### 8.8 Integrated test
 
@@ -348,9 +347,30 @@ against the same question asked in SQL:
 - [x] Answer `explain` with the pipeline and a collection scan.
 - [x] Integration test: seed `emp`, compare `$match`/`$group` with SQL, project, `$inc`, `$lookup`, `$out`, restart, aggregate again.
 
-## Phase 9 — Transactional Storage (MVCC + ACID + Isolation) ⚪ Planned
+## Phase 9 — Transactional Storage (MVCC + ACID + Isolation) ✅
 
 _Inspiration: GraniteDB (MVCC, ACID transactions, multiple isolation levels)_
+
+The page keeps the latest committed document. `src/storage/mvcc.rs` keeps
+the older images an open snapshot still needs, and drops them when the
+oldest snapshot moves past. A commit is one WAL record, so a crash
+publishes every write in the transaction or none of them. Uncommitted
+writes never reach a page.
+
+`beginTransaction` names the collection whose partition owns the
+transaction. Later `insert`, `find`, `update`, `delete`, `count`, and
+`aggregate` commands pass `txnId`. A collection that hashes to another
+partition does not see that transaction. `commit` and `abort` use the
+same collection. `collMod` stores a small validator (`required`,
+`properties.bsonType`) in the catalog.
+
+`timeoutMs: 0` expires the transaction on its next statement. Serializable
+aborts when a document that transaction read was committed by someone
+else. A phantom insert into a range the transaction scanned is left for
+Phase 10, when indexes can lock a range. `$out` is rejected inside a
+transaction. `$lookup` of a collection on this partition uses the
+transaction's snapshot; a collection on another partition is that
+partition's committed pages.
 
 ### 9.1 MVCC (Multi-Version Concurrency Control)
 
@@ -376,56 +396,86 @@ _Inspiration: GraniteDB (MVCC, ACID transactions, multiple isolation levels)_
 
 ### Phase 9 — Sub-tasks
 
-- [ ] Design MVCC version storage: per-document version chain (LSN, document,
+- [x] Design MVCC version storage: per-document version chain (LSN, document,
   deleted flag).
-- [ ] Implement `src/storage/mvcc.rs`: version management + snapshot reads.
-- [ ] Implement `src/storage/transaction.rs`: begin/commit/abort + conflict
+- [x] Implement `src/storage/mvcc.rs`: version management + snapshot reads.
+- [x] Implement `src/storage/transaction.rs`: begin/commit/abort + conflict
   detection + timeout.
-- [ ] Integrate MVCC with the buffer pool and WAL.
-- [ ] Add transaction tests: ACID properties, isolation levels, conflict
+- [x] Integrate MVCC with the buffer pool and WAL.
+- [x] Add transaction tests: ACID properties, isolation levels, conflict
   detection, timeout.
 
-## Phase 10 — Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) ⚪ Planned
+## Phase 10 — Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) ✅
 
 _Inspiration: GraniteDB (B-Tree, Hash, Unique, Sparse, Index Manager)_
 
+Document pages stay the database. An index is an in-memory B-tree or hash
+rebuilt by scanning those pages through the buffer pool at startup, the
+same way Tantivy is rebuilt. The catalog page remembers which indexes
+exist. Index entries store the document id, not a page id: an update can
+move a document to another page.
+
 ### 10.1 Index Types
 
-- **B-Tree Indexes**: ordered indexes for range queries + composite key support.
-- **Hash Indexes**: O(1) exact-match lookups.
-- **Unique Constraints**: enforce uniqueness across indexed fields.
-- **Sparse Indexes**: skip documents missing the indexed field.
-- **Full-Text Indexes (Tantivy)**: already implemented in Phase 3/4; the index
-  manager will create, drop, and auto-maintain them alongside other index types.
+- **B-Tree indexes**: equality prefix plus one range (`$gt`, `$gte`, `$lt`,
+  `$lte`) on the next field. Keys are stored ascending. A declared direction
+  of `-1` does not change which documents match.
+- **Hash indexes**: `{ field: "hashed" }`, one field, exact match only.
+- **Unique**: a second id on the same key is rejected before the WAL append.
+  The error message contains `duplicate`.
+- **Sparse**: a document missing any indexed field is left out of that index.
+  A non-sparse index stores a missing field as null.
+- **Full-text**: stays on Tantivy. `createIndexes` with `"text"` is rejected.
+  Tantivy is still updated on every insert, update, and delete.
+
+Numbers compare as ordered `f64` bits, so `10` and `10.0` share a key.
+Array fields are not indexed element by element.
 
 ### 10.2 Index Manager
 
-- Create index: `createIndexes` command (already in Phase 2, but now builds the
-  actual index structure instead of just recording metadata).
-- Drop index: `deleteIndexes` (or `dropIndexes`) command.
-- Auto-maintain: indexes are updated on insert/update/delete (no manual
-  reindexing needed).
-- Index metadata stored in the disk storage (not just in-memory).
+- `createIndexes` records the spec and builds the structure from the pages.
+  A unique violation restores the previous spec and writes nothing to the WAL.
+- `dropIndexes` and `deleteIndexes` drop one secondary index. `"*"` drops
+  every secondary index. `_id_` cannot be dropped. The drop is a WAL record.
+- Insert, update, and delete maintain the index after the page write.
+  A unique check runs on a copy first, so a rejection does not leave a
+  half-updated index or a WAL record.
 
-### 10.3 Query Planner Integration
+### 10.3 Query Planner
 
-- The query planner consults the index manager to choose the strategy:
-  id lookup, then an index scan, then a collection scan.
-- `explain`, introduced in Phase 8 as a collection scan, reports which of
-  those three strategies ran.
+The worker chooses the path in this order:
+
+1. Equality on `_id` alone is `IDHACK`.
+2. A covered secondary predicate is `IXSCAN`.
+3. Anything else is `COLLSCAN`.
+
+After an index returns ids, the fetch still reads pages and keeps those
+ids, then applies the rest of the filter. An empty id list is an empty
+answer. Find, count, and a leading aggregate `$match` use this path.
+A read inside an open transaction stays a snapshot scan.
+
+`explain` asks the worker and reports `IDHACK`, `IXSCAN`, or `COLLSCAN`,
+plus `indexName` when an index was chosen. A direct explain with no
+indexes still says `COLLSCAN`.
+
+A SQL `WHERE` that is one comparison (`sal > 1000`, `job = 'CLERK'`) is
+sent as that find, so the index narrows the pages before DataFusion
+applies the predicate again. The SQL reply includes the winning stage.
 
 ### Phase 10 — Sub-tasks
 
-- [ ] Design index on-disk layout (B-Tree pages, hash buckets, full-text index
-  files).
-- [ ] Implement `src/index/btree.rs`: B-Tree index with range + composite keys.
-- [ ] Implement `src/index/hash_index.rs`: Hash index for O(1) lookups.
-- [ ] Implement `src/index/manager.rs`: create/drop/auto-maintain indexes.
-- [ ] Integrate index manager with the storage engine (indexes read/write through
-  the buffer pool).
-- [ ] Integrate index manager with DataFusion query planner (index scan strategy).
-- [ ] Add index tests: create, drop, auto-maintain, unique constraint, sparse
-  index, query planner index usage.
+- [x] Indexes are rebuilt from document pages. The catalog stores the spec.
+  There is no second on-disk B-tree: a page pointer would go stale when a
+  document moves.
+- [x] Implement `src/index/btree.rs`: B-Tree index with range + composite keys.
+- [x] Implement `src/index/hash_index.rs`: Hash index for exact-match lookups.
+- [x] Implement `src/index/manager.rs`: create/drop/auto-maintain indexes.
+- [x] Integrate the index manager with the storage engine. The fetch reads
+  pages through the buffer pool and keeps the ids the index named.
+- [x] A single-comparison SQL `WHERE` uses the same planner. DataFusion still
+  applies the predicate.
+- [x] Add index tests: range, hash, id lookup, unique, sparse, update,
+  drop, and restart.
 
 ## Phase 11 — Replication & High Availability (Oplog + Replica Sets + Heartbeat) ⚪ Planned
 
@@ -518,8 +568,6 @@ WiredTiger compresses the pages of a collection (snappy or zstd). Kova pages sto
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| No transactions | 9 | MVCC + transaction manager needed. |
-| Indexes are metadata only | 10 | B-Tree + Hash + auto-maintain needed. |
 | No replication | 11 | Oplog + replica sets needed. |
 | Pages are stored uncompressed | 12 | Compress the BSON payload in each page (zstd), the way WiredTiger compresses `.wt` pages. The WAL stays uncompressed. |
 
@@ -579,7 +627,6 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phase 8 is complete: `aggregate` and the shared query language read
-pages through the buffer pool. Next is transactional storage (MVCC +
-ACID), the indexing subsystem, replication, and on-disk page compression
-(Phase 12).*
+*Phase 10 is complete: a secondary index is rebuilt from document pages
+and names the ids a find keeps. Next is replication and on-disk page
+compression (Phase 12).*

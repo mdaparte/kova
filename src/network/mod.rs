@@ -337,7 +337,10 @@ async fn execute_command(
     if let Ok(sql_text) = command.get_str("sql") {
         // A query with no FROM (`SELECT 1 AS n`) has no collection to load.
         // A query that names one collection loads that snapshot and registers
-        // it under the spelling used in the SQL text.
+        // it under the spelling used in the SQL text. A single comparison in
+        // WHERE is sent as a find, so a secondary index can narrow the pages
+        // before DataFusion applies the same predicate again.
+        let pushed = sql_simple_filter(sql_text);
         let prepared = match sql_table_name(sql_text) {
             Some(table_name) => {
                 let db = command.get_str("$db").unwrap_or("");
@@ -346,8 +349,27 @@ async fn execute_command(
                 } else {
                     format!("{}.{}", db, table_name)
                 };
-                match load_collection_documents(router, &collection).await {
-                    Ok(documents) => Some((table_name, documents)),
+                let filter = pushed.clone().unwrap_or_default();
+                match load_collection_documents(router, &collection, &filter).await {
+                    Ok(documents) => {
+                        // An empty index answer has no columns. DataFusion
+                        // would then reject the field name, so the full
+                        // collection is loaded and the SQL predicate still
+                        // runs. The planner stage stays the one the index chose.
+                        let documents = if documents.is_empty() && pushed.is_some() {
+                            match load_collection_documents(router, &collection, &bson::doc! {})
+                                .await
+                            {
+                                Ok(documents) => documents,
+                                Err(message) => {
+                                    return bson::doc! { "ok": 0.0, "errmsg": message };
+                                }
+                            }
+                        } else {
+                            documents
+                        };
+                        Some((table_name, collection, documents))
+                    }
                     Err(message) => {
                         return bson::doc! { "ok": 0.0, "errmsg": message };
                     }
@@ -356,20 +378,43 @@ async fn execute_command(
             None => None,
         };
         let tables: Vec<(&str, std::sync::Arc<Vec<bson::Document>>)> = match &prepared {
-            Some((name, documents)) => vec![(name.as_str(), std::sync::Arc::clone(documents))],
+            Some((name, _, documents)) => vec![(name.as_str(), std::sync::Arc::clone(documents))],
             None => Vec::new(),
         };
-        return match query_engine::execute_sql_query(sql_text, &tables).await {
+        let mut result = match query_engine::execute_sql_query(sql_text, &tables).await {
             Ok(result) => result,
-            Err(err) => bson::doc! { "ok": 0.0, "errmsg": err.to_string() },
+            Err(err) => return bson::doc! { "ok": 0.0, "errmsg": err.to_string() },
         };
+        if let (Some(filter), Some((_, collection, _))) = (pushed, prepared) {
+            if let Some((stage, index_name)) = index_plan(router, &collection, filter).await {
+                let mut plan = bson::doc! { "stage": stage };
+                if let Some(name) = index_name {
+                    plan.insert("indexName", name);
+                }
+                result.insert(
+                    "queryPlanner",
+                    bson::doc! {
+                        "plannerVersion": 1i32,
+                        "namespace": collection,
+                        "winningPlan": plan,
+                    },
+                );
+            }
+        }
+        return result;
     }
 
     if let Some(explained) = protocol::explain_reply(command) {
-        return match explained {
+        let mut reply = match explained {
             Ok(reply) => reply,
-            Err(message) => bson::doc! { "ok": 0.0, "errmsg": message },
+            Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
         };
+        if let Some((collection, filter)) = protocol::explain_request(command) {
+            if let Some((stage, index_name)) = index_plan(router, &collection, filter).await {
+                patch_winning_plan(&mut reply, &stage, index_name);
+            }
+        }
+        return reply;
     }
 
     match protocol::command_from_document(command) {
@@ -379,7 +424,7 @@ async fn execute_command(
         Ok(PartitionCommand::ListDatabases { .. }) => list_databases(command, router).await,
         Ok(PartitionCommand::DropDatabase { .. }) => drop_database(command, router).await,
         Ok(PartitionCommand::DatabaseStats { .. }) => database_stats(command, router).await,
-        Ok(aggregate @ PartitionCommand::Aggregate { .. }) => {
+        Ok(aggregate) if aggregate_command(&aggregate) => {
             execute_aggregate(router, aggregate).await
         }
         Ok(partition_command) => match router.dispatch(partition_command) {
@@ -445,10 +490,11 @@ fn sql_table_name(sql: &str) -> Option<String> {
 async fn load_collection_documents(
     router: &PartitionRouter,
     table_name: &str,
+    filter: &bson::Document,
 ) -> Result<Arc<Vec<bson::Document>>, String> {
     use crate::types::PartitionCommand;
 
-    let find_cmd = PartitionCommand::find(table_name, bson::doc! {});
+    let find_cmd = PartitionCommand::find(table_name, filter.clone());
 
     match router.dispatch(find_cmd) {
         Some(rx) => match rx.await {
@@ -461,20 +507,164 @@ async fn load_collection_documents(
     }
 }
 
+/// Asks the worker which access path `filter` would use.
+async fn index_plan(
+    router: &PartitionRouter,
+    collection: &str,
+    filter: bson::Document,
+) -> Option<(String, Option<String>)> {
+    let command = PartitionCommand::Explain {
+        collection: collection.to_string(),
+        filter,
+    };
+    match router.dispatch(command) {
+        Some(rx) => match rx.await {
+            Ok(PartitionResult::Plan { stage, index_name }) => Some((stage, index_name)),
+            _ => None,
+        },
+        None => None,
+    }
+}
+
+fn patch_winning_plan(reply: &mut bson::Document, stage: &str, index_name: Option<String>) {
+    let Some(bson::Bson::Document(planner)) = reply.get_mut("queryPlanner") else {
+        return;
+    };
+    let Some(bson::Bson::Document(plan)) = planner.get_mut("winningPlan") else {
+        return;
+    };
+    plan.insert("stage", stage);
+    if let Some(name) = index_name {
+        plan.insert("indexName", name);
+    }
+}
+
+/// A WHERE clause that is one comparison: `field > 10`, `field = 'CLERK'`.
+///
+/// Anything wider (AND, OR, functions) returns `None` and the SQL path
+/// loads the whole collection. DataFusion still applies the predicate,
+/// so this extract only drops rows the comparison itself would drop.
+fn sql_simple_filter(sql: &str) -> Option<bson::Document> {
+    let lower = sql.to_ascii_lowercase();
+    let where_at = lower.rfind(" where ")?;
+    let tail = sql[where_at + 7..].trim().trim_end_matches(';').trim();
+    let tail_lower = tail.to_ascii_lowercase();
+    if tail_lower.contains(" and ") || tail_lower.contains(" or ") || tail_lower.contains('(') {
+        return None;
+    }
+    let (field, rest) = split_sql_ident(tail)?;
+    let rest = rest.trim_start();
+    let (op, literal) = if let Some(rest) = rest.strip_prefix(">=") {
+        ("$gte", rest)
+    } else if let Some(rest) = rest.strip_prefix("<=") {
+        ("$lte", rest)
+    } else if let Some(rest) = rest.strip_prefix("<>") {
+        return None;
+    } else if let Some(rest) = rest.strip_prefix("!=") {
+        return None;
+    } else if let Some(rest) = rest.strip_prefix('>') {
+        ("$gt", rest)
+    } else if let Some(rest) = rest.strip_prefix('<') {
+        ("$lt", rest)
+    } else if let Some(rest) = rest.strip_prefix('=') {
+        ("$eq", rest)
+    } else {
+        return None;
+    };
+    let value = sql_literal(literal.trim())?;
+    if op == "$eq" {
+        let mut filter = bson::Document::new();
+        filter.insert(field, value);
+        Some(filter)
+    } else {
+        let mut bound = bson::Document::new();
+        bound.insert(op, value);
+        let mut filter = bson::Document::new();
+        filter.insert(field, bound);
+        Some(filter)
+    }
+}
+
+fn split_sql_ident(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim_start();
+    let end = text.find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))?;
+    if end == 0 {
+        return None;
+    }
+    Some((&text[..end], &text[end..]))
+}
+
+fn sql_literal(text: &str) -> Option<bson::Bson> {
+    if let Some(inner) = text
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        return Some(bson::Bson::String(inner.to_string()));
+    }
+    if let Some(inner) = text
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return Some(bson::Bson::String(inner.to_string()));
+    }
+    if let Ok(number) = text.parse::<i64>() {
+        return Some(if let Ok(small) = i32::try_from(number) {
+            bson::Bson::Int32(small)
+        } else {
+            bson::Bson::Int64(number)
+        });
+    }
+    text.parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+        .map(bson::Bson::Double)
+}
+
 /// Runs an aggregation pipeline, resolving `$lookup` across partitions
 /// and writing `$out` through insert so the WAL records it.
+fn aggregate_command(command: &PartitionCommand) -> bool {
+    match command {
+        PartitionCommand::Aggregate { .. } => true,
+        PartitionCommand::Transactional { inner, .. } => {
+            matches!(inner.as_ref(), PartitionCommand::Aggregate { .. })
+        }
+        _ => false,
+    }
+}
+
+fn aggregate_namespace(command: &PartitionCommand) -> Option<String> {
+    match command {
+        PartitionCommand::Aggregate { collection, .. } => Some(collection.clone()),
+        PartitionCommand::Transactional { inner, .. } => match inner.as_ref() {
+            PartitionCommand::Aggregate { collection, .. } => Some(collection.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn aggregate_resolved_mut(
+    command: &mut PartitionCommand,
+) -> Option<&mut Vec<(String, Vec<bson::Document>)>> {
+    match command {
+        PartitionCommand::Aggregate { resolved, .. } => Some(resolved),
+        PartitionCommand::Transactional { inner, .. } => match inner.as_mut() {
+            PartitionCommand::Aggregate { resolved, .. } => Some(resolved),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub(crate) async fn execute_aggregate(
     router: &PartitionRouter,
     mut command: PartitionCommand,
 ) -> bson::Document {
-    let namespace = match &command {
-        PartitionCommand::Aggregate { collection, .. } => collection.clone(),
-        _ => {
-            return bson::doc! {
-                "ok": 0.0,
-                "errmsg": "expected an aggregate command",
-            };
-        }
+    let Some(namespace) = aggregate_namespace(&command) else {
+        return bson::doc! {
+            "ok": 0.0,
+            "errmsg": "expected an aggregate command",
+        };
     };
 
     for _ in 0..8 {
@@ -491,21 +681,24 @@ pub(crate) async fn execute_aggregate(
                 return cursor_batch(&namespace, documents);
             }
             Ok(PartitionResult::NeedForeign { namespace: foreign }) => {
-                let PartitionCommand::Aggregate { resolved, .. } = &mut command else {
-                    break;
-                };
-                if resolved.iter().any(|(name, _)| name == &foreign) {
+                let already = aggregate_resolved_mut(&mut command)
+                    .map(|resolved| resolved.iter().any(|(name, _)| name == &foreign))
+                    .unwrap_or(true);
+                if already {
                     return protocol::reply_document(&PartitionResult::Error {
                         message: format!("lookup of '{foreign}' was already loaded"),
                     });
                 }
-                let documents = match load_collection_documents(router, &foreign).await {
-                    Ok(documents) => (*documents).clone(),
-                    Err(message) => {
-                        return protocol::reply_document(&PartitionResult::Error { message });
-                    }
-                };
-                resolved.push((foreign, documents));
+                let documents =
+                    match load_collection_documents(router, &foreign, &bson::doc! {}).await {
+                        Ok(documents) => (*documents).clone(),
+                        Err(message) => {
+                            return protocol::reply_document(&PartitionResult::Error { message });
+                        }
+                    };
+                if let Some(resolved) = aggregate_resolved_mut(&mut command) {
+                    resolved.push((foreign, documents));
+                }
             }
             Ok(PartitionResult::StageOut {
                 namespace: target,
@@ -854,6 +1047,13 @@ mod tests {
         bytes[8..12].copy_from_slice(&response_to.to_le_bytes());
         bytes[12..16].copy_from_slice(&op_code.to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn test_sql_simple_filter_is_one_comparison() {
+        let filter = sql_simple_filter("select * from emp where sal > 1000").unwrap();
+        assert_eq!(filter, bson::doc! { "sal": { "$gt": 1000 } });
+        assert!(sql_simple_filter("select * from emp where sal > 1000 and deptno = 10").is_none());
     }
 
     #[test]

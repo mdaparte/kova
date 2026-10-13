@@ -86,6 +86,15 @@ pub enum PartitionResult {
     },
     /// The command could not be executed.
     Error { message: String },
+    /// `beginTransaction`, `commit`, or `abort` completed.
+    Transaction { txn_id: u64 },
+    /// `dropIndexes` removed one index, or every secondary index.
+    IndexesDropped { n_indexes_was: u32 },
+    /// `explain` asked the worker which access path it would use.
+    Plan {
+        stage: String,
+        index_name: Option<String>,
+    },
 }
 
 /// A command sent from the network layer to a storage partition.
@@ -158,13 +167,25 @@ pub enum PartitionCommand {
     CreateCollection { collection: String },
     /// Declare secondary indexes on a collection (`createIndexes`).
     ///
-    /// Kova records the declarations so `listIndexes` reports them
-    /// back consistently, but does not yet build inverted structures
-    /// for them: BM25 search covers text, and equality lookups scan
-    /// the collection. Declarations are metadata until Phase 10.
+    /// The catalog keeps the spec. The worker also builds the B-tree
+    /// or hash structure and rejects the command when a unique index
+    /// would be violated by documents already stored.
     CreateIndexes {
         collection: String,
         indexes: Vec<Document>,
+    },
+    /// Drops one index, or every secondary index when `index` is `"*"`.
+    ///
+    /// `_id_` cannot be dropped. The catalog and the in-memory structure
+    /// both lose the index.
+    DropIndexes { collection: String, index: String },
+    /// Asks which access path a filter would use (`explain`).
+    ///
+    /// The worker answers `IDHACK`, `IXSCAN`, or `COLLSCAN`. The network
+    /// layer writes that stage into the explain document.
+    Explain {
+        collection: String,
+        filter: Document,
     },
     /// List a collection's indexes (`listIndexes`).
     ///
@@ -191,6 +212,34 @@ pub enum PartitionCommand {
     /// (`listDatabases`). Broadcast like [`PartitionCommand::ListCollections`];
     /// GUI clients need it to render their database tree.
     ListDatabases { filter: Document },
+    /// Opens a transaction on the partition that owns `collection`.
+    ///
+    /// Later commands carry `txn_id` and must name a collection that
+    /// hashes to the same partition. `txn_id == 0` asks the worker to
+    /// allocate one.
+    BeginTransaction {
+        collection: String,
+        txn_id: u64,
+        isolation: String,
+        timeout_ms: Option<u64>,
+    },
+    /// Makes the transaction's writes durable in one WAL record.
+    CommitTransaction { collection: String, txn_id: u64 },
+    /// Discards the transaction's writes.
+    AbortTransaction { collection: String, txn_id: u64 },
+    /// Sets or replaces a collection's document validator.
+    CollMod {
+        collection: String,
+        validator: Document,
+    },
+    /// A data command that belongs to an open transaction.
+    ///
+    /// The write stays in the transaction until commit. The page and
+    /// the WAL are not touched yet.
+    Transactional {
+        txn_id: u64,
+        inner: Box<PartitionCommand>,
+    },
     /// Full-text search within one collection (`$text` query operator).
     ///
     /// The filter carries the remaining (non-`$text`) predicates so a
@@ -256,10 +305,18 @@ impl PartitionCommand {
             | PartitionCommand::Drop { collection }
             | PartitionCommand::CreateCollection { collection }
             | PartitionCommand::CreateIndexes { collection, .. }
+            | PartitionCommand::DropIndexes { collection, .. }
+            | PartitionCommand::Explain { collection, .. }
             | PartitionCommand::ListIndexes { collection }
             | PartitionCommand::CollectionStats { collection }
             | PartitionCommand::Search { collection, .. }
-            | PartitionCommand::Aggregate { collection, .. } => collection, // Broadcast commands: no single partition owns them.
+            | PartitionCommand::Aggregate { collection, .. }
+            | PartitionCommand::BeginTransaction { collection, .. }
+            | PartitionCommand::CommitTransaction { collection, .. }
+            | PartitionCommand::AbortTransaction { collection, .. }
+            | PartitionCommand::CollMod { collection, .. } => collection,
+            PartitionCommand::Transactional { inner, .. } => inner.collection(),
+            // Broadcast commands: no single partition owns them.
             PartitionCommand::ListCollections { .. }
             | PartitionCommand::ListDatabases { .. }
             | PartitionCommand::DatabaseStats { .. }

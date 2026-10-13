@@ -552,9 +552,9 @@ fn eval_operator(doc: &Document, op: &str, operand: &Bson, vars: &Vars) -> Resul
             Ok(Bson::Boolean(!is_truthy(&eval_expr(doc, expr, vars)?)))
         }
         "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" => {
-            let items = operand.as_array().ok_or_else(|| {
-                format!("{op} requires an array of two expressions")
-            })?;
+            let items = operand
+                .as_array()
+                .ok_or_else(|| format!("{op} requires an array of two expressions"))?;
             if items.len() != 2 {
                 return Err(format!("{op} requires an array of two expressions"));
             }
@@ -654,7 +654,11 @@ struct Group {
     accs: Vec<AccState>,
 }
 
-fn group_documents(docs: &[Document], spec: &Document, vars: &Vars) -> Result<Vec<Document>, String> {
+fn group_documents(
+    docs: &[Document],
+    spec: &Document,
+    vars: &Vars,
+) -> Result<Vec<Document>, String> {
     let id_expr = spec
         .get("_id")
         .ok_or_else(|| "$group requires '_id'".to_string())?;
@@ -1301,8 +1305,8 @@ mod tests {
                 "as": "grade",
             }
         }];
-        let Output::Docs(rows) = run(emp, &pipeline, &mut |_| Ok(Foreign::Ready(grades.clone())))
-            .unwrap()
+        let Output::Docs(rows) =
+            run(emp, &pipeline, &mut |_| Ok(Foreign::Ready(grades.clone()))).unwrap()
         else {
             panic!("expected documents");
         };
@@ -1325,9 +1329,10 @@ mod tests {
                 "as": "top",
             }
         }];
-        let Output::Docs(rows) =
-            run(shared, &pipeline, &mut |_| Ok(Foreign::Ready(grades.clone()))).unwrap()
-        else {
+        let Output::Docs(rows) = run(shared, &pipeline, &mut |_| {
+            Ok(Foreign::Ready(grades.clone()))
+        })
+        .unwrap() else {
             panic!("expected documents");
         };
         assert_eq!(rows[0].get_array("top").unwrap().len(), 1);

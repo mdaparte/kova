@@ -27,6 +27,9 @@ struct CollectionState {
     overflow_heads: HashSet<u64>,
     continuations: Vec<u64>,
     indexes: Vec<Document>,
+    /// Optional document validator. Absent on catalogs written before
+    /// transactions existed.
+    validator: Option<Document>,
     doc_count: u64,
 }
 
@@ -37,6 +40,7 @@ impl CollectionState {
             overflow_heads: HashSet::new(),
             continuations: Vec::new(),
             indexes: Vec::new(),
+            validator: None,
             doc_count: 0,
         }
     }
@@ -213,6 +217,9 @@ impl Heap {
                         .filter_map(|item| item.as_document().cloned())
                         .collect();
                 }
+                if let Ok(validator) = spec.get_document("validator") {
+                    state.validator = Some(validator.clone());
+                }
             }
         }
         Ok(())
@@ -225,6 +232,19 @@ impl Heap {
         self.collections
             .insert(collection.to_string(), CollectionState::empty());
         true
+    }
+
+    pub fn validator(&self, collection: &str) -> Option<Document> {
+        self.collections
+            .get(collection)
+            .and_then(|state| state.validator.clone())
+    }
+
+    pub fn set_validator(&mut self, collection: &str, validator: Document) {
+        self.ensure_collection(collection);
+        if let Some(state) = self.collections.get_mut(collection) {
+            state.validator = Some(validator);
+        }
     }
 
     pub fn set_indexes(&mut self, collection: &str, indexes: Vec<Document>) {
@@ -253,13 +273,14 @@ impl Heap {
         names.sort();
         let mut cols = Document::new();
         for name in names {
-            let indexes = &self.collections[name].indexes;
-            cols.insert(
-                name,
-                doc! {
-                    "indexes": Bson::Array(indexes.iter().cloned().map(Bson::Document).collect()),
-                },
-            );
+            let state = &self.collections[name];
+            let mut spec = doc! {
+                "indexes": Bson::Array(state.indexes.iter().cloned().map(Bson::Document).collect()),
+            };
+            if let Some(validator) = &state.validator {
+                spec.insert("validator", validator.clone());
+            }
+            cols.insert(name, spec);
         }
         let body = doc! {
             "applied_lsn": self.applied_lsn as i64,
@@ -320,6 +341,32 @@ impl Heap {
             }
         })?;
         Ok(count)
+    }
+
+    /// Keeps documents whose id is in `ids` and that still match `filter`.
+    ///
+    /// The index names the ids. This walk still reads pages through the
+    /// buffer pool; it does not jump to a page by pointer, because an
+    /// update can move a document. An empty `ids` list is an empty answer
+    /// and does not read any page.
+    pub fn find_ids(
+        &mut self,
+        pool: &mut BufferPool,
+        collection: &str,
+        ids: &[String],
+        filter: &Document,
+    ) -> Result<Vec<Document>, String> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut matches = Vec::new();
+        self.for_each_in(pool, collection, &mut |doc| {
+            if wanted.contains(document_id_string(doc).as_str()) && document_matches(doc, filter) {
+                matches.push(doc.clone());
+            }
+        })?;
+        Ok(matches)
     }
 
     pub fn find_by_id(

@@ -271,6 +271,7 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
     // `shop.users` are distinct collections, like real MongoDB.
     let db = command.get_str("$db").unwrap_or("");
     let namespaced = |collection: &str| namespace(db, collection);
+    let txn_id = read_txn_id(command)?;
 
     if command.contains_key("insert") {
         let collection = command.get_str("insert").unwrap();
@@ -291,10 +292,13 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             return Err("insert requires at least one document".to_string());
         }
 
-        return Ok(PartitionCommand::Insert {
-            collection: namespaced(collection),
-            documents,
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::Insert {
+                collection: namespaced(collection),
+                documents,
+            },
+        );
     }
 
     // GUI clients create collections explicitly; without this command
@@ -312,9 +316,12 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
                 "'capped' collections are not supported by Kova; creating a normal collection",
             );
         }
-        return Ok(PartitionCommand::CreateCollection {
-            collection: namespaced(collection),
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::CreateCollection {
+                collection: namespaced(collection),
+            },
+        );
     }
 
     if command.contains_key("find") {
@@ -339,12 +346,15 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             let mut rest = filter.clone();
             rest.remove("$text");
 
-            return Ok(PartitionCommand::Search {
-                collection: namespaced(collection),
-                query: search_query,
-                filter: rest,
-                options,
-            });
+            return bind_txn(
+                txn_id,
+                PartitionCommand::Search {
+                    collection: namespaced(collection),
+                    query: search_query,
+                    filter: rest,
+                    options,
+                },
+            );
         }
 
         let projection = optional_document(command, "projection")?;
@@ -353,14 +363,17 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         // A find limit of 0 means "no cap", matching MongoDB.
         let limit = non_negative_field(command, "limit")?.filter(|limit| *limit > 0);
 
-        return Ok(PartitionCommand::Find {
-            collection: namespaced(collection),
-            filter,
-            projection,
-            sort,
-            skip,
-            limit,
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::Find {
+                collection: namespaced(collection),
+                filter,
+                projection,
+                sort,
+                skip,
+                limit,
+            },
+        );
     }
 
     if let Ok(collection) = command.get_str("aggregate") {
@@ -376,11 +389,14 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             namespace_stage(&mut stage, db)?;
             pipeline.push(stage);
         }
-        return Ok(PartitionCommand::Aggregate {
-            collection: namespaced(collection),
-            pipeline,
-            resolved: Vec::new(),
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::Aggregate {
+                collection: namespaced(collection),
+                pipeline,
+                resolved: Vec::new(),
+            },
+        );
     }
 
     if command.contains_key("update") {
@@ -403,12 +419,15 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         // updates; `multi: true` is required for updateMany.
         let multi = entry.get_bool("multi").unwrap_or(false);
 
-        return Ok(PartitionCommand::Update {
-            collection: namespaced(collection),
-            filter,
-            update,
-            multi,
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::Update {
+                collection: namespaced(collection),
+                filter,
+                update,
+                multi,
+            },
+        );
     }
 
     if command.contains_key("delete") {
@@ -431,11 +450,14 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .unwrap_or(0)
             .max(0) as u32;
 
-        return Ok(PartitionCommand::Delete {
-            collection: namespaced(collection),
-            filter,
-            limit,
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::Delete {
+                collection: namespaced(collection),
+                filter,
+                limit,
+            },
+        );
     }
 
     if command.contains_key("count") {
@@ -445,26 +467,35 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .cloned()
             .unwrap_or_else(|_| doc! {});
 
-        return Ok(PartitionCommand::Count {
-            collection: namespaced(collection),
-            filter,
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::Count {
+                collection: namespaced(collection),
+                filter,
+            },
+        );
     }
 
     if command.contains_key("drop") {
         let collection = command.get_str("drop").unwrap();
-        return Ok(PartitionCommand::Drop {
-            collection: namespaced(collection),
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::Drop {
+                collection: namespaced(collection),
+            },
+        );
     }
 
     // Java drivers (Spring Data, the MongoDB Java driver) list a
     // collection's indexes whenever it is browsed; without this
     // command the browse view fails with "unsupported command".
     if let Ok(collection) = command.get_str("listIndexes") {
-        return Ok(PartitionCommand::ListIndexes {
-            collection: namespaced(collection),
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::ListIndexes {
+                collection: namespaced(collection),
+            },
+        );
     }
 
     // The same drivers declare indexes at start-up. Kova records the
@@ -478,21 +509,41 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .filter_map(|value| value.as_document().cloned())
             .collect();
 
-        return Ok(PartitionCommand::CreateIndexes {
-            collection: namespaced(collection),
-            indexes,
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::CreateIndexes {
+                collection: namespaced(collection),
+                indexes,
+            },
+        );
+    }
+
+    if let Ok(collection) = command
+        .get_str("dropIndexes")
+        .or_else(|_| command.get_str("deleteIndexes"))
+    {
+        let index = command.get_str("index").unwrap_or("*").to_string();
+        return bind_txn(
+            txn_id,
+            PartitionCommand::DropIndexes {
+                collection: namespaced(collection),
+                index,
+            },
+        );
     }
 
     // GUI clients drop whole databases from their sidebar.
     if command.contains_key("dropDatabase") {
-        return Ok(PartitionCommand::DropDatabase {
-            database: if db.is_empty() {
-                "admin".to_string()
-            } else {
-                db.to_string()
+        return bind_txn(
+            txn_id,
+            PartitionCommand::DropDatabase {
+                database: if db.is_empty() {
+                    "admin".to_string()
+                } else {
+                    db.to_string()
+                },
             },
-        });
+        );
     }
 
     if command.contains_key("listCollections") {
@@ -501,10 +552,13 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .cloned()
             .unwrap_or_else(|_| doc! {});
 
-        return Ok(PartitionCommand::ListCollections {
-            database: db.to_string(),
-            filter,
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::ListCollections {
+                database: db.to_string(),
+                filter,
+            },
+        );
     }
 
     // GUI clients enumerate the database tree with `listDatabases`.
@@ -514,26 +568,85 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             .cloned()
             .unwrap_or_else(|_| doc! {});
 
-        return Ok(PartitionCommand::ListDatabases { filter });
+        return bind_txn(txn_id, PartitionCommand::ListDatabases { filter });
     }
 
     // Studio 3T and Compass render a collection's storage panel from
     // `collStats`; without it the panel stays empty.
     if let Ok(collection) = command.get_str("collStats") {
-        return Ok(PartitionCommand::CollectionStats {
-            collection: namespaced(collection),
-        });
+        return bind_txn(
+            txn_id,
+            PartitionCommand::CollectionStats {
+                collection: namespaced(collection),
+            },
+        );
     }
 
     // The same tools size a whole database with `dbStats`.
     if command.contains_key("dbStats") {
-        return Ok(PartitionCommand::DatabaseStats {
-            database: if db.is_empty() {
-                "admin".to_string()
-            } else {
-                db.to_string()
+        return bind_txn(
+            txn_id,
+            PartitionCommand::DatabaseStats {
+                database: if db.is_empty() {
+                    "admin".to_string()
+                } else {
+                    db.to_string()
+                },
             },
+        );
+    }
+
+    if command.contains_key("beginTransaction") {
+        let collection = command
+            .get_str("collection")
+            .map_err(|_| "beginTransaction requires a collection".to_string())?;
+        let isolation = command
+            .get_str("isolation")
+            .unwrap_or("snapshot")
+            .to_string();
+        let timeout_ms = non_negative_field(command, "timeoutMs")?;
+        return Ok(PartitionCommand::BeginTransaction {
+            collection: namespaced(collection),
+            txn_id: txn_id.unwrap_or(0),
+            isolation,
+            timeout_ms,
         });
+    }
+
+    if command.contains_key("commit") {
+        let collection = command
+            .get_str("collection")
+            .map_err(|_| "commit requires a collection".to_string())?;
+        let txn_id = txn_id.ok_or_else(|| "commit requires txnId".to_string())?;
+        return Ok(PartitionCommand::CommitTransaction {
+            collection: namespaced(collection),
+            txn_id,
+        });
+    }
+
+    if command.contains_key("abort") {
+        let collection = command
+            .get_str("collection")
+            .map_err(|_| "abort requires a collection".to_string())?;
+        let txn_id = txn_id.ok_or_else(|| "abort requires txnId".to_string())?;
+        return Ok(PartitionCommand::AbortTransaction {
+            collection: namespaced(collection),
+            txn_id,
+        });
+    }
+
+    if let Ok(collection) = command.get_str("collMod") {
+        let validator = command
+            .get_document("validator")
+            .map_err(|_| "collMod requires a validator document".to_string())?
+            .clone();
+        return bind_txn(
+            txn_id,
+            PartitionCommand::CollMod {
+                collection: namespaced(collection),
+                validator,
+            },
+        );
     }
 
     let name = command
@@ -542,6 +655,46 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         .map(|key| key.as_str())
         .unwrap_or("<empty>");
     Err(format!("unsupported command '{}'", name))
+}
+
+fn read_txn_id(command: &Document) -> Result<Option<u64>, String> {
+    if !command.contains_key("txnId") {
+        return Ok(None);
+    }
+    let id = if let Ok(id) = command.get_i64("txnId") {
+        id
+    } else if let Ok(id) = command.get_i32("txnId") {
+        i64::from(id)
+    } else {
+        return Err("txnId must be a number".to_string());
+    };
+    if id < 0 {
+        return Err("txnId must be non-negative".to_string());
+    }
+    Ok(Some(id as u64))
+}
+
+/// Attaches `txnId` to a data command. Other commands reject it so a
+/// client cannot believe a `drop` ran inside the transaction.
+fn bind_txn(txn_id: Option<u64>, command: PartitionCommand) -> Result<PartitionCommand, String> {
+    let Some(txn_id) = txn_id else {
+        return Ok(command);
+    };
+    match command {
+        PartitionCommand::Insert { .. }
+        | PartitionCommand::Find { .. }
+        | PartitionCommand::Update { .. }
+        | PartitionCommand::Delete { .. }
+        | PartitionCommand::Count { .. }
+        | PartitionCommand::Aggregate { .. } => Ok(PartitionCommand::Transactional {
+            txn_id,
+            inner: Box::new(command),
+        }),
+        _ => Err(
+            "txnId is only supported on insert, find, update, delete, count, and aggregate"
+                .to_string(),
+        ),
+    }
 }
 
 fn optional_document(command: &Document, key: &str) -> Result<Option<Document>, String> {
@@ -605,23 +758,77 @@ fn namespace_stage(stage: &mut Document, db: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Answers `explain` without running the query.
+/// The collection and filter an `explain` should ask the worker about.
 ///
-/// Phase 8 has no secondary index, so every find, count, and aggregate
-/// is a collection scan of pages. Phase 10 replaces the stage name
-/// when an index can serve the filter.
-pub fn explain_reply(command: &Document) -> Option<Result<Document, String>> {
-    let explained = if command.get_bool("explain").unwrap_or(false)
+/// A direct call of [`explain_reply`] still reports `COLLSCAN`. The
+/// network layer uses this pair to ask the worker, which knows the
+/// indexes, and then overwrites the stage.
+pub fn explain_request(command: &Document) -> Option<(String, Document)> {
+    let explained = explain_inner(command)?;
+    let db = command.get_str("$db").unwrap_or("test");
+    if let Ok(name) = explained.get_str("find") {
+        let filter = explained
+            .get_document("filter")
+            .cloned()
+            .unwrap_or_else(|_| doc! {});
+        return Some((namespace(db, name), filter));
+    }
+    if let Ok(name) = explained.get_str("count") {
+        let filter = explained
+            .get_document("query")
+            .cloned()
+            .unwrap_or_else(|_| doc! {});
+        return Some((namespace(db, name), filter));
+    }
+    if let Ok(name) = explained.get_str("aggregate") {
+        let filter = explained
+            .get_array("pipeline")
+            .map(|pipeline| leading_match_filter(pipeline))
+            .unwrap_or_else(|_| doc! {});
+        return Some((namespace(db, name), filter));
+    }
+    None
+}
+
+fn explain_inner(command: &Document) -> Option<&Document> {
+    if command.get_bool("explain").unwrap_or(false)
         && (command.contains_key("find")
             || command.contains_key("aggregate")
             || command.contains_key("count"))
     {
-        command
-    } else if let Ok(inner) = command.get_document("explain") {
-        inner
+        Some(command)
     } else {
-        return None;
-    };
+        command.get_document("explain").ok()
+    }
+}
+
+fn leading_match_filter(pipeline: &[bson::Bson]) -> Document {
+    let mut filters = Vec::new();
+    for stage in pipeline {
+        let Some(doc) = stage.as_document() else {
+            break;
+        };
+        let Ok(filter) = doc.get_document("$match") else {
+            break;
+        };
+        if filter.contains_key("$expr") {
+            break;
+        }
+        filters.push(filter.clone());
+    }
+    match filters.len() {
+        0 => doc! {},
+        1 => filters.pop().unwrap_or_default(),
+        _ => doc! { "$and": filters },
+    }
+}
+
+/// Answers `explain` without running the query.
+///
+/// The stage written here is `COLLSCAN`. Callers that can reach a
+/// worker replace it with the stage that worker reports.
+pub fn explain_reply(command: &Document) -> Option<Result<Document, String>> {
+    let explained = explain_inner(command)?;
     Some(explain_plan(command, explained))
 }
 
@@ -1088,6 +1295,21 @@ pub fn reply_document(result: &PartitionResult) -> Document {
             "ok": 0.0,
             "errmsg": message.clone(),
         },
+        PartitionResult::Transaction { txn_id } => doc! {
+            "ok": 1.0,
+            "txnId": *txn_id as i64,
+        },
+        PartitionResult::IndexesDropped { n_indexes_was } => doc! {
+            "ok": 1.0,
+            "nIndexesWas": *n_indexes_was as i32,
+        },
+        PartitionResult::Plan { stage, index_name } => {
+            let mut plan = doc! { "stage": stage.clone() };
+            if let Some(name) = index_name {
+                plan.insert("indexName", name.clone());
+            }
+            doc! { "ok": 1.0, "winningPlan": plan }
+        }
     }
 }
 
@@ -1780,6 +2002,45 @@ mod tests {
             "shop.salgrade"
         );
         assert_eq!(from, "shop.dept");
+    }
+
+    #[test]
+    fn test_begin_transaction_namespaces_the_collection() {
+        let command = doc! {
+            "beginTransaction": 1,
+            "collection": "emp",
+            "isolation": "serializable",
+            "timeoutMs": 0,
+            "$db": "shop",
+        };
+        match command_from_document(&command).unwrap() {
+            PartitionCommand::BeginTransaction {
+                collection,
+                isolation,
+                timeout_ms,
+                txn_id,
+            } => {
+                assert_eq!(collection, "shop.emp");
+                assert_eq!(isolation, "serializable");
+                assert_eq!(timeout_ms, Some(0));
+                assert_eq!(txn_id, 0);
+            }
+            other => panic!("expected BeginTransaction, got {other:?}"),
+        }
+
+        let command = doc! {
+            "insert": "emp",
+            "documents": [{ "ename": "KING" }],
+            "txnId": 7,
+            "$db": "shop",
+        };
+        match command_from_document(&command).unwrap() {
+            PartitionCommand::Transactional { txn_id, inner } => {
+                assert_eq!(txn_id, 7);
+                assert_eq!(inner.collection(), "shop.emp");
+            }
+            other => panic!("expected a transactional insert, got {other:?}"),
+        }
     }
 
     #[test]

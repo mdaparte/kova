@@ -218,6 +218,14 @@ impl StorageEngine {
         self.heap.set_indexes(collection, indexes);
     }
 
+    pub fn validator(&self, collection: &str) -> Option<bson::Document> {
+        self.heap.validator(collection)
+    }
+
+    pub fn set_validator(&mut self, collection: &str, validator: bson::Document) {
+        self.heap.set_validator(collection, validator);
+    }
+
     pub fn insert_documents(
         &mut self,
         collection: &str,
@@ -248,6 +256,16 @@ impl StorageEngine {
         id: &str,
     ) -> Result<Option<bson::Document>, String> {
         self.heap.find_by_id(&mut self.pool, collection, id)
+    }
+
+    /// Fetches the documents an index named. The page walk keeps those ids.
+    pub fn find_ids(
+        &mut self,
+        collection: &str,
+        ids: &[String],
+        filter: &bson::Document,
+    ) -> Result<Vec<bson::Document>, String> {
+        self.heap.find_ids(&mut self.pool, collection, ids, filter)
     }
 
     pub fn for_each_document(

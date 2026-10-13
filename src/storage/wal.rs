@@ -86,6 +86,29 @@ pub enum WalOp {
         /// Index specification documents.
         indexes: Vec<Document>,
     },
+    /// Drop one secondary index, or every secondary index when `index` is `"*"`.
+    DropIndexes {
+        /// `db.collection` namespace.
+        collection: String,
+        /// Index name, or `"*"`.
+        index: String,
+    },
+    /// Replace a collection's document validator.
+    CollMod {
+        /// `db.collection` namespace.
+        collection: String,
+        /// Validator document (`required`, `properties`).
+        validator: Document,
+    },
+    /// Several mutations committed as one transaction.
+    ///
+    /// Recovery applies every inner operation or none of them: a torn
+    /// tail drops the whole record, so a crash cannot publish half of
+    /// the commit.
+    Transaction {
+        /// Mutations in commit order.
+        ops: Vec<WalOp>,
+    },
 }
 
 /// A record as stored on disk.
@@ -160,6 +183,17 @@ impl WalOp {
                 collection: collection.clone(),
                 indexes: indexes.clone(),
             }),
+            PartitionCommand::DropIndexes { collection, index } => Some(Self::DropIndexes {
+                collection: collection.clone(),
+                index: index.clone(),
+            }),
+            PartitionCommand::CollMod {
+                collection,
+                validator,
+            } => Some(Self::CollMod {
+                collection: collection.clone(),
+                validator: validator.clone(),
+            }),
             PartitionCommand::Find { .. }
             | PartitionCommand::Aggregate { .. }
             | PartitionCommand::Count { .. }
@@ -168,12 +202,27 @@ impl WalOp {
             | PartitionCommand::ListDatabases { .. }
             | PartitionCommand::CollectionStats { .. }
             | PartitionCommand::DatabaseStats { .. }
-            | PartitionCommand::Search { .. } => None,
+            | PartitionCommand::Search { .. }
+            | PartitionCommand::BeginTransaction { .. }
+            | PartitionCommand::CommitTransaction { .. }
+            | PartitionCommand::AbortTransaction { .. }
+            | PartitionCommand::Explain { .. }
+            | PartitionCommand::Transactional { .. } => None,
+        }
+    }
+
+    /// Rebuilds the commands a worker applies during recovery.
+    ///
+    /// A transaction record expands into its inner mutations, in order.
+    pub fn into_commands(self) -> Vec<PartitionCommand> {
+        match self {
+            Self::Transaction { ops } => ops.into_iter().flat_map(Self::into_commands).collect(),
+            other => vec![other.into_command()],
         }
     }
 
     /// Rebuilds the command a worker applies during recovery.
-    pub fn into_command(self) -> PartitionCommand {
+    fn into_command(self) -> PartitionCommand {
         match self {
             Self::Insert {
                 collection,
@@ -214,6 +263,19 @@ impl WalOp {
                 collection,
                 indexes,
             },
+            Self::DropIndexes { collection, index } => {
+                PartitionCommand::DropIndexes { collection, index }
+            }
+            Self::CollMod {
+                collection,
+                validator,
+            } => PartitionCommand::CollMod {
+                collection,
+                validator,
+            },
+            Self::Transaction { .. } => {
+                unreachable!("transaction records expand in into_commands")
+            }
         }
     }
 
@@ -227,6 +289,9 @@ impl WalOp {
             Self::DropDatabase { .. } => "dropDatabase",
             Self::CreateCollection { .. } => "create",
             Self::CreateIndexes { .. } => "createIndexes",
+            Self::DropIndexes { .. } => "dropIndexes",
+            Self::CollMod { .. } => "collMod",
+            Self::Transaction { .. } => "transaction",
         }
     }
 
@@ -273,6 +338,29 @@ impl WalOp {
                 body.insert("ns", collection.clone());
                 body.insert("indexes", docs_to_bson(indexes));
             }
+            Self::DropIndexes { collection, index } => {
+                body.insert("ns", collection.clone());
+                body.insert("index", index.clone());
+            }
+            Self::CollMod {
+                collection,
+                validator,
+            } => {
+                body.insert("ns", collection.clone());
+                body.insert("validator", validator.clone());
+            }
+            Self::Transaction { ops } => {
+                let encoded = ops
+                    .iter()
+                    .map(|op| {
+                        bson::from_slice::<Document>(&op.encode()?).map_err(|err| err.to_string())
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                body.insert(
+                    "ops",
+                    Bson::Array(encoded.into_iter().map(Bson::Document).collect()),
+                );
+            }
         }
         bson::to_vec(&body).map_err(|err| format!("wal encode: {}", err))
     }
@@ -312,6 +400,28 @@ impl WalOp {
                 collection: required_str(&body, "ns")?,
                 indexes: required_docs(&body, "indexes")?,
             }),
+            "dropIndexes" => Ok(Self::DropIndexes {
+                collection: required_str(&body, "ns")?,
+                index: required_str(&body, "index")?,
+            }),
+            "collMod" => Ok(Self::CollMod {
+                collection: required_str(&body, "ns")?,
+                validator: required_doc(&body, "validator")?,
+            }),
+            "transaction" => {
+                let values = body
+                    .get_array("ops")
+                    .map_err(|_| "wal transaction is missing ops".to_string())?;
+                let mut ops = Vec::with_capacity(values.len());
+                for value in values {
+                    let document = value
+                        .as_document()
+                        .ok_or_else(|| "wal transaction op must be a document".to_string())?;
+                    let bytes = bson::to_vec(document).map_err(|err| err.to_string())?;
+                    ops.push(Self::decode(&bytes)?);
+                }
+                Ok(Self::Transaction { ops })
+            }
             other => Err(format!("wal payload has unknown op {}", other)),
         }
     }

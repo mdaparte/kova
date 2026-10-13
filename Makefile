@@ -27,7 +27,7 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug seed doc clean
+.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug seed indexes doc clean
 
 help:
 	@printf '%s\n' \
@@ -46,11 +46,13 @@ help:
 		'  run-release  cargo run --release' \
 		'  run-debug    cargo run with KOVA_LOG_LEVEL=debug' \
 		'  seed         Oracle emp/dept/salgrade/bonus into database db' \
+		'  indexes      index tour over the seeded emp collection' \
 		'  doc          cargo doc --no-deps --open' \
 		'  clean        cargo clean' \
 		'' \
-		'seed talks to a server that is already running.' \
+		'seed and indexes talk to a server that is already running.' \
 		'  make seed                 localhost:27018' \
+		'  make indexes              localhost:27018' \
 		'  make seed KOVA_PORT=27018'
 
 build:
@@ -96,6 +98,10 @@ run-debug:
 # The server must already be listening. Default port matches kova.toml (27018).
 seed:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/seed-oracle.js
+
+# Walks emp indexes against the seeded sample. Does not drop the database.
+indexes:
+	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/index-demo.js
 
 doc:
 	$(CARGO) doc --no-deps --open
