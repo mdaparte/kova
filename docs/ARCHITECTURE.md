@@ -40,7 +40,7 @@ Rust concurrency, memory management, and storage engine design.
 
 ## 3. Non-Goals (Current Phase)
 
-- Sharding across multiple nodes is out of scope until Phase 11 (optional).
+- Sharding across multiple nodes stays out of scope. Phase 11 is one replica set inside each process.
 - Full MongoDB command-level compatibility (only the wire protocol minimum
   required to speak with official drivers).
 - Documents stay on pages. A query reads through the buffer pool. Startup
@@ -209,13 +209,24 @@ because an update can move a document between pages.
 
 ### 4.5 Replication (Phase 11)
 
-- **Oplog (Capped Operations Log):** Every write is recorded in a capped
-  operations log with timestamps. Secondaries replay the oplog to stay in sync.
-- **Replica Sets:** Primary/Secondary/Arbiter roles with heartbeat monitoring
-  and automatic election.
-- **Read Preference:** Clients can read from primary, secondary, or nearest.
-- **Sharding (optional):** Consistent hashing with virtual nodes + key range
-  sharding (future extension).
+OpenRaft runs inside the `kova` process. One Raft group per process. The
+Raft log is the oplog (`data/raft-{id}/oplog.json`); its index is the
+timestamp. Heartbeats are AppendEntries. A majority of voters elects the
+primary.
+
+The network task proposes an auto-commit write with `client_write`. On
+commit, the state machine applies that command through the partition
+router, on the leader and on every follower. The worker does not propose
+the same write again. Reads, including reads on a secondary, stay local.
+
+`hello` carries `setName`, `isWritablePrimary`, `secondary`, `hosts`,
+`primary`, and `me` when replication is enabled. A node that is not the
+leader rejects writes with code 10107. `nearest` is chosen by the driver
+from `hosts`. Without `[replication]`, `hello` stays a standalone primary.
+
+An arbiter is a learner: it stores the oplog, applies no documents, and
+does not vote. Transactions are not logged. Sharding is not implemented.
+Snapshot shipping is off, so a follower catches up from the log.
 
 ## 5. Data Flow
 
@@ -228,6 +239,8 @@ because an update can move a document between pages.
    - Handshake commands → answered directly.
    - SQL commands → routed to the query engine (`src/query_engine/mod.rs`).
    - Data commands → routed to the storage layer via `PartitionCommand`.
+     When `[replication]` is on, an auto-commit write is proposed to
+     Raft first and applied only after it commits.
 6. The storage layer handles the command (insert, find, update, delete,
    search, SQL execution) inside its isolated memory region.
 7. Results flow back through an `mpsc` channel and are serialized as a
@@ -251,6 +264,10 @@ about and ignored.
 | `storage.page_size` | `KOVA_PAGE_SIZE` | `16384` | Fixed page size in bytes |
 | `storage.buffer_pool_pages` | `KOVA_BUFFER_POOL_PAGES` | `4096` | Buffer pool capacity in pages |
 | `storage.wal_fsync` | `KOVA_WAL_FSYNC` | `true` | fsync each WAL append |
+| `replication.enabled` | — | `false` | Replica set. False is a single writable node |
+| `replication.id` | — | `1` | This process's Raft id |
+| `replication.bootstrap` | — | `false` | Commit the voter set and campaign |
+| `replication.members` | — | `[]` | `client` (MongoDB) and `raft` (RPC) addresses |
 
 ## 7. Phases
 
@@ -266,7 +283,7 @@ about and ignored.
 | 8 | Query language and aggregation pipeline, reading pages through the buffer pool |
 | 9 | Transactional storage: MVCC, ACID, multiple isolation levels |
 | 10 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
-| 11 | Replication & HA: Oplog, replica sets, heartbeat, election |
+| 11 | Replication & HA: OpenRaft oplog, election, heartbeats. Transactions stay on the primary |
 | 12 | On-disk page compression: zstd on the BSON payload; WAL stays uncompressed |
 
 ---

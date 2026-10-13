@@ -53,3 +53,20 @@ wal_segment_bytes = 16777216
 # Snapshot the working set after this many mutations. Shutdown also
 # checkpoints. 0 disables the periodic snapshot.
 checkpoint_every = 128
+
+# Replica set. Leave this out and Kova stays one writable node.
+# Election, heartbeats, and the oplog are OpenRaft inside this process.
+# `client` is the MongoDB port (the `port` above). `raft` is a second TCP
+# port used only between kova processes. An arbiter keeps the oplog, stores
+# no documents, and does not vote, so it cannot become primary.
+#
+# [replication]
+# enabled = true
+# id = 1
+# bootstrap = true
+# set_name = "kova"
+# members = [
+#   { id = 1, client = "127.0.0.1:27018", raft = "127.0.0.1:27118" },
+#   { id = 2, client = "127.0.0.1:27019", raft = "127.0.0.1:27119" },
+#   { id = 3, client = "127.0.0.1:27020", raft = "127.0.0.1:27120", arbiter = true },
+# ]

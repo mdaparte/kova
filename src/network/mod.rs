@@ -113,7 +113,10 @@ static REPLY_REQUEST_ID: AtomicI32 = AtomicI32::new(1);
 /// The default port is `27018`, so a local mongod can keep `27017`.
 /// It can be changed in `kova.toml` or overridden with the `KOVA_PORT`
 /// environment variable (environment wins over file).
-pub async fn start_server(router: PartitionRouter) -> std::io::Result<()> {
+pub async fn start_server(
+    router: PartitionRouter,
+    replica: Option<Arc<crate::replication::Replica>>,
+) -> std::io::Result<()> {
     let port = resolve_port();
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     LOGGER.info(format!("Network server started on port {}", port));
@@ -125,8 +128,11 @@ pub async fn start_server(router: PartitionRouter) -> std::io::Result<()> {
         // Each client gets its own task; `Arc` lets every task share
         // the same router without cloning worker channels individually.
         let client_router = router.clone();
+        let client_replica = replica.clone();
         spawn(async move {
-            if let Err(err) = handle_client(&mut socket, &client_router).await {
+            if let Err(err) =
+                handle_client(&mut socket, &client_router, client_replica.as_deref()).await
+            {
                 match err.kind() {
                     std::io::ErrorKind::UnexpectedEof => {
                         LOGGER.info(format!("Client {} disconnected", addr));
@@ -143,7 +149,11 @@ pub async fn start_server(router: PartitionRouter) -> std::io::Result<()> {
 /// Each iteration reads the 16-byte header, then the remaining
 /// `messageLength - 16` bytes, decodes the OP_MSG body, executes the
 /// command through the router and writes the reply.
-async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std::io::Result<()> {
+async fn handle_client(
+    socket: &mut TcpStream,
+    router: &PartitionRouter,
+    replica: Option<&crate::replication::Replica>,
+) -> std::io::Result<()> {
     loop {
         // ---- header ------------------------------------------------
         // `with_capacity` only reserves memory; the length must be set
@@ -201,7 +211,8 @@ async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std:
                     header.request_id, header.message_length
                 ));
 
-                if let Err(err) = process_op_msg(&header, &body_buf, router, socket).await {
+                if let Err(err) = process_op_msg(&header, &body_buf, router, replica, socket).await
+                {
                     // A bounded hex prefix turns "section kind 189"
                     // into an actionable diagnosis of what the client
                     // actually put on the wire.
@@ -225,7 +236,9 @@ async fn handle_client(socket: &mut TcpStream, router: &PartitionRouter) -> std:
                     header.request_id, header.message_length
                 ));
 
-                if let Err(err) = process_op_query(&header, &body_buf, router, socket).await {
+                if let Err(err) =
+                    process_op_query(&header, &body_buf, router, replica, socket).await
+                {
                     LOGGER.warn(format!("Failed to process OP_QUERY: {}", err));
                 }
             } else {
@@ -243,13 +256,14 @@ async fn process_op_msg(
     header: &wire::MessageHeader,
     body: &[u8],
     router: &PartitionRouter,
+    replica: Option<&crate::replication::Replica>,
     socket: &mut TcpStream,
 ) -> Result<(), String> {
     let msg = protocol::decode_op_msg(body)?;
     let local_addr = socket
         .local_addr()
         .map_err(|err| format!("failed to read local address: {}", err))?;
-    let reply_body = execute_command(&msg.command, router, local_addr).await;
+    let reply_body = execute_replicated(&msg.command, router, local_addr, replica).await;
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_reply(request_id, header.request_id, &reply_body)?;
@@ -276,13 +290,14 @@ async fn process_op_query(
     header: &wire::MessageHeader,
     body: &[u8],
     router: &PartitionRouter,
+    replica: Option<&crate::replication::Replica>,
     socket: &mut TcpStream,
 ) -> Result<(), String> {
     let query = protocol::decode_op_query(body)?;
     let local_addr = socket
         .local_addr()
         .map_err(|err| format!("failed to read local address: {}", err))?;
-    let reply_body = execute_command(&query.command, router, local_addr).await;
+    let reply_body = execute_replicated(&query.command, router, local_addr, replica).await;
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_op_reply(request_id, header.request_id, &reply_body)?;
@@ -298,6 +313,109 @@ async fn process_op_query(
     ));
 
     Ok(())
+}
+
+/// Applies a committed oplog command on this process. Raft calls this
+/// from the state machine; it must not propose the command again.
+pub fn storage_applier(router: PartitionRouter) -> Arc<dyn crate::replication::CommandApplier> {
+    Arc::new(StorageApplier { router })
+}
+
+struct StorageApplier {
+    router: PartitionRouter,
+}
+
+#[async_trait::async_trait]
+impl crate::replication::CommandApplier for StorageApplier {
+    async fn apply(&self, body: &[u8]) -> Vec<u8> {
+        let command = match bson::Document::from_reader(&mut std::io::Cursor::new(body)) {
+            Ok(command) => command,
+            Err(err) => {
+                return bson::to_vec(&bson::doc! { "ok": 0.0, "errmsg": err.to_string() })
+                    .unwrap_or_default();
+            }
+        };
+        let local = "0.0.0.0:0".parse().expect("address");
+        let reply = execute_command(&command, &self.router, local).await;
+        bson::to_vec(&reply).unwrap_or_default()
+    }
+}
+
+/// Auto-commit mutations travel through Raft. Reads stay on this node.
+/// Transactions stay on the primary: a commit replays writes that exist
+/// only in that worker, so the command itself is not an oplog entry.
+fn is_replicated_write(command: &bson::Document) -> bool {
+    if command.contains_key("txnId") {
+        return false;
+    }
+    const KEYS: &[&str] = &[
+        "insert",
+        "update",
+        "delete",
+        "findAndModify",
+        "findandmodify",
+        "drop",
+        "dropDatabase",
+        "create",
+        "createIndexes",
+        "dropIndexes",
+        "deleteIndexes",
+        "collMod",
+    ];
+    if KEYS.iter().any(|key| command.contains_key(*key)) {
+        return true;
+    }
+    if !command.contains_key("aggregate") {
+        return false;
+    }
+    command.get_array("pipeline").ok().is_some_and(|stages| {
+        stages.iter().any(|stage| {
+            stage
+                .as_document()
+                .is_some_and(|doc| doc.contains_key("$out"))
+        })
+    })
+}
+
+fn is_leader_local(command: &bson::Document) -> bool {
+    command.contains_key("txnId")
+        || command.contains_key("beginTransaction")
+        || command.contains_key("commitTransaction")
+        || command.contains_key("abortTransaction")
+}
+
+async fn execute_replicated(
+    command: &bson::Document,
+    router: &PartitionRouter,
+    local_addr: std::net::SocketAddr,
+    replica: Option<&crate::replication::Replica>,
+) -> bson::Document {
+    let Some(replica) = replica else {
+        return execute_command(command, router, local_addr).await;
+    };
+    if command.contains_key("hello")
+        || command.contains_key("isMaster")
+        || command.contains_key("ismaster")
+    {
+        if let Some(reply) = protocol::special_command(command) {
+            return replica.overlay_hello(reply);
+        }
+    }
+    if command.contains_key("replSetGetStatus") {
+        return replica.status();
+    }
+    if command.get_str("find").ok() == Some("oplog.rs")
+        && command.get_str("$db").ok() == Some("local")
+    {
+        return replica.oplog_cursor(command);
+    }
+    if (is_replicated_write(command) || is_leader_local(command)) && !replica.is_leader() {
+        return crate::replication::not_primary();
+    }
+    if is_replicated_write(command) {
+        return replica.propose(command.clone()).await.0;
+    }
+    execute_command(command, router, local_addr).await
 }
 
 /// Runs one decoded command and returns the reply document.
@@ -1034,6 +1152,28 @@ mod tests {
     use super::*;
     use crate::network::wire::{MessageHeader, HEADER_SIZE, OP_MSG};
 
+    #[test]
+    fn replicated_writes_are_auto_commit_mutations() {
+        assert!(is_replicated_write(
+            &bson::doc! { "insert": "emp", "documents": [] }
+        ));
+        assert!(is_replicated_write(&bson::doc! {
+            "aggregate": "emp",
+            "pipeline": [ { "$out": "bonus" } ],
+        }));
+        assert!(!is_replicated_write(&bson::doc! { "find": "emp" }));
+        assert!(!is_replicated_write(
+            &bson::doc! { "insert": "emp", "txnId": 1i64 }
+        ));
+        assert!(!is_replicated_write(
+            &bson::doc! { "aggregate": "emp", "pipeline": [ { "$match": {} } ] }
+        ));
+        assert!(is_leader_local(&bson::doc! { "beginTransaction": "emp" }));
+        assert!(is_leader_local(
+            &bson::doc! { "commitTransaction": 1i32, "txnId": 1i64 }
+        ));
+    }
+
     /// Builds a 16-byte little-endian header with the given fields.
     fn build_header(
         message_length: u32,
@@ -1090,7 +1230,7 @@ mod tests {
                 };
                 let client_router = server_router.clone();
                 tokio::spawn(async move {
-                    let _ = handle_client(&mut socket, &client_router).await;
+                    let _ = handle_client(&mut socket, &client_router, None).await;
                 });
             }
         });
@@ -1307,7 +1447,7 @@ mod tests {
         let server_router = router.clone();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            let _ = handle_client(&mut socket, &server_router).await;
+            let _ = handle_client(&mut socket, &server_router, None).await;
         });
 
         // Build an OP_MSG frame carrying an insert command.
@@ -1361,7 +1501,7 @@ mod tests {
         let server_router = router.clone();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            let _ = handle_client(&mut socket, &server_router).await;
+            let _ = handle_client(&mut socket, &server_router, None).await;
         });
 
         let frame = protocol::encode_reply(1, 0, &bson::doc! { "ping": 1.0 }).expect("encode");
@@ -1381,7 +1521,7 @@ mod tests {
         let server_router = router.clone();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            let _ = handle_client(&mut socket, &server_router).await;
+            let _ = handle_client(&mut socket, &server_router, None).await;
         });
 
         let frame = protocol::encode_reply(1, 0, &bson::doc! { "hello": 1.0 }).expect("encode");
@@ -1410,7 +1550,7 @@ mod tests {
         let server_router = router.clone();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            let _ = handle_client(&mut socket, &server_router).await;
+            let _ = handle_client(&mut socket, &server_router, None).await;
         });
 
         // Legacy OP_QUERY body, exactly as a real driver sends it.
@@ -1482,7 +1622,7 @@ mod tests {
                 };
                 let client_router = server_router.clone();
                 tokio::spawn(async move {
-                    let _ = handle_client(&mut socket, &client_router).await;
+                    let _ = handle_client(&mut socket, &client_router, None).await;
                 });
             }
         });
@@ -1529,7 +1669,7 @@ mod tests {
         let server_router = router.clone();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            let _ = handle_client(&mut socket, &server_router).await;
+            let _ = handle_client(&mut socket, &server_router, None).await;
         });
 
         let command = bson::doc! { "reIndex": "users" };

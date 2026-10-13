@@ -14,3 +14,5 @@ crossbeam-channel = "0.5"
 datafusion = "45"
 regex = "1"
 async-trait = "0.1.92"
+serde_json = "1"
+openraft = { version = "0.9", default-features = false, features = ["serde", "storage-v2"] }

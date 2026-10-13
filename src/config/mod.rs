@@ -77,6 +77,8 @@ pub struct Config {
     pub search: SearchConfig,
     /// Disk layout, WAL, and buffer pool (Phase 6).
     pub storage: StorageConfig,
+    /// Replica set. Absent or `enabled = false` keeps a single writable node.
+    pub replication: ReplicationConfig,
 }
 
 /// Full-text search configuration.
@@ -102,7 +104,110 @@ impl Default for Config {
             warn_on_non_mongo_queries: true,
             search: SearchConfig::default(),
             storage: StorageConfig::default(),
+            replication: ReplicationConfig::default(),
         }
+    }
+}
+
+fn default_set_name() -> String {
+    "kova".into()
+}
+
+/// Replica set membership. Election and the oplog stay inside this process.
+///
+/// Leave `enabled` false (the default) and Kova answers `hello` as a
+/// standalone primary. Turn it on only when every `members` entry is
+/// another `kova` process.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ReplicationConfig {
+    /// Join a replica set. False keeps the standalone path.
+    pub enabled: bool,
+    /// This process's Raft id. Must appear in [`Self::members`].
+    pub id: u64,
+    /// Commit the voter set and start an election. One process in the
+    /// set does this; the others wait for that log. Doing it on every
+    /// process with the same `members` list is also safe.
+    pub bootstrap: bool,
+    /// Name reported in `hello.setName`.
+    #[serde(default = "default_set_name")]
+    pub set_name: String,
+    /// Every member, including this process. An `arbiter` receives the
+    /// oplog and does not store documents or vote.
+    pub members: Vec<ReplicaMember>,
+}
+
+/// One replica-set member.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ReplicaMember {
+    pub id: u64,
+    /// MongoDB wire address drivers should use.
+    pub client: String,
+    /// Raft RPC address. Not the MongoDB port.
+    pub raft: String,
+    /// Learner that stores the oplog and no documents.
+    #[serde(default)]
+    pub arbiter: bool,
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            id: 1,
+            bootstrap: false,
+            set_name: default_set_name(),
+            members: Vec::new(),
+        }
+    }
+}
+
+impl ReplicationConfig {
+    fn validate(&self, port: u16) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.members.is_empty() {
+            return Err(format!(
+                "{CONFIG_FILE}: replication.members must list the set"
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for member in &self.members {
+            if !seen.insert(member.id) {
+                return Err(format!(
+                    "{CONFIG_FILE}: replication member id {} is duplicated",
+                    member.id
+                ));
+            }
+            if member.client.is_empty() || member.raft.is_empty() {
+                return Err(format!(
+                    "{CONFIG_FILE}: replication member {} needs client and raft addresses",
+                    member.id
+                ));
+            }
+        }
+        let me = self
+            .members
+            .iter()
+            .find(|member| member.id == self.id)
+            .ok_or_else(|| format!("{CONFIG_FILE}: replication.id must be one of members"))?;
+        if self.bootstrap && me.arbiter {
+            return Err(format!(
+                "{CONFIG_FILE}: an arbiter cannot bootstrap the set"
+            ));
+        }
+        let client_port = me
+            .client
+            .rsplit_once(':')
+            .and_then(|(_, raw)| raw.parse::<u16>().ok());
+        if client_port != Some(port) {
+            return Err(format!(
+                "{CONFIG_FILE}: replication member {} client {} must use the listener port {}",
+                me.id, me.client, port
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -299,6 +404,7 @@ impl Config {
             ));
         }
         self.storage.validate()?;
+        self.replication.validate(self.port)?;
         Ok(())
     }
 }
@@ -471,6 +577,31 @@ mod tests {
         assert_eq!(Level::parse("DEBUG"), Some(Level::Debug));
         assert_eq!(Level::parse(" Warn "), Some(Level::Warn));
         assert_eq!(Level::parse("loud"), None);
+    }
+
+    #[test]
+    fn test_replication_section_is_optional_and_parsed() {
+        let standalone = Config::from_toml("port = 27018").expect("parse");
+        assert!(!standalone.replication.enabled);
+        standalone.validate().expect("standalone");
+
+        let config = Config::from_toml(
+            r#"
+            port = 27018
+            [replication]
+            enabled = true
+            id = 1
+            bootstrap = true
+            members = [
+              { id = 1, client = "127.0.0.1:27018", raft = "127.0.0.1:27118" },
+              { id = 2, client = "127.0.0.1:27019", raft = "127.0.0.1:27119", arbiter = true },
+            ]
+            "#,
+        )
+        .expect("parse");
+        assert!(config.replication.enabled);
+        assert!(config.replication.members[1].arbiter);
+        config.validate().expect("set");
     }
 
     #[test]

@@ -44,8 +44,8 @@ parser + optimizer), Tantivy (full-text search).
 | `src/index/btree.rs` *(Phase 10)* | B-Tree index for range queries and composite keys |
 | `src/index/hash_index.rs` *(Phase 10)* | Hash index for O(1) lookups |
 | `src/index/manager.rs` *(Phase 10)* | Index lifecycle (create, drop, auto-maintain) |
-| `src/replication/oplog.rs` *(Phase 11)* | Capped operations log for replication |
-| `src/replication/replica.rs` *(Phase 11)* | Replica set management, heartbeat, election |
+| `src/replication/oplog.rs` *(Phase 11)* | Raft log used as the oplog, durable under `data/raft-{id}/` |
+| `src/replication/replica.rs` *(Phase 11)* | OpenRaft membership, election, heartbeats, and apply |
 | `src/query_engine/mod.rs` | DataFusion integration, SQL parser, query optimizer, execution |
 | `kova.toml` | Engine configuration file (environment variables override it) |
 | `src/logger/` | Structured logging, log capture, external sinks |
@@ -79,8 +79,10 @@ parser + optimizer), Tantivy (full-text search).
   MUST read and write through the buffer pool and MUST be visible to the
   query planner.
 - `replication/oplog.rs` and `replication/replica.rs` (Phase 11) MUST
-  read and write the oplog through the storage engine and MUST speak
-  heartbeat and election messages through the network layer.
+  keep the oplog as the Raft log. A committed entry is applied through
+  the partition router. Heartbeats and elections are OpenRaft's, not a
+  second protocol. The standalone path MUST stay in place when
+  `[replication]` is absent.
 
 ### 3.3 Naming
 
@@ -171,8 +173,8 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   isolation levels. ✅ Complete.
 - **Phase 10 — Indexing subsystem:** B-Tree, hash, unique, and sparse indexes,
   rebuilt from document pages and maintained on every write. ✅ Complete.
-- **Phase 11 — Replication and HA:** oplog, replica sets, heartbeat, election,
-  read preference. ⚪ Planned.
+- **Phase 11 — Replication and HA:** OpenRaft oplog, election, heartbeats,
+  and replica fields on `hello`. Transactions stay on the primary. ✅ Complete.
 - **Phase 12 — On-disk page compression:** zstd on the BSON payload of each
   page, WiredTiger-style. The WAL stays uncompressed. ⚪ Planned.
 

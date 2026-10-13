@@ -4,6 +4,7 @@ mod logger;
 mod network;
 mod protocol;
 mod query_engine;
+mod replication;
 mod search;
 mod storage;
 mod types;
@@ -64,8 +65,20 @@ async fn main() {
     ));
 
     let router = storage::PartitionRouter::new(PARTITION_COUNT);
+    let replica = if config.replication.enabled {
+        let applier = network::storage_applier(router.clone());
+        match replication::boot(config, applier).await {
+            Ok(replica) => Some(std::sync::Arc::new(replica)),
+            Err(err) => {
+                LOGGER.error(format!("Replication failed to start: {}", err));
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
 
-    if let Err(err) = network::start_server(router).await {
+    if let Err(err) = network::start_server(router, replica).await {
         LOGGER.error(format!("Network server error: {}", err));
         std::process::exit(1);
     }

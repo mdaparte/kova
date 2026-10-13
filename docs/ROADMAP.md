@@ -24,7 +24,7 @@ replication, and multi-model indexing.
 | 8 | Query Language and Aggregation Pipeline | ✅ Complete |
 | 9 | Transactional Storage (MVCC + ACID + Isolation) | ✅ Complete |
 | 10 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ✅ Complete |
-| 11 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ⚪ Planned |
+| 11 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ✅ Complete |
 | 12 | On-Disk Page Compression (zstd, WiredTiger-style) | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
@@ -477,45 +477,38 @@ applies the predicate again. The SQL reply includes the winning stage.
 - [x] Add index tests: range, hash, id lookup, unique, sparse, update,
   drop, and restart.
 
-## Phase 11 — Replication & High Availability (Oplog + Replica Sets + Heartbeat) ⚪ Planned
+## Phase 11 — Replication & High Availability (Oplog + Replica Sets + Heartbeat) ✅
 
-_Inspiration: GraniteDB (Oplog, Replica Sets, Heartbeat, Sharding)_
+Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. There is no ZooKeeper and no second election protocol. With no `[replication]` section the process stays a single writable node.
 
-### 11.1 Oplog (Capped Operations Log)
+### 11.1 Oplog
 
-- Every write operation is recorded in a capped operations log with a timestamp.
-- The oplog is used for replication: secondaries replay the oplog to stay in sync
-  with the primary.
-- Timestamp-based sync queries: a secondary asks the primary for operations
-  after a given timestamp.
+- The Raft log is the oplog. It is rewritten to `data/raft-{id}/oplog.json` before OpenRaft is told the append is durable. The log index is the timestamp.
+- A committed auto-commit command is applied on the leader and on every follower through the partition workers. The network task proposes the command; the worker does not propose it again.
+- `find` on `local.oplog.rs` returns entries after `ts` (`$gt` / `$gte`). `ts` is the log index.
+- Inserts without `_id` receive one before the command is logged, so every replica stores the same id.
+- Transactions (`beginTransaction`, `commitTransaction`, `abortTransaction`, and any command carrying `txnId`) stay on the primary. A commit's writes live in that worker and are not an oplog entry.
+- Snapshot shipping is off (`SnapshotPolicy::Never`). A follower that falls outside the retained log cannot catch up from a document snapshot.
 
 ### 11.2 Replica Sets
 
-- Roles: Primary (read/write), Secondary (read-only, replicates from primary),
-  Arbiter (votes, no data).
-- Heartbeat monitoring: each member sends heartbeats to the others; if a member
-  misses heartbeats, it is considered down.
-- Election: if the primary is down, the secondaries hold an election to choose a
-  new primary.
-- Read preference: clients can read from primary, secondary, or nearest.
-
-### 11.3 Sharding (future extension, optional)
-
-- Consistent hashing with virtual nodes for even data distribution.
-- Key range sharding: automatic routing based on shard key values.
-- Shard router: routes queries to the correct shard.
+- `[replication]` in `kova.toml` lists the members. `client` is the MongoDB port. `raft` is a second TCP port, one request per connection, length-prefixed JSON.
+- The bootstrap process commits the voter set. The others wait for that log. The same membership on more than one bootstrap is safe; two different memberships split the set.
+- Heartbeats and elections are Raft's. A majority of voting members elects the primary. A node that is not the leader rejects writes with `NotWritablePrimary` (code 10107). Secondaries serve reads.
+- `hello` reports `setName`, `isWritablePrimary`, `secondary`, `hosts`, `primary`, and `me`. Read preference `nearest` is the driver's choice among `hosts`; this process does not proxy the read.
+- An `arbiter` is a Raft learner. It keeps the oplog, stores no documents, and does not vote, so it cannot become primary. OpenRaft will elect any voter, and a data-less primary cannot serve the database.
+- Sharding (consistent hashing, key ranges, a shard router) is not part of this phase.
 
 ### Phase 11 — Sub-tasks
 
-- [ ] Design the oplog on-disk layout (capped collection of operations with
-  timestamps).
-- [ ] Implement `src/replication/oplog.rs`: capped operations log + timestamp
-  queries.
-- [ ] Implement `src/replication/replica.rs`: replica set management (add/remove
-  members, election, state transitions).
-- [ ] Implement heartbeat monitor: track member health, detect failures.
-- [ ] Integrate oplog with the storage engine (every write appends to the oplog).
-- [ ] Add replication tests: replica set setup, failover, oplog replay, sync.
+- [x] Oplog on disk: the Raft log in `data/raft-{id}/oplog.json`, timestamped by log index.
+- [x] `src/replication/oplog.rs`: durable Raft log and "after this timestamp" reads.
+- [x] `src/replication/replica.rs`: membership, election, and heartbeats via OpenRaft.
+- [x] Heartbeats are Raft AppendEntries. A missed election timeout starts a campaign.
+- [x] Auto-commit writes are proposed from the network task and applied through the partition workers.
+- [x] Tests: three voters replicate a write and elect a new leader; an arbiter keeps the oplog and stores no documents.
+- Transactions are not in the oplog.
+- Sharding remains a later extension.
 
 ## Phase 12 — On-Disk Page Compression ⚪ Planned
 
@@ -568,7 +561,7 @@ WiredTiger compresses the pages of a collection (snappy or zstd). Kova pages sto
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| No replication | 11 | Oplog + replica sets needed. |
+| Transactions are not in the oplog | 11 | `begin` / `commit` / `abort` and any command with `txnId` stay on the primary. |
 | Pages are stored uncompressed | 12 | Compress the BSON payload in each page (zstd), the way WiredTiger compresses `.wt` pages. The WAL stays uncompressed. |
 
 ## Architecture Diagram (updated)
@@ -627,6 +620,6 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phase 10 is complete: a secondary index is rebuilt from document pages
-and names the ids a find keeps. Next is replication and on-disk page
-compression (Phase 12).*
+*Phase 11 is complete: auto-commit writes replicate through an OpenRaft
+oplog inside the Kova process. Standalone mode is unchanged when
+`[replication]` is absent. Next is on-disk page compression (Phase 12).*
