@@ -8,9 +8,13 @@
 //! retries. `$out` does not write: the network layer inserts the
 //! result through the normal path so the WAL records it.
 
+use std::collections::HashMap;
+
 use bson::{doc, Bson, Document};
 
 use super::{bson_cmp, bson_eq, document_matches, validate_filter};
+
+type Vars = HashMap<String, Bson>;
 
 /// Foreign documents for one `$lookup`, or a signal that another
 /// partition owns that collection.
@@ -61,9 +65,10 @@ pub(super) fn apply_view(
         docs.truncate(limit);
     }
     if let Some(spec) = projection {
+        let vars = Vars::new();
         docs = docs
             .into_iter()
-            .map(|doc| project_document(&doc, spec))
+            .map(|doc| project_document(&doc, spec, &vars))
             .collect::<Result<Vec<_>, _>>()?;
     }
     Ok(docs)
@@ -83,6 +88,11 @@ pub(super) fn split_leading_matches(pipeline: &[Document]) -> Result<(Document, 
             .as_document()
             .ok_or_else(|| "$match requires a document".to_string())?
             .clone();
+        // `$expr` is an aggregation expression, so the page scan cannot
+        // apply it. Leave this `$match` for the pipeline.
+        if filter.contains_key("$expr") {
+            break;
+        }
         validate_filter(&filter)?;
         clauses.push(filter);
         index += 1;
@@ -121,6 +131,15 @@ pub(super) fn run(
     stages: &[Document],
     lookup: &mut dyn FnMut(&str) -> Result<Foreign, String>,
 ) -> Result<Output, String> {
+    run_scoped(input, stages, lookup, &Vars::new())
+}
+
+fn run_scoped(
+    input: Vec<Document>,
+    stages: &[Document],
+    lookup: &mut dyn FnMut(&str) -> Result<Foreign, String>,
+    vars: &Vars,
+) -> Result<Output, String> {
     let mut docs = input;
     for (index, stage) in stages.iter().enumerate() {
         let (name, value) = stage_pair(stage)?;
@@ -129,8 +148,7 @@ pub(super) fn run(
                 let filter = value
                     .as_document()
                     .ok_or_else(|| "$match requires a document".to_string())?;
-                validate_filter(filter)?;
-                docs.retain(|doc| document_matches(doc, filter));
+                docs = select_matching(docs, filter, vars)?;
             }
             "$project" => {
                 let spec = value
@@ -138,7 +156,7 @@ pub(super) fn run(
                     .ok_or_else(|| "$project requires a document".to_string())?;
                 docs = docs
                     .into_iter()
-                    .map(|doc| project_document(&doc, spec))
+                    .map(|doc| project_document(&doc, spec, vars))
                     .collect::<Result<Vec<_>, _>>()?;
             }
             "$addFields" => {
@@ -147,7 +165,7 @@ pub(super) fn run(
                     .ok_or_else(|| "$addFields requires a document".to_string())?;
                 docs = docs
                     .into_iter()
-                    .map(|doc| add_fields(&doc, spec))
+                    .map(|doc| add_fields(&doc, spec, vars))
                     .collect::<Result<Vec<_>, _>>()?;
             }
             "$replaceRoot" => {
@@ -159,14 +177,14 @@ pub(super) fn run(
                     .ok_or_else(|| "$replaceRoot requires 'newRoot'".to_string())?;
                 docs = docs
                     .into_iter()
-                    .map(|doc| replace_root(&doc, expr))
+                    .map(|doc| replace_root(&doc, expr, vars))
                     .collect::<Result<Vec<_>, _>>()?;
             }
             "$group" => {
                 let spec = value
                     .as_document()
                     .ok_or_else(|| "$group requires a document".to_string())?;
-                docs = group_documents(&docs, spec)?;
+                docs = group_documents(&docs, spec, vars)?;
             }
             "$sort" => {
                 let spec = value
@@ -198,9 +216,6 @@ pub(super) fn run(
                 let spec = value
                     .as_document()
                     .ok_or_else(|| "$lookup requires a document".to_string())?;
-                if spec.contains_key("pipeline") {
-                    return Err("$lookup with a nested pipeline is not supported".to_string());
-                }
                 let from = spec
                     .get_str("from")
                     .map_err(|_| "$lookup requires a 'from' string".to_string())?;
@@ -210,9 +225,10 @@ pub(super) fn run(
                             namespace: from.to_string(),
                         });
                     }
-                    Foreign::Ready(foreign) => {
-                        docs = hash_lookup(docs, spec, &foreign)?;
-                    }
+                    Foreign::Ready(foreign) => match apply_lookup(docs, spec, foreign, lookup)? {
+                        Output::Docs(rows) => docs = rows,
+                        other => return Ok(other),
+                    },
                 }
             }
             "$out" => {
@@ -349,7 +365,7 @@ fn type_rank(value: &Bson) -> u8 {
     }
 }
 
-fn project_document(doc: &Document, spec: &Document) -> Result<Document, String> {
+fn project_document(doc: &Document, spec: &Document, vars: &Vars) -> Result<Document, String> {
     if spec.is_empty() {
         return Ok(doc.clone());
     }
@@ -389,7 +405,7 @@ fn project_document(doc: &Document, spec: &Document) -> Result<Document, String>
     match spec.get("_id") {
         Some(value) if is_exclusion(value) => {}
         Some(value) if !is_inclusion_flag(value) => {
-            out.insert("_id", eval_expr(doc, value)?);
+            out.insert("_id", eval_expr(doc, value, vars)?);
         }
         _ => {
             if let Some(id) = doc.get("_id") {
@@ -406,7 +422,7 @@ fn project_document(doc: &Document, spec: &Document) -> Result<Document, String>
                 set_path(&mut out, key, found.clone());
             }
         } else {
-            set_path(&mut out, key, eval_expr(doc, value)?);
+            set_path(&mut out, key, eval_expr(doc, value, vars)?);
         }
     }
     Ok(out)
@@ -428,29 +444,24 @@ fn is_inclusion_flag(value: &Bson) -> bool {
     }
 }
 
-fn add_fields(doc: &Document, spec: &Document) -> Result<Document, String> {
+fn add_fields(doc: &Document, spec: &Document, vars: &Vars) -> Result<Document, String> {
     let mut out = doc.clone();
     for (key, value) in spec {
-        set_path(&mut out, key, eval_expr(doc, value)?);
+        set_path(&mut out, key, eval_expr(doc, value, vars)?);
     }
     Ok(out)
 }
 
-fn replace_root(doc: &Document, expr: &Bson) -> Result<Document, String> {
-    match eval_expr(doc, expr)? {
+fn replace_root(doc: &Document, expr: &Bson, vars: &Vars) -> Result<Document, String> {
+    match eval_expr(doc, expr, vars)? {
         Bson::Document(root) => Ok(root),
         _ => Err("$replaceRoot 'newRoot' must resolve to a document".to_string()),
     }
 }
 
-fn eval_expr(doc: &Document, expr: &Bson) -> Result<Bson, String> {
+fn eval_expr(doc: &Document, expr: &Bson, vars: &Vars) -> Result<Bson, String> {
     match expr {
-        Bson::String(path) if path == "$$ROOT" || path == "$$CURRENT" => {
-            Ok(Bson::Document(doc.clone()))
-        }
-        Bson::String(path) if path.starts_with("$$") => {
-            Err(format!("unknown expression variable '{path}'"))
-        }
+        Bson::String(path) if path.starts_with("$$") => resolve_var(path, doc, vars),
         Bson::String(path) if path.starts_with('$') => {
             let name = &path[1..];
             if name.is_empty() {
@@ -460,27 +471,147 @@ fn eval_expr(doc: &Document, expr: &Bson) -> Result<Bson, String> {
         }
         Bson::Document(inner) if is_single_operator(inner) => {
             let (op, operand) = inner.iter().next().expect("one operator");
-            match op.as_str() {
-                "$literal" => Ok(operand.clone()),
-                other => Err(format!("unknown expression '{other}'")),
-            }
+            eval_operator(doc, op, operand, vars)
         }
         Bson::Document(inner) => {
             let mut out = Document::new();
             for (key, value) in inner {
-                out.insert(key, eval_expr(doc, value)?);
+                out.insert(key, eval_expr(doc, value, vars)?);
             }
             Ok(Bson::Document(out))
         }
         Bson::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(eval_expr(doc, item)?);
+                out.push(eval_expr(doc, item, vars)?);
             }
             Ok(Bson::Array(out))
         }
         other => Ok(other.clone()),
     }
+}
+
+/// `$$name` reads a `let` binding. `$$ROOT` and `$$CURRENT` are the
+/// document the stage is visiting. A dotted `$$name.field` walks that
+/// binding when it is a document.
+fn resolve_var(path: &str, doc: &Document, vars: &Vars) -> Result<Bson, String> {
+    let body = &path[2..];
+    if body == "ROOT" || body == "CURRENT" {
+        return Ok(Bson::Document(doc.clone()));
+    }
+    let (name, tail) = match body.split_once('.') {
+        Some((name, tail)) => (name, Some(tail)),
+        None => (body, None),
+    };
+    if name.is_empty() {
+        return Err(format!("unknown expression variable '{path}'"));
+    }
+    let value = vars
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("unknown expression variable '{path}'"))?;
+    match tail {
+        None => Ok(value),
+        Some(rest) => match value {
+            Bson::Document(inner) => Ok(get_path(&inner, rest).cloned().unwrap_or(Bson::Null)),
+            _ => Ok(Bson::Null),
+        },
+    }
+}
+
+fn eval_operator(doc: &Document, op: &str, operand: &Bson, vars: &Vars) -> Result<Bson, String> {
+    match op {
+        "$literal" => Ok(operand.clone()),
+        "$and" => {
+            let items = operand
+                .as_array()
+                .ok_or_else(|| "$and requires an array of expressions".to_string())?;
+            for item in items {
+                if !is_truthy(&eval_expr(doc, item, vars)?) {
+                    return Ok(Bson::Boolean(false));
+                }
+            }
+            Ok(Bson::Boolean(true))
+        }
+        "$or" => {
+            let items = operand
+                .as_array()
+                .ok_or_else(|| "$or requires an array of expressions".to_string())?;
+            for item in items {
+                if is_truthy(&eval_expr(doc, item, vars)?) {
+                    return Ok(Bson::Boolean(true));
+                }
+            }
+            Ok(Bson::Boolean(false))
+        }
+        "$not" => {
+            let expr = match operand {
+                Bson::Array(items) if items.len() == 1 => &items[0],
+                other => other,
+            };
+            Ok(Bson::Boolean(!is_truthy(&eval_expr(doc, expr, vars)?)))
+        }
+        "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" => {
+            let items = operand.as_array().ok_or_else(|| {
+                format!("{op} requires an array of two expressions")
+            })?;
+            if items.len() != 2 {
+                return Err(format!("{op} requires an array of two expressions"));
+            }
+            let left = eval_expr(doc, &items[0], vars)?;
+            let right = eval_expr(doc, &items[1], vars)?;
+            let order = compare_values(Some(&left), Some(&right));
+            let equal = order == std::cmp::Ordering::Equal || bson_eq(&left, &right);
+            let flag = match op {
+                "$eq" => equal,
+                "$ne" => !equal,
+                "$gt" => order.is_gt(),
+                "$gte" => order.is_ge() || equal,
+                "$lt" => order.is_lt(),
+                "$lte" => order.is_le() || equal,
+                _ => false,
+            };
+            Ok(Bson::Boolean(flag))
+        }
+        other => Err(format!("unknown expression '{other}'")),
+    }
+}
+
+fn is_truthy(value: &Bson) -> bool {
+    match value {
+        Bson::Boolean(flag) => *flag,
+        Bson::Null => false,
+        Bson::Int32(0) | Bson::Int64(0) => false,
+        Bson::Double(number) if *number == 0.0 => false,
+        Bson::String(text) => !text.is_empty(),
+        Bson::Array(items) => !items.is_empty(),
+        Bson::Document(fields) => !fields.is_empty(),
+        _ => true,
+    }
+}
+
+fn select_matching(
+    docs: Vec<Document>,
+    filter: &Document,
+    vars: &Vars,
+) -> Result<Vec<Document>, String> {
+    let mut query = filter.clone();
+    let expr = query.remove("$expr");
+    if !query.is_empty() {
+        validate_filter(&query)?;
+    }
+    let mut kept = Vec::new();
+    for doc in docs {
+        let query_ok = query.is_empty() || document_matches(&doc, &query);
+        let expr_ok = match &expr {
+            None => true,
+            Some(expr) => is_truthy(&eval_expr(&doc, expr, vars)?),
+        };
+        if query_ok && expr_ok {
+            kept.push(doc);
+        }
+    }
+    Ok(kept)
 }
 
 fn is_single_operator(doc: &Document) -> bool {
@@ -523,7 +654,7 @@ struct Group {
     accs: Vec<AccState>,
 }
 
-fn group_documents(docs: &[Document], spec: &Document) -> Result<Vec<Document>, String> {
+fn group_documents(docs: &[Document], spec: &Document, vars: &Vars) -> Result<Vec<Document>, String> {
     let id_expr = spec
         .get("_id")
         .ok_or_else(|| "$group requires '_id'".to_string())?;
@@ -560,7 +691,7 @@ fn group_documents(docs: &[Document], spec: &Document) -> Result<Vec<Document>, 
 
     let mut groups: Vec<Group> = Vec::new();
     for doc in docs {
-        let id = eval_expr(doc, id_expr)?;
+        let id = eval_expr(doc, id_expr, vars)?;
         let key = canonical(&id);
         let group = if let Some(existing) = groups.iter_mut().find(|group| group.key == key) {
             existing
@@ -585,7 +716,7 @@ fn group_documents(docs: &[Document], spec: &Document) -> Result<Vec<Document>, 
             groups.last_mut().expect("just pushed")
         };
         for acc in &mut group.accs {
-            observe(doc, acc)?;
+            observe(doc, acc, vars)?;
         }
     }
 
@@ -601,12 +732,12 @@ fn group_documents(docs: &[Document], spec: &Document) -> Result<Vec<Document>, 
     Ok(out)
 }
 
-fn observe(doc: &Document, acc: &mut AccState) -> Result<(), String> {
+fn observe(doc: &Document, acc: &mut AccState, vars: &Vars) -> Result<(), String> {
     if matches!(acc.spec.op, AccOp::Count) {
         acc.nums += 1;
         return Ok(());
     }
-    let value = eval_expr(doc, &acc.spec.operand)?;
+    let value = eval_expr(doc, &acc.spec.operand, vars)?;
     match acc.spec.op {
         AccOp::Sum => {
             if let Some(number) = as_f64(&value) {
@@ -721,6 +852,156 @@ fn unwind(docs: Vec<Document>, spec: &Bson) -> Result<Vec<Document>, String> {
         }
     }
     Ok(out)
+}
+
+fn apply_lookup(
+    docs: Vec<Document>,
+    spec: &Document,
+    foreign: Vec<Document>,
+    lookup: &mut dyn FnMut(&str) -> Result<Foreign, String>,
+) -> Result<Output, String> {
+    if spec.contains_key("pipeline") {
+        return pipeline_lookup(docs, spec, foreign, lookup);
+    }
+    if spec.contains_key("let") {
+        return Err("$lookup with let requires a pipeline".to_string());
+    }
+    Ok(Output::Docs(hash_lookup(docs, spec, &foreign)?))
+}
+
+/// Runs the nested pipeline once per local document when `let` (or an
+/// equality pair) makes the foreign rows depend on that document.
+/// Without either, the pipeline runs once and the same array is attached
+/// to every local document.
+fn pipeline_lookup(
+    docs: Vec<Document>,
+    spec: &Document,
+    foreign: Vec<Document>,
+    lookup: &mut dyn FnMut(&str) -> Result<Foreign, String>,
+) -> Result<Output, String> {
+    let as_field = spec
+        .get_str("as")
+        .map_err(|_| "$lookup requires 'as'".to_string())?;
+    let stages = lookup_stages(spec)?;
+    let let_spec = let_bindings(spec)?;
+    let equality = equality_pair(spec)?;
+
+    if let_spec.is_none() && equality.is_none() {
+        return match run_scoped(foreign, &stages, lookup, &Vars::new())? {
+            Output::Docs(rows) => Ok(Output::Docs(attach_all(docs, as_field, rows))),
+            other => Ok(other),
+        };
+    }
+
+    let mut out = Vec::with_capacity(docs.len());
+    for doc in docs {
+        let vars = bind_let(&doc, let_spec)?;
+        let source = match &equality {
+            Some((local_field, foreign_field)) => {
+                let key = canonical(get_path(&doc, local_field).unwrap_or(&Bson::Null));
+                foreign
+                    .iter()
+                    .filter(|foreign_doc| {
+                        canonical(get_path(foreign_doc, foreign_field).unwrap_or(&Bson::Null))
+                            == key
+                    })
+                    .cloned()
+                    .collect()
+            }
+            None => foreign.clone(),
+        };
+        match run_scoped(source, &stages, lookup, &vars)? {
+            Output::Docs(rows) => {
+                let mut doc = doc;
+                doc.insert(as_field, documents_array(rows));
+                out.push(doc);
+            }
+            other => return Ok(other),
+        }
+    }
+    Ok(Output::Docs(out))
+}
+
+fn lookup_stages(spec: &Document) -> Result<Vec<Document>, String> {
+    let values = spec
+        .get_array("pipeline")
+        .map_err(|_| "$lookup requires a 'pipeline' array".to_string())?;
+    let mut stages = Vec::with_capacity(values.len());
+    for value in values {
+        stages.push(
+            value
+                .as_document()
+                .cloned()
+                .ok_or_else(|| "$lookup pipeline stages must be documents".to_string())?,
+        );
+    }
+    if stages.iter().any(|stage| stage.contains_key("$out")) {
+        return Err("$out is not allowed inside a $lookup pipeline".to_string());
+    }
+    validate_pipeline(&stages)?;
+    Ok(stages)
+}
+
+fn let_bindings(spec: &Document) -> Result<Option<&Document>, String> {
+    if !spec.contains_key("let") {
+        return Ok(None);
+    }
+    let bindings = spec
+        .get_document("let")
+        .map_err(|_| "$lookup let must be a document".to_string())?;
+    if bindings.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(bindings))
+    }
+}
+
+fn equality_pair(spec: &Document) -> Result<Option<(String, String)>, String> {
+    let local = optional_lookup_string(spec, "localField")?;
+    let foreign = optional_lookup_string(spec, "foreignField")?;
+    match (local, foreign) {
+        (None, None) => Ok(None),
+        (Some(local), Some(foreign)) => Ok(Some((local, foreign))),
+        _ => Err("$lookup requires both 'localField' and 'foreignField'".to_string()),
+    }
+}
+
+fn optional_lookup_string(spec: &Document, key: &str) -> Result<Option<String>, String> {
+    if !spec.contains_key(key) {
+        return Ok(None);
+    }
+    spec.get_str(key)
+        .map(|value| Some(value.to_string()))
+        .map_err(|_| format!("$lookup '{key}' must be a string"))
+}
+
+fn bind_let(doc: &Document, let_spec: Option<&Document>) -> Result<Vars, String> {
+    let mut vars = Vars::new();
+    let Some(bindings) = let_spec else {
+        return Ok(vars);
+    };
+    for (name, expr) in bindings {
+        if name.starts_with('$') {
+            return Err(format!("let variable '{name}' must not start with '$'"));
+        }
+        let value = eval_expr(doc, expr, &vars)?;
+        vars.insert(name.clone(), value);
+    }
+    Ok(vars)
+}
+
+fn attach_all(docs: Vec<Document>, as_field: &str, rows: Vec<Document>) -> Vec<Document> {
+    let array = documents_array(rows);
+    docs.into_iter()
+        .map(|mut doc| {
+            doc.insert(as_field, array.clone());
+            doc
+        })
+        .collect()
+}
+
+fn documents_array(rows: Vec<Document>) -> Bson {
+    Bson::Array(rows.into_iter().map(Bson::Document).collect())
 }
 
 fn hash_lookup(
@@ -989,5 +1270,82 @@ mod tests {
         assert_eq!(viewed.len(), 1);
         assert_eq!(viewed[0].get_str("job").unwrap(), "SALESMAN");
         assert!(viewed[0].get("sal").is_none());
+    }
+
+    #[test]
+    fn lookup_pipeline_joins_a_salary_to_its_grade() {
+        let emp = vec![
+            doc! { "ename": "KING", "sal": 5000 },
+            doc! { "ename": "SMITH", "sal": 800 },
+            doc! { "ename": "SCOTT", "sal": 3000 },
+        ];
+        let grades = vec![
+            doc! { "grade": 1, "losal": 700, "hisal": 1200 },
+            doc! { "grade": 4, "losal": 2001, "hisal": 3000 },
+            doc! { "grade": 5, "losal": 3001, "hisal": 9999 },
+        ];
+        let pipeline = vec![doc! {
+            "$lookup": {
+                "from": "salgrade",
+                "let": { "salary": "$sal" },
+                "pipeline": [{
+                    "$match": {
+                        "$expr": {
+                            "$and": [
+                                { "$gte": ["$$salary", "$losal"] },
+                                { "$lte": ["$$salary", "$hisal"] },
+                            ]
+                        }
+                    }
+                }],
+                "as": "grade",
+            }
+        }];
+        let Output::Docs(rows) = run(emp, &pipeline, &mut |_| Ok(Foreign::Ready(grades.clone())))
+            .unwrap()
+        else {
+            panic!("expected documents");
+        };
+        let grade = |row: &Document| {
+            row.get_array("grade").unwrap()[0]
+                .as_document()
+                .unwrap()
+                .get_i32("grade")
+                .unwrap()
+        };
+        assert_eq!(grade(&rows[0]), 5);
+        assert_eq!(grade(&rows[1]), 1);
+        assert_eq!(grade(&rows[2]), 4);
+
+        let shared = vec![doc! { "ename": "KING" }, doc! { "ename": "SMITH" }];
+        let pipeline = vec![doc! {
+            "$lookup": {
+                "from": "salgrade",
+                "pipeline": [{ "$match": { "grade": 5 } }],
+                "as": "top",
+            }
+        }];
+        let Output::Docs(rows) =
+            run(shared, &pipeline, &mut |_| Ok(Foreign::Ready(grades.clone()))).unwrap()
+        else {
+            panic!("expected documents");
+        };
+        assert_eq!(rows[0].get_array("top").unwrap().len(), 1);
+        assert_eq!(rows[1].get_array("top").unwrap().len(), 1);
+
+        let Err(error) = run(
+            vec![doc! { "sal": 1 }],
+            &[doc! {
+                "$lookup": {
+                    "from": "salgrade",
+                    "pipeline": [{ "$out": "copy" }],
+                    "as": "grade",
+                }
+            }],
+            &mut no_lookup,
+        ) else {
+            panic!("expected $out to be rejected");
+        };
+        assert!(error.contains("$out"), "{error}");
     }
 }

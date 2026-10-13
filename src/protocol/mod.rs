@@ -576,13 +576,22 @@ fn non_negative_field(command: &Document, key: &str) -> Result<Option<u64>, Stri
 /// Rewrites `$lookup.from` and `$out` to `db.collection` so a later
 /// partition lookup uses the same routing key as `find`.
 fn namespace_stage(stage: &mut Document, db: &str) -> Result<(), String> {
-    let rewritten = stage.get_document("$lookup").ok().and_then(|lookup| {
-        let from = lookup.get_str("from").ok()?;
-        let mut lookup = lookup.clone();
-        lookup.insert("from", namespace(db, from));
-        Some(lookup)
-    });
-    if let Some(lookup) = rewritten {
+    if let Ok(mut lookup) = stage.get_document("$lookup").cloned() {
+        if let Ok(from) = lookup.get_str("from") {
+            lookup.insert("from", namespace(db, from));
+        }
+        if let Ok(pipeline) = lookup.get_array("pipeline").cloned() {
+            let mut nested = Vec::with_capacity(pipeline.len());
+            for value in pipeline {
+                let mut child = value
+                    .as_document()
+                    .cloned()
+                    .ok_or_else(|| "$lookup pipeline stages must be documents".to_string())?;
+                namespace_stage(&mut child, db)?;
+                nested.push(bson::Bson::Document(child));
+            }
+            lookup.insert("pipeline", nested);
+        }
         stage.insert("$lookup", lookup);
     }
     if let Ok(name) = stage.get_str("$out") {
@@ -1722,6 +1731,55 @@ mod tests {
             }
             other => panic!("expected Aggregate, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_command_aggregate_namespaces_a_nested_lookup() {
+        let command = doc! {
+            "aggregate": "emp",
+            "pipeline": [{
+                "$lookup": {
+                    "from": "salgrade",
+                    "let": { "salary": "$sal" },
+                    "pipeline": [{
+                        "$lookup": {
+                            "from": "dept",
+                            "localField": "deptno",
+                            "foreignField": "deptno",
+                            "as": "dept",
+                        }
+                    }],
+                    "as": "grade",
+                }
+            }],
+            "cursor": {},
+            "$db": "shop",
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        let PartitionCommand::Aggregate { pipeline, .. } = parsed else {
+            panic!("expected Aggregate");
+        };
+        let nested = pipeline[0]
+            .get_document("$lookup")
+            .unwrap()
+            .get_array("pipeline")
+            .unwrap();
+        let from = nested[0]
+            .as_document()
+            .unwrap()
+            .get_document("$lookup")
+            .unwrap()
+            .get_str("from")
+            .unwrap();
+        assert_eq!(
+            pipeline[0]
+                .get_document("$lookup")
+                .unwrap()
+                .get_str("from")
+                .unwrap(),
+            "shop.salgrade"
+        );
+        assert_eq!(from, "shop.dept");
     }
 
     #[test]

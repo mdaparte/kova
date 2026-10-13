@@ -304,8 +304,10 @@ Twelve stages, in any order the command sends:
 - `$match`, `$project`, `$addFields`, `$replaceRoot`.
 - `$group`, `$sort`, `$skip`, `$limit`, `$count`, `$unwind`.
 - `$lookup` reads the foreign collection from the partition that owns it,
-  through the buffer pool. It does not copy either collection into one
-  resident vector.
+  through the buffer pool. Equality uses `localField` and `foreignField`.
+  `let` plus a nested pipeline runs that pipeline for each local document,
+  and `$match` inside it accepts `$expr`. The two collections are not
+  copied into one resident vector.
 - `$out` writes the result into a collection. That write goes through the
   WAL, like any other insert.
 

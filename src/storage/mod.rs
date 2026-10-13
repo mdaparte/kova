@@ -3218,6 +3218,71 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_lookup_pipeline_joins_salary_grades_across_partitions() {
+        let router = PartitionRouter::new(4);
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.emp".into(),
+                documents: vec![
+                    doc! { "_id": 1, "ename": "KING", "sal": 5000 },
+                    doc! { "_id": 2, "ename": "SMITH", "sal": 800 },
+                ],
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.salgrade".into(),
+                documents: vec![
+                    doc! { "grade": 1, "losal": 700, "hisal": 1200 },
+                    doc! { "grade": 5, "losal": 3001, "hisal": 9999 },
+                ],
+            },
+        )
+        .await;
+        let reply = crate::network::execute_aggregate(
+            &router,
+            PartitionCommand::Aggregate {
+                collection: "db.emp".into(),
+                pipeline: vec![doc! { "$lookup": {
+                    "from": "db.salgrade",
+                    "let": { "salary": "$sal" },
+                    "pipeline": [{
+                        "$match": {
+                            "$expr": {
+                                "$and": [
+                                    { "$gte": ["$$salary", "$losal"] },
+                                    { "$lte": ["$$salary", "$hisal"] },
+                                ]
+                            }
+                        }
+                    }],
+                    "as": "grade",
+                } }],
+                resolved: Vec::new(),
+            },
+        )
+        .await;
+        assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
+        let rows = batch_of(&reply);
+        let grade_of = |name: &str| {
+            let row = rows
+                .iter()
+                .find(|row| row.get_str("ename") == Ok(name))
+                .unwrap();
+            row.get_array("grade").unwrap()[0]
+                .as_document()
+                .unwrap()
+                .get_i32("grade")
+                .unwrap()
+        };
+        assert_eq!(grade_of("KING"), 5);
+        assert_eq!(grade_of("SMITH"), 1);
+    }
+
     /// Page 1 of the discretionary-award report in `scripts/bonus-report.js`.
     ///
     /// Staff with no `bonus` row (SMITH) drop out at `$unwind`. Departments
