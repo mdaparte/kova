@@ -26,7 +26,10 @@ use crate::logger::LOGGER;
 use crate::types::PartitionCommand;
 
 use super::crc::crc32;
+use super::crypto;
 use super::disk::io_err;
+
+const WAL_SEAL_MAGIC: u32 = 0x5345_414C; // SEAL
 
 const SEGMENT_MAGIC: u32 = 0x5741_4C31; // WAL1
 const RECORD_MAGIC: u32 = 0x5245_4331; // REC1
@@ -100,6 +103,11 @@ pub enum WalOp {
         /// Validator document (`required`, `properties`).
         validator: Document,
     },
+    /// A user or role change. The document holds the hash, never the password.
+    Auth {
+        /// `op` plus the fields of that account command.
+        spec: Document,
+    },
     /// Several mutations committed as one transaction.
     ///
     /// Recovery applies every inner operation or none of them: a torn
@@ -134,6 +142,7 @@ pub struct Wal {
     next_lsn: u64,
     next_segment: u64,
     current: Option<SegmentFile>,
+    key: Option<[u8; 32]>,
 }
 
 impl WalOp {
@@ -194,6 +203,48 @@ impl WalOp {
                 collection: collection.clone(),
                 validator: validator.clone(),
             }),
+            PartitionCommand::CreateUser {
+                name,
+                hash,
+                roles,
+                trusted,
+            } => Some(Self::Auth {
+                spec: doc! {
+                    "op": "createUser",
+                    "name": name.clone(),
+                    "hash": hash.clone(),
+                    "roles": roles.clone(),
+                    "trusted": *trusted,
+                },
+            }),
+            PartitionCommand::UpdateUser { name, enabled } => Some(Self::Auth {
+                spec: doc! {
+                    "op": "updateUser",
+                    "name": name.clone(),
+                    "enabled": *enabled,
+                },
+            }),
+            PartitionCommand::GrantRoles {
+                name,
+                roles,
+                revoke,
+            } => Some(Self::Auth {
+                spec: doc! {
+                    "op": if *revoke { "revokeRoles" } else { "grantRoles" },
+                    "name": name.clone(),
+                    "roles": roles.clone(),
+                },
+            }),
+            PartitionCommand::CreateRole { name, actions } => Some(Self::Auth {
+                spec: doc! {
+                    "op": "createRole",
+                    "name": name.clone(),
+                    "actions": actions.clone(),
+                },
+            }),
+            PartitionCommand::DropRole { name } => Some(Self::Auth {
+                spec: doc! { "op": "dropRole", "name": name.clone() },
+            }),
             PartitionCommand::Find { .. }
             | PartitionCommand::Aggregate { .. }
             | PartitionCommand::Count { .. }
@@ -207,7 +258,8 @@ impl WalOp {
             | PartitionCommand::CommitTransaction { .. }
             | PartitionCommand::AbortTransaction { .. }
             | PartitionCommand::Explain { .. }
-            | PartitionCommand::Transactional { .. } => None,
+            | PartitionCommand::Transactional { .. }
+            | PartitionCommand::Authenticate { .. } => None,
         }
     }
 
@@ -273,6 +325,7 @@ impl WalOp {
                 collection,
                 validator,
             },
+            Self::Auth { spec } => auth_command(&spec),
             Self::Transaction { .. } => {
                 unreachable!("transaction records expand in into_commands")
             }
@@ -291,6 +344,15 @@ impl WalOp {
             Self::CreateIndexes { .. } => "createIndexes",
             Self::DropIndexes { .. } => "dropIndexes",
             Self::CollMod { .. } => "collMod",
+            Self::Auth { spec } => match spec.get_str("op").unwrap_or("auth") {
+                "createUser" => "createUser",
+                "updateUser" => "updateUser",
+                "grantRoles" => "grantRoles",
+                "revokeRoles" => "revokeRoles",
+                "createRole" => "createRole",
+                "dropRole" => "dropRole",
+                _ => "auth",
+            },
             Self::Transaction { .. } => "transaction",
         }
     }
@@ -348,6 +410,9 @@ impl WalOp {
             } => {
                 body.insert("ns", collection.clone());
                 body.insert("validator", validator.clone());
+            }
+            Self::Auth { spec } => {
+                body = spec.clone();
             }
             Self::Transaction { ops } => {
                 let encoded = ops
@@ -408,6 +473,8 @@ impl WalOp {
                 collection: required_str(&body, "ns")?,
                 validator: required_doc(&body, "validator")?,
             }),
+            "createUser" | "updateUser" | "grantRoles" | "revokeRoles" | "createRole"
+            | "dropRole" => Ok(Self::Auth { spec: body }),
             "transaction" => {
                 let values = body
                     .get_array("ops")
@@ -435,6 +502,7 @@ impl Wal {
         partition: u32,
         fsync: bool,
         segment_bytes: u64,
+        key: Option<[u8; 32]>,
     ) -> Result<Self, String> {
         let dir = dir.into();
         fs::create_dir_all(&dir).map_err(|err| io_err(&dir, err))?;
@@ -452,6 +520,7 @@ impl Wal {
             next_lsn: 1,
             next_segment: 1,
             current: None,
+            key,
         })
     }
 
@@ -500,7 +569,7 @@ impl Wal {
             return Err(format!("wal record is {} bytes", payload.len()));
         }
         let lsn = self.next_lsn;
-        let encoded = encode_record(lsn, &payload);
+        let encoded = encode_record(lsn, &payload, self.key.as_ref())?;
         self.ensure_room(encoded.len())?;
         let segment = self
             .current
@@ -639,7 +708,7 @@ impl Wal {
         let mut records = Vec::new();
         let mut offset = SEGMENT_HEADER_LEN as u64;
         loop {
-            match read_record(&mut file)? {
+            match read_record(&mut file, self.key.as_ref())? {
                 ReadRecord::Eof => break,
                 ReadRecord::Record { record, len } => {
                     records.push(record);
@@ -703,7 +772,7 @@ enum ReadRecord {
     Corrupt(String),
 }
 
-fn read_record(file: &mut File) -> Result<ReadRecord, String> {
+fn read_record(file: &mut File, key: Option<&[u8; 32]>) -> Result<ReadRecord, String> {
     let mut header = [0u8; RECORD_HEADER_LEN];
     match read_full(file, &mut header).map_err(|err| format!("wal read: {}", err))? {
         Fill::Eof => return Ok(ReadRecord::Eof),
@@ -741,6 +810,10 @@ fn read_record(file: &mut File) -> Result<ReadRecord, String> {
             lsn, stored_crc, actual
         )));
     }
+    let payload = match unprotect(&payload, key) {
+        Ok(payload) => payload,
+        Err(err) => return Ok(ReadRecord::Corrupt(err)),
+    };
     let op = match WalOp::decode(&payload) {
         Ok(op) => op,
         Err(err) => return Ok(ReadRecord::Corrupt(err)),
@@ -751,18 +824,92 @@ fn read_record(file: &mut File) -> Result<ReadRecord, String> {
     })
 }
 
-fn encode_record(lsn: u64, payload: &[u8]) -> Vec<u8> {
+fn encode_record(lsn: u64, payload: &[u8], key: Option<&[u8; 32]>) -> Result<Vec<u8>, String> {
+    let payload = protect(payload, key)?;
+    if payload.len() > MAX_PAYLOAD {
+        return Err(format!("wal record is {} bytes", payload.len()));
+    }
     let mut crc_input = Vec::with_capacity(8 + payload.len());
     crc_input.extend_from_slice(&lsn.to_le_bytes());
-    crc_input.extend_from_slice(payload);
+    crc_input.extend_from_slice(&payload);
     let checksum = crc32(&crc_input);
     let mut out = Vec::with_capacity(RECORD_HEADER_LEN + payload.len());
     out.extend_from_slice(&RECORD_MAGIC.to_le_bytes());
     out.extend_from_slice(&lsn.to_le_bytes());
     out.extend_from_slice(&checksum.to_le_bytes());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(payload);
-    out
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+fn protect(payload: &[u8], key: Option<&[u8; 32]>) -> Result<Vec<u8>, String> {
+    let Some(key) = key else {
+        return Ok(payload.to_vec());
+    };
+    let sealed = crypto::seal(key, payload)?;
+    let mut out = Vec::with_capacity(4 + sealed.len());
+    out.extend_from_slice(&WAL_SEAL_MAGIC.to_le_bytes());
+    out.extend_from_slice(&sealed);
+    Ok(out)
+}
+
+fn unprotect(payload: &[u8], key: Option<&[u8; 32]>) -> Result<Vec<u8>, String> {
+    let sealed = payload.len() >= 4
+        && u32::from_le_bytes(payload[..4].try_into().unwrap()) == WAL_SEAL_MAGIC;
+    match (sealed, key) {
+        (false, None) => Ok(payload.to_vec()),
+        (false, Some(_)) => Err("wal record is not encrypted".into()),
+        (true, None) => Err("wal record is encrypted".into()),
+        (true, Some(key)) => crypto::open(key, &payload[4..]),
+    }
+}
+
+fn auth_command(spec: &Document) -> PartitionCommand {
+    let name = spec.get_str("name").unwrap_or("").to_string();
+    let roles = spec
+        .get_array("roles")
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    match spec.get_str("op").unwrap_or("") {
+        "updateUser" => PartitionCommand::UpdateUser {
+            name,
+            enabled: spec.get_bool("enabled").unwrap_or(true),
+        },
+        "grantRoles" => PartitionCommand::GrantRoles {
+            name,
+            roles,
+            revoke: false,
+        },
+        "revokeRoles" => PartitionCommand::GrantRoles {
+            name,
+            roles,
+            revoke: true,
+        },
+        "createRole" => PartitionCommand::CreateRole {
+            name,
+            actions: spec
+                .get_array("actions")
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        "dropRole" => PartitionCommand::DropRole { name },
+        _ => PartitionCommand::CreateUser {
+            name,
+            hash: spec.get_str("hash").unwrap_or("").to_string(),
+            roles,
+            trusted: spec.get_bool("trusted").unwrap_or(false),
+        },
+    }
 }
 
 fn segment_header(partition: u32, segment: u64) -> [u8; SEGMENT_HEADER_LEN] {
@@ -859,14 +1006,14 @@ mod tests {
     #[test]
     fn test_replay_preserves_order_and_rolls_segments() {
         let dir = scratch();
-        let mut wal = Wal::open(&dir, 0, false, 64).unwrap();
+        let mut wal = Wal::open(&dir, 0, false, 64, None).unwrap();
         wal.replay().unwrap();
         wal.append(&sample("a")).unwrap();
         wal.append(&sample("b")).unwrap();
         wal.append(&sample("c")).unwrap();
         assert!(wal.segment_ids().unwrap().len() >= 2);
 
-        let mut wal = Wal::open(&dir, 0, false, 64).unwrap();
+        let mut wal = Wal::open(&dir, 0, false, 64, None).unwrap();
         let records = wal.replay().unwrap();
         let names: Vec<&str> = records
             .iter()
@@ -884,7 +1031,7 @@ mod tests {
     #[test]
     fn test_torn_tail_is_truncated_and_appends_continue() {
         let dir = scratch();
-        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024).unwrap();
+        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024, None).unwrap();
         wal.replay().unwrap();
         wal.append(&sample("kept")).unwrap();
         drop(wal);
@@ -894,12 +1041,12 @@ mod tests {
         file.write_all(&[0x11, 0x22, 0x33, 0x44, 0x55]).unwrap();
         drop(file);
 
-        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024).unwrap();
+        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024, None).unwrap();
         let records = wal.replay().unwrap();
         assert_eq!(records.len(), 1);
         wal.append(&sample("after")).unwrap();
 
-        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024).unwrap();
+        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024, None).unwrap();
         let records = wal.replay().unwrap();
         assert_eq!(records.len(), 2);
         let _ = fs::remove_dir_all(dir);
@@ -908,7 +1055,7 @@ mod tests {
     #[test]
     fn test_bad_checksum_is_an_error() {
         let dir = scratch();
-        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024).unwrap();
+        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024, None).unwrap();
         wal.replay().unwrap();
         wal.append(&sample("kept")).unwrap();
         drop(wal);
@@ -921,7 +1068,7 @@ mod tests {
         bytes[at] ^= 0xff;
         fs::write(&segment, bytes).unwrap();
 
-        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024).unwrap();
+        let mut wal = Wal::open(&dir, 0, false, 1024 * 1024, None).unwrap();
         let err = wal.replay().expect_err("checksum");
         assert!(err.contains("checksum"), "{}", err);
         let _ = fs::remove_dir_all(dir);

@@ -4,7 +4,8 @@
 //!
 //! 1. **Environment variables** (highest) — `KOVA_PORT`, `KOVA_LOG_LEVEL`,
 //!    `KOVA_WARN_NON_MONGO_QUERIES`, `KOVA_DATA_DIR`, `KOVA_PAGE_SIZE`,
-//!    `KOVA_BUFFER_POOL_PAGES`, `KOVA_WAL_FSYNC`.
+//!    `KOVA_BUFFER_POOL_PAGES`, `KOVA_WAL_FSYNC`,
+//!    `KOVA_SECURITY_ENABLED`, `KOVA_ENCRYPTION_KEY`.
 //! 2. **Configuration file** — `kova.toml` in the working directory, or
 //!    the path given by `KOVA_CONFIG`.
 //! 3. **Built-in defaults** (lowest).
@@ -39,6 +40,8 @@ const DATA_DIR_ENV: &str = "KOVA_DATA_DIR";
 const PAGE_SIZE_ENV: &str = "KOVA_PAGE_SIZE";
 const POOL_PAGES_ENV: &str = "KOVA_BUFFER_POOL_PAGES";
 const WAL_FSYNC_ENV: &str = "KOVA_WAL_FSYNC";
+const SECURITY_ENABLED_ENV: &str = "KOVA_SECURITY_ENABLED";
+const ENCRYPTION_KEY_ENV: &str = "KOVA_ENCRYPTION_KEY";
 
 /// Default TCP port (the standard MongoDB port).
 const DEFAULT_PORT: u16 = 27018;
@@ -79,6 +82,8 @@ pub struct Config {
     pub storage: StorageConfig,
     /// Replica set. Absent or `enabled = false` keeps a single writable node.
     pub replication: ReplicationConfig,
+    /// Users, roles, and the optional encryption key (Phase 13).
+    pub security: SecurityConfig,
 }
 
 /// Full-text search configuration.
@@ -105,6 +110,30 @@ impl Default for Config {
             search: SearchConfig::default(),
             storage: StorageConfig::default(),
             replication: ReplicationConfig::default(),
+            security: SecurityConfig::default(),
+        }
+    }
+}
+
+/// Authentication and encryption at rest.
+///
+/// `enabled = false` leaves the process open: commands do not require a
+/// user. The encryption key is independent. An empty key stores pages
+/// compressed and unencrypted.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Require `authenticate` before commands that are not handshakes.
+    pub enabled: bool,
+    /// 64 hex characters (32 bytes). Empty disables encryption.
+    pub encryption_key: String,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            encryption_key: String::new(),
         }
     }
 }
@@ -270,6 +299,10 @@ pub struct StorageConfig {
     /// they do not share the server's data directory.
     #[serde(skip)]
     pub ephemeral: bool,
+    /// AES-256-GCM key for page files and WAL records. Empty means the
+    /// bytes stay compressed but not encrypted. Filled from `[security]`.
+    #[serde(skip)]
+    pub encryption_key: Option<[u8; 32]>,
 }
 
 impl Default for StorageConfig {
@@ -283,6 +316,7 @@ impl Default for StorageConfig {
             checkpoint_every: default_checkpoint_every(),
             checkpoint_on_shutdown: true,
             ephemeral: false,
+            encryption_key: None,
         }
     }
 }
@@ -304,6 +338,7 @@ impl StorageConfig {
             checkpoint_every: 10_000,
             checkpoint_on_shutdown: true,
             ephemeral: true,
+            encryption_key: None,
         }
     }
 }
@@ -336,6 +371,7 @@ impl Config {
 
         // 1. Environment (highest precedence).
         config.apply_env();
+        config.install_encryption_key()?;
 
         config.validate()?;
         Ok(config)
@@ -379,6 +415,36 @@ impl Config {
         if let Some(flag) = env_override(WAL_FSYNC_ENV, parse_bool) {
             self.storage.wal_fsync = flag;
         }
+        if let Some(flag) = env_override(SECURITY_ENABLED_ENV, parse_bool) {
+            self.security.enabled = flag;
+        }
+        if let Ok(raw) = std::env::var(ENCRYPTION_KEY_ENV) {
+            self.security.encryption_key = raw;
+        }
+    }
+
+    /// Copies a 32-byte hex key onto [`StorageConfig::encryption_key`].
+    ///
+    /// A non-empty value that is not 64 hex digits fails the load. An
+    /// empty value leaves pages compressed and unencrypted.
+    fn install_encryption_key(&mut self) -> Result<(), String> {
+        let raw = self.security.encryption_key.trim();
+        if raw.is_empty() {
+            self.storage.encryption_key = None;
+            return Ok(());
+        }
+        if raw.len() != 64 || !raw.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(format!(
+                "{CONFIG_FILE}: security.encryption_key must be 64 hex characters"
+            ));
+        }
+        let mut key = [0u8; 32];
+        for (index, byte) in key.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&raw[index * 2..index * 2 + 2], 16)
+                .expect("hex digits checked above");
+        }
+        self.storage.encryption_key = Some(key);
+        Ok(())
     }
 
     /// Returns the validated minimum log level.
@@ -559,6 +625,19 @@ mod tests {
             config.search.analyzer = analyzer.into();
             assert!(config.validate().is_ok(), "analyzer {}", analyzer);
         }
+    }
+
+    #[test]
+    fn test_encryption_key_must_be_64_hex_characters() {
+        let mut config =
+            Config::from_toml("[security]\nencryption_key = \"abcd\"").expect("parse ok");
+        let err = config.install_encryption_key().expect_err("short key");
+        assert!(err.contains("64 hex"), "{err}");
+
+        config.security.encryption_key = "ab".repeat(32);
+        config.install_encryption_key().expect("32-byte key");
+        assert_eq!(config.storage.encryption_key.unwrap()[0], 0xab);
+        assert!(!config.security.enabled);
     }
 
     #[test]

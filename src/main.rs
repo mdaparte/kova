@@ -6,6 +6,7 @@ mod protocol;
 mod query_engine;
 mod replication;
 mod search;
+mod security;
 mod storage;
 mod types;
 

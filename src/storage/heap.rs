@@ -33,6 +33,18 @@ struct CollectionState {
     doc_count: u64,
 }
 
+struct UserRecord {
+    name: String,
+    hash: String,
+    roles: Vec<String>,
+    enabled: bool,
+}
+
+struct RoleRecord {
+    name: String,
+    actions: Vec<String>,
+}
+
 impl CollectionState {
     fn empty() -> Self {
         Self {
@@ -54,18 +66,22 @@ pub struct Heap {
     next_page_id: u64,
     collections: HashMap<String, CollectionState>,
     live: HashSet<u64>,
+    users: Vec<UserRecord>,
+    roles: Vec<RoleRecord>,
 }
 
 impl Heap {
-    pub fn empty(page_size: usize) -> Self {
-        let payload_capacity =
-            Page::payload_capacity(page_size).expect("page size checked when the engine opens");
+    pub fn empty(page_size: usize, encrypted: bool) -> Self {
+        let payload_capacity = Page::payload_capacity(page_size, encrypted)
+            .expect("page size checked when the engine opens");
         Self {
             payload_capacity,
             applied_lsn: 0,
             next_page_id: 2,
             collections: HashMap::new(),
             live: HashSet::new(),
+            users: Vec::new(),
+            roles: Vec::new(),
         }
     }
 
@@ -225,6 +241,16 @@ impl Heap {
                 }
             }
         }
+        self.users = body
+            .get_array("users")
+            .ok()
+            .map(|values| values.iter().filter_map(user_from_bson).collect())
+            .unwrap_or_default();
+        self.roles = body
+            .get_array("roles")
+            .ok()
+            .map(|values| values.iter().filter_map(role_from_bson).collect())
+            .unwrap_or_default();
         Ok(())
     }
 
@@ -255,6 +281,229 @@ impl Heap {
         if let Some(state) = self.collections.get_mut(collection) {
             state.indexes = indexes;
         }
+    }
+
+    pub fn can_create_user(
+        &self,
+        name: &str,
+        roles: &[String],
+        trusted: bool,
+    ) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("createUser requires a user name".into());
+        }
+        if roles.is_empty() {
+            return Err("createUser requires at least one role".into());
+        }
+        self.known_roles(roles)?;
+        if self.users.iter().any(|user| user.name == name) {
+            return Err(format!("user {name} already exists"));
+        }
+        if self.users.is_empty() && !roles.iter().any(|role| role == "root") {
+            return Err("the first user must have the root role".into());
+        }
+        if !self.users.is_empty() && !trusted {
+            return Err("authentication required".into());
+        }
+        Ok(())
+    }
+
+    pub fn create_user(
+        &mut self,
+        name: &str,
+        hash: &str,
+        roles: &[String],
+        trusted: bool,
+    ) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("createUser requires a user name".into());
+        }
+        if roles.is_empty() {
+            return Err("createUser requires at least one role".into());
+        }
+        self.can_create_user(name, roles, trusted)?;
+        self.users.push(UserRecord {
+            name: name.to_string(),
+            hash: hash.to_string(),
+            roles: roles.to_vec(),
+            enabled: true,
+        });
+        Ok(())
+    }
+
+    pub fn can_update_user(&self, name: &str, enabled: bool) -> Result<(), String> {
+        let user = self
+            .users
+            .iter()
+            .find(|user| user.name == name)
+            .ok_or_else(|| format!("user {name} does not exist"))?;
+        if !enabled
+            && user.enabled
+            && user.roles.iter().any(|role| role == "root")
+            && self.enabled_roots() == 1
+        {
+            return Err("cannot disable the last root".into());
+        }
+        Ok(())
+    }
+
+    pub fn update_user(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+        self.can_update_user(name, enabled)?;
+        let user = self
+            .users
+            .iter_mut()
+            .find(|user| user.name == name)
+            .expect("user checked above");
+        user.enabled = enabled;
+        Ok(())
+    }
+
+    pub fn can_grant_roles(
+        &self,
+        name: &str,
+        roles: &[String],
+        revoke: bool,
+    ) -> Result<(), String> {
+        self.known_roles(roles)?;
+        let user = self
+            .users
+            .iter()
+            .find(|user| user.name == name)
+            .ok_or_else(|| format!("user {name} does not exist"))?;
+        if !revoke {
+            return Ok(());
+        }
+        let would_drop_root =
+            user.roles.iter().any(|role| role == "root") && roles.iter().any(|role| role == "root");
+        if would_drop_root && user.enabled && self.enabled_roots() == 1 {
+            return Err("cannot revoke root from the last root".into());
+        }
+        let remaining = user
+            .roles
+            .iter()
+            .filter(|role| !roles.iter().any(|drop| drop == *role))
+            .count();
+        if remaining == 0 {
+            return Err("a user must keep at least one role".into());
+        }
+        Ok(())
+    }
+
+    pub fn grant_roles(
+        &mut self,
+        name: &str,
+        roles: &[String],
+        revoke: bool,
+    ) -> Result<(), String> {
+        self.can_grant_roles(name, roles, revoke)?;
+        let user = self
+            .users
+            .iter_mut()
+            .find(|user| user.name == name)
+            .expect("user checked above");
+        if revoke {
+            user.roles
+                .retain(|role| !roles.iter().any(|drop| drop == role));
+        } else {
+            for role in roles {
+                if !user.roles.iter().any(|existing| existing == role) {
+                    user.roles.push(role.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn can_create_role(&self, name: &str, actions: &[String]) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("createRole requires a role name".into());
+        }
+        if crate::security::is_builtin(name) {
+            return Err(format!("built-in role {name} cannot be created"));
+        }
+        if self.roles.iter().any(|role| role.name == name) {
+            return Err(format!("role {name} already exists"));
+        }
+        if actions.is_empty() {
+            return Err("createRole requires at least one action".into());
+        }
+        for action in actions {
+            crate::security::Action::parse(action)?;
+        }
+        Ok(())
+    }
+
+    pub fn create_role(&mut self, name: &str, actions: &[String]) -> Result<(), String> {
+        self.can_create_role(name, actions)?;
+        self.roles.push(RoleRecord {
+            name: name.to_string(),
+            actions: actions.to_vec(),
+        });
+        Ok(())
+    }
+
+    pub fn can_drop_role(&self, name: &str) -> Result<(), String> {
+        if crate::security::is_builtin(name) {
+            return Err("built-in role cannot be dropped".into());
+        }
+        if !self.roles.iter().any(|role| role.name == name) {
+            return Err(format!("role {name} does not exist"));
+        }
+        if self
+            .users
+            .iter()
+            .any(|user| user.roles.iter().any(|role| role == name))
+        {
+            return Err(format!("role {name} is still granted"));
+        }
+        Ok(())
+    }
+
+    pub fn drop_role(&mut self, name: &str) -> Result<(), String> {
+        self.can_drop_role(name)?;
+        self.roles.retain(|role| role.name != name);
+        Ok(())
+    }
+
+    /// Checks the password. Unknown, disabled, and wrong passwords share
+    /// one error string.
+    pub fn authenticate(&self, name: &str, password: &str) -> Result<Vec<String>, String> {
+        let failed = || Err("authentication failed".to_string());
+        let Some(user) = self.users.iter().find(|user| user.name == name) else {
+            let _ = crate::security::passwords_match(password, crate::security::dummy_hash());
+            return failed();
+        };
+        let matches = crate::security::passwords_match(password, &user.hash);
+        if !user.enabled || !matches {
+            return failed();
+        }
+        Ok(user.roles.clone())
+    }
+
+    pub fn custom_roles(&self) -> Vec<(String, Vec<String>)> {
+        self.roles
+            .iter()
+            .map(|role| (role.name.clone(), role.actions.clone()))
+            .collect()
+    }
+
+    fn known_roles(&self, roles: &[String]) -> Result<(), String> {
+        for role in roles {
+            if crate::security::is_builtin(role) {
+                continue;
+            }
+            if !self.roles.iter().any(|custom| custom.name == *role) {
+                return Err(format!("unknown role {role}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn enabled_roots(&self) -> usize {
+        self.users
+            .iter()
+            .filter(|user| user.enabled && user.roles.iter().any(|role| role == "root"))
+            .count()
     }
 
     pub fn persist_catalog(&mut self, pool: &mut BufferPool) -> Result<(), String> {
@@ -289,6 +538,8 @@ impl Heap {
             "applied_lsn": self.applied_lsn as i64,
             "next_page_id": self.next_page_id as i64,
             "collections": cols,
+            "users": Bson::Array(self.users.iter().map(user_to_bson).collect()),
+            "roles": Bson::Array(self.roles.iter().map(role_to_bson).collect()),
         };
         let bson = bson::to_vec(&body).map_err(|err| format!("catalog encode: {err}"))?;
         let mut payload = Vec::with_capacity(4 + bson.len());
@@ -1085,6 +1336,52 @@ fn decode_overflow_chunk(payload: &[u8]) -> Result<(u64, Vec<u8>), String> {
         return Err("overflow chunk is truncated".into());
     }
     Ok((next, payload[start..start + len].to_vec()))
+}
+
+fn user_to_bson(user: &UserRecord) -> Bson {
+    Bson::Document(doc! {
+        "name": user.name.clone(),
+        "hash": user.hash.clone(),
+        "roles": user.roles.clone(),
+        "enabled": user.enabled,
+    })
+}
+
+fn role_to_bson(role: &RoleRecord) -> Bson {
+    Bson::Document(doc! {
+        "name": role.name.clone(),
+        "actions": role.actions.clone(),
+    })
+}
+
+fn user_from_bson(value: &Bson) -> Option<UserRecord> {
+    let doc = value.as_document()?;
+    Some(UserRecord {
+        name: doc.get_str("name").ok()?.to_string(),
+        hash: doc.get_str("hash").ok()?.to_string(),
+        roles: string_list(doc, "roles"),
+        enabled: doc.get_bool("enabled").unwrap_or(true),
+    })
+}
+
+fn role_from_bson(value: &Bson) -> Option<RoleRecord> {
+    let doc = value.as_document()?;
+    Some(RoleRecord {
+        name: doc.get_str("name").ok()?.to_string(),
+        actions: string_list(doc, "actions"),
+    })
+}
+
+fn string_list(doc: &Document, key: &str) -> Vec<String> {
+    doc.get_array(key)
+        .ok()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn catalog_body(payload: &[u8]) -> Result<Document, String> {

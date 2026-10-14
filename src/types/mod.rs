@@ -95,6 +95,10 @@ pub enum PartitionResult {
         stage: String,
         index_name: Option<String>,
     },
+    /// `authenticate` succeeded. `actions` are the expanded privilege names.
+    Authenticated { user: String, actions: Vec<String> },
+    /// A user or role change. `disabled` names a user whose connections must close.
+    Account { disabled: Option<String> },
 }
 
 /// A command sent from the network layer to a storage partition.
@@ -252,6 +256,28 @@ pub enum PartitionCommand {
         filter: Document,
         options: SearchOptions,
     },
+    /// Creates a user. `hash` is Argon2id. `trusted` is set when the
+    /// caller already passed the role check. The first user must be root.
+    CreateUser {
+        name: String,
+        hash: String,
+        roles: Vec<String>,
+        trusted: bool,
+    },
+    /// Enables or disables an account.
+    UpdateUser { name: String, enabled: bool },
+    /// Adds roles, or removes them when `revoke` is set.
+    GrantRoles {
+        name: String,
+        roles: Vec<String>,
+        revoke: bool,
+    },
+    /// Defines a custom role as a list of action names.
+    CreateRole { name: String, actions: Vec<String> },
+    /// Removes a custom role. Built-in roles cannot be dropped.
+    DropRole { name: String },
+    /// Checks a password. The plaintext never reaches the WAL.
+    Authenticate { name: String, password: String },
 }
 
 /// Phase 4 ranking options carried by a [`PartitionCommand::Search`].
@@ -291,6 +317,19 @@ impl PartitionCommand {
         }
     }
 
+    /// Account commands always run on partition 0, where the user catalog lives.
+    pub fn is_account(&self) -> bool {
+        matches!(
+            self,
+            PartitionCommand::CreateUser { .. }
+                | PartitionCommand::UpdateUser { .. }
+                | PartitionCommand::GrantRoles { .. }
+                | PartitionCommand::CreateRole { .. }
+                | PartitionCommand::DropRole { .. }
+                | PartitionCommand::Authenticate { .. }
+        )
+    }
+
     /// Returns the collection name this command targets.
     ///
     /// The collection is the partition routing key: all commands for the
@@ -316,8 +355,13 @@ impl PartitionCommand {
             | PartitionCommand::AbortTransaction { collection, .. }
             | PartitionCommand::CollMod { collection, .. } => collection,
             PartitionCommand::Transactional { inner, .. } => inner.collection(),
-            // Broadcast commands: no single partition owns them.
-            PartitionCommand::ListCollections { .. }
+            PartitionCommand::CreateUser { .. }
+            | PartitionCommand::UpdateUser { .. }
+            | PartitionCommand::GrantRoles { .. }
+            | PartitionCommand::CreateRole { .. }
+            | PartitionCommand::DropRole { .. }
+            | PartitionCommand::Authenticate { .. }
+            | PartitionCommand::ListCollections { .. }
             | PartitionCommand::ListDatabases { .. }
             | PartitionCommand::DatabaseStats { .. }
             | PartitionCommand::DropDatabase { .. } => "",

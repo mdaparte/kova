@@ -56,6 +56,15 @@ wal_segment_bytes = 16777216
 # checkpoints. 0 disables the periodic snapshot.
 checkpoint_every = 128
 
+# Users and roles. Leave enabled false and every command stays open.
+# The key is 64 hex characters (32 bytes). Empty leaves page files and
+# the WAL compressed but not encrypted. Env: KOVA_SECURITY_ENABLED,
+# KOVA_ENCRYPTION_KEY.
+#
+# [security]
+# enabled = false
+# encryption_key = ""
+
 # Replica set. Leave this out and Kova stays one writable node.
 # Election, heartbeats, and the oplog are OpenRaft inside this process.
 # `client` is the MongoDB port (the `port` above). `raft` is a second TCP

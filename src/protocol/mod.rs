@@ -260,6 +260,81 @@ pub fn encode_op_reply(
     Ok(frame)
 }
 
+fn account_command(command: &Document) -> Result<Option<PartitionCommand>, String> {
+    if let Ok(name) = command.get_str("createUser") {
+        let hash = command
+            .get_str("hash")
+            .map_err(|_| "createUser requires a 'pwd' string")?;
+        return Ok(Some(PartitionCommand::CreateUser {
+            name: name.to_string(),
+            hash: hash.to_string(),
+            roles: string_names(command, "roles")?,
+            trusted: command.get_bool("$trusted").unwrap_or(false),
+        }));
+    }
+    if let Ok(name) = command.get_str("updateUser") {
+        let enabled = command
+            .get_bool("enabled")
+            .map_err(|_| "updateUser requires an 'enabled' boolean")?;
+        return Ok(Some(PartitionCommand::UpdateUser {
+            name: name.to_string(),
+            enabled,
+        }));
+    }
+    if let Ok(name) = command.get_str("grantRolesToUser") {
+        return Ok(Some(PartitionCommand::GrantRoles {
+            name: name.to_string(),
+            roles: string_names(command, "roles")?,
+            revoke: false,
+        }));
+    }
+    if let Ok(name) = command.get_str("revokeRolesFromUser") {
+        return Ok(Some(PartitionCommand::GrantRoles {
+            name: name.to_string(),
+            roles: string_names(command, "roles")?,
+            revoke: true,
+        }));
+    }
+    if let Ok(name) = command.get_str("createRole") {
+        return Ok(Some(PartitionCommand::CreateRole {
+            name: name.to_string(),
+            actions: string_names(command, "actions")?,
+        }));
+    }
+    if let Ok(name) = command.get_str("dropRole") {
+        return Ok(Some(PartitionCommand::DropRole {
+            name: name.to_string(),
+        }));
+    }
+    if command.contains_key("authenticate") {
+        let name = command
+            .get_str("user")
+            .map_err(|_| "authenticate requires a 'user' string")?;
+        let password = command
+            .get_str("pwd")
+            .map_err(|_| "authenticate requires a 'pwd' string")?;
+        return Ok(Some(PartitionCommand::Authenticate {
+            name: name.to_string(),
+            password: password.to_string(),
+        }));
+    }
+    Ok(None)
+}
+
+fn string_names(command: &Document, key: &str) -> Result<Vec<String>, String> {
+    let values = command
+        .get_array(key)
+        .map_err(|_| format!("{key} requires an array of strings"))?;
+    let mut names = Vec::with_capacity(values.len());
+    for value in values {
+        let name = value
+            .as_str()
+            .ok_or_else(|| format!("{key} entries must be strings"))?;
+        names.push(name.to_string());
+    }
+    Ok(names)
+}
+
 /// Translates a decoded command document into a [`PartitionCommand`].
 ///
 /// Supports the commands Phase 2 can execute: `insert`, `find`, `update`,
@@ -272,6 +347,12 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
     let db = command.get_str("$db").unwrap_or("");
     let namespaced = |collection: &str| namespace(db, collection);
     let txn_id = read_txn_id(command)?;
+    if let Some(account) = account_command(command)? {
+        if txn_id.is_some() {
+            return Err("this command cannot run inside a transaction".into());
+        }
+        return Ok(account);
+    }
 
     if command.contains_key("insert") {
         let collection = command.get_str("insert").unwrap();
@@ -1309,6 +1390,18 @@ pub fn reply_document(result: &PartitionResult) -> Document {
                 plan.insert("indexName", name.clone());
             }
             doc! { "ok": 1.0, "winningPlan": plan }
+        }
+        PartitionResult::Authenticated { user, actions } => doc! {
+            "ok": 1.0,
+            "user": user.clone(),
+            "actions": actions.clone(),
+        },
+        PartitionResult::Account { disabled } => {
+            let mut reply = doc! { "ok": 1.0 };
+            if let Some(name) = disabled {
+                reply.insert("kovaDisabledUser", name.clone());
+            }
+            reply
         }
     }
 }

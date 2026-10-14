@@ -12,23 +12,33 @@ use super::page::Page;
 
 /// Reads and writes page files.
 ///
-/// Each file is at most `page_size` bytes: a header plus the zstd frame.
+/// Each file is at most `page_size` bytes: a header plus the zstd frame,
+/// or that frame sealed with AES-256-GCM when a key is configured.
 pub struct PageStore {
     dir: PathBuf,
     page_size: usize,
+    key: Option<[u8; 32]>,
 }
 
 impl PageStore {
     /// Opens the page directory, creating it when missing.
-    pub fn open(dir: impl Into<PathBuf>, page_size: usize) -> Result<Self, String> {
+    pub fn open(
+        dir: impl Into<PathBuf>,
+        page_size: usize,
+        key: Option<[u8; 32]>,
+    ) -> Result<Self, String> {
         let dir = dir.into();
         fs::create_dir_all(&dir).map_err(|err| io_err(&dir, err))?;
-        Ok(Self { dir, page_size })
+        Ok(Self {
+            dir,
+            page_size,
+            key,
+        })
     }
 
     /// Writes `page` atomically and fsyncs it before the rename.
     pub fn write(&self, page: &Page) -> Result<(), String> {
-        let bytes = page.encode(self.page_size)?;
+        let bytes = page.encode(self.page_size, self.key.as_ref())?;
         let path = self.path(page.id);
         atomic_write(&path, &bytes)
     }
@@ -37,7 +47,7 @@ impl PageStore {
     pub fn read(&self, page_id: u64) -> Result<Page, String> {
         let path = self.path(page_id);
         let bytes = fs::read(&path).map_err(|err| io_err(&path, err))?;
-        Page::decode(&bytes, self.page_size)
+        Page::decode(&bytes, self.page_size, self.key.as_ref())
     }
 
     /// Deletes one page file. Missing files are not an error.
@@ -120,7 +130,7 @@ mod tests {
     #[test]
     fn test_page_store_round_trip_and_retain() {
         let dir = scratch();
-        let store = PageStore::open(dir.join("pages"), 128).unwrap();
+        let store = PageStore::open(dir.join("pages"), 128, None).unwrap();
         store.write(&Page::new(1, 3, b"aa".to_vec())).unwrap();
         store.write(&Page::new(2, 3, b"bb".to_vec())).unwrap();
         assert_eq!(store.read(1).unwrap().payload, b"aa");

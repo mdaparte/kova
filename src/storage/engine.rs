@@ -64,18 +64,19 @@ impl StorageEngine {
         let root = PathBuf::from(&config.data_dir).join(format!("partition-{partition}"));
         fs::create_dir_all(&root).map_err(|err| io_err(&root, err))?;
         let page_size = config.page_size as usize;
-        Page::payload_capacity(page_size)?;
-        let disk = PageStore::open(root.join("pages"), page_size)?;
+        Page::payload_capacity(page_size, config.encryption_key.is_some())?;
+        let disk = PageStore::open(root.join("pages"), page_size, config.encryption_key)?;
         // The pool and the store share the directory. Each has its own
         // handle; pages are immutable once flushed, so that is safe on
         // this single thread.
-        let pool_disk = PageStore::open(root.join("pages"), page_size)?;
+        let pool_disk = PageStore::open(root.join("pages"), page_size, config.encryption_key)?;
         let pool = BufferPool::new(pool_disk, config.buffer_pool_pages)?;
         let wal = Wal::open(
             root.join("wal"),
             partition_u32,
             config.wal_fsync,
             config.wal_segment_bytes,
+            config.encryption_key,
         )?;
         Ok(Self {
             partition,
@@ -87,7 +88,7 @@ impl StorageEngine {
             wal,
             pool,
             disk,
-            heap: Heap::empty(page_size),
+            heap: Heap::empty(page_size, config.encryption_key.is_some()),
         })
     }
 
@@ -423,6 +424,7 @@ mod tests {
             checkpoint_every: 0,
             checkpoint_on_shutdown: false,
             ephemeral: false,
+            encryption_key: None,
         }
     }
 
@@ -599,6 +601,38 @@ mod tests {
         let found = engine.find_documents("db.emp", &doc! {}).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].get_str("blob").unwrap(), blob);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_encrypted_restart_needs_the_key() {
+        let dir = scratch();
+        let key = [7u8; 32];
+        let mut config = config(&dir);
+        config.encryption_key = Some(key);
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        engine
+            .insert_documents("db.emp", vec![doc! { "_id": "1", "name": "SMITH" }])
+            .unwrap();
+        engine.checkpoint_pages().unwrap();
+        drop(engine);
+
+        let mut plain = config.clone();
+        plain.encryption_key = None;
+        let mut engine = StorageEngine::open(0, &plain).unwrap();
+        let err = match engine.load() {
+            Err(message) => message,
+            Ok(_) => panic!("encrypted pages need the key"),
+        };
+        assert!(err.contains("encrypted"), "{err}");
+        drop(engine);
+
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let found = engine.find_documents("db.emp", &doc! {}).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].get_str("name").unwrap(), "SMITH");
         let _ = fs::remove_dir_all(dir);
     }
 

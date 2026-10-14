@@ -9,12 +9,15 @@
 //! SQL text arriving as an OP_MSG command is parsed, planned and executed
 //! there against in-memory collections.
 
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::spawn;
+use tokio::sync::watch;
 
 use crate::logger::LOGGER;
 use crate::protocol;
@@ -102,6 +105,63 @@ fn resolve_port() -> u16 {
 /// Monotonic counter used for the `requestId` of our own replies.
 static REPLY_REQUEST_ID: AtomicI32 = AtomicI32::new(1);
 
+struct LiveConn {
+    user: Mutex<Option<String>>,
+    close: watch::Sender<bool>,
+}
+
+struct ConnTable {
+    next: AtomicU64,
+    slots: Mutex<HashMap<u64, LiveConn>>,
+}
+
+fn connections() -> &'static ConnTable {
+    static TABLE: OnceLock<ConnTable> = OnceLock::new();
+    TABLE.get_or_init(|| ConnTable {
+        next: AtomicU64::new(1),
+        slots: Mutex::new(HashMap::new()),
+    })
+}
+
+impl ConnTable {
+    fn open(&self) -> (u64, watch::Receiver<bool>) {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (close, watch_rx) = watch::channel(false);
+        self.slots.lock().expect("connections").insert(
+            id,
+            LiveConn {
+                user: Mutex::new(None),
+                close,
+            },
+        );
+        (id, watch_rx)
+    }
+
+    fn set_user(&self, id: u64, user: String) {
+        if let Some(slot) = self.slots.lock().expect("connections").get(&id) {
+            *slot.user.lock().expect("connection user") = Some(user);
+        }
+    }
+
+    fn close_user(&self, user: &str) {
+        for slot in self.slots.lock().expect("connections").values() {
+            let current = slot.user.lock().expect("connection user");
+            if current.as_deref() == Some(user) {
+                let _ = slot.close.send(true);
+            }
+        }
+    }
+
+    fn close(&self, id: u64) {
+        self.slots.lock().expect("connections").remove(&id);
+    }
+}
+
+struct Session {
+    user: String,
+    actions: Vec<String>,
+}
+
 /// Starts the Kova TCP network server.
 ///
 /// Connections are accepted asynchronously; each client runs on its own
@@ -154,14 +214,39 @@ async fn handle_client(
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
 ) -> std::io::Result<()> {
+    let (conn_id, mut close) = connections().open();
+    let mut session = None;
+    let outcome = handle_frames(socket, router, replica, conn_id, &mut close, &mut session).await;
+    connections().close(conn_id);
+    outcome
+}
+
+async fn handle_frames(
+    socket: &mut TcpStream,
+    router: &PartitionRouter,
+    replica: Option<&crate::replication::Replica>,
+    conn_id: u64,
+    close: &mut watch::Receiver<bool>,
+    session: &mut Option<Session>,
+) -> std::io::Result<()> {
     loop {
+        if *close.borrow() {
+            return Ok(());
+        }
         // ---- header ------------------------------------------------
         // `with_capacity` only reserves memory; the length must be set
         // explicitly so `read_exact` actually fills the 16 bytes.
         let mut header_buf = BytesMut::with_capacity(HEADER_SIZE);
         header_buf.resize(HEADER_SIZE, 0);
 
-        match socket.read_exact(&mut header_buf).await {
+        let read = tokio::select! {
+            _ = close.changed() => None,
+            result = socket.read_exact(&mut header_buf) => Some(result),
+        };
+        let Some(result) = read else {
+            return Ok(());
+        };
+        match result {
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Err(std::io::Error::new(
@@ -211,7 +296,10 @@ async fn handle_client(
                     header.request_id, header.message_length
                 ));
 
-                if let Err(err) = process_op_msg(&header, &body_buf, router, replica, socket).await
+                if let Err(err) = process_op_msg(
+                    &header, &body_buf, router, replica, socket, conn_id, session,
+                )
+                .await
                 {
                     // A bounded hex prefix turns "section kind 189"
                     // into an actionable diagnosis of what the client
@@ -236,8 +324,10 @@ async fn handle_client(
                     header.request_id, header.message_length
                 ));
 
-                if let Err(err) =
-                    process_op_query(&header, &body_buf, router, replica, socket).await
+                if let Err(err) = process_op_query(
+                    &header, &body_buf, router, replica, socket, conn_id, session,
+                )
+                .await
                 {
                     LOGGER.warn(format!("Failed to process OP_QUERY: {}", err));
                 }
@@ -258,12 +348,15 @@ async fn process_op_msg(
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
     socket: &mut TcpStream,
+    conn_id: u64,
+    session: &mut Option<Session>,
 ) -> Result<(), String> {
     let msg = protocol::decode_op_msg(body)?;
     let local_addr = socket
         .local_addr()
         .map_err(|err| format!("failed to read local address: {}", err))?;
-    let reply_body = execute_replicated(&msg.command, router, local_addr, replica).await;
+    let reply_body =
+        execute_replicated(&msg.command, router, local_addr, replica, conn_id, session).await;
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_reply(request_id, header.request_id, &reply_body)?;
@@ -292,12 +385,22 @@ async fn process_op_query(
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
     socket: &mut TcpStream,
+    conn_id: u64,
+    session: &mut Option<Session>,
 ) -> Result<(), String> {
     let query = protocol::decode_op_query(body)?;
     let local_addr = socket
         .local_addr()
         .map_err(|err| format!("failed to read local address: {}", err))?;
-    let reply_body = execute_replicated(&query.command, router, local_addr, replica).await;
+    let reply_body = execute_replicated(
+        &query.command,
+        router,
+        local_addr,
+        replica,
+        conn_id,
+        session,
+    )
+    .await;
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_op_reply(request_id, header.request_id, &reply_body)?;
@@ -361,6 +464,12 @@ fn is_replicated_write(command: &bson::Document) -> bool {
         "dropIndexes",
         "deleteIndexes",
         "collMod",
+        "createUser",
+        "updateUser",
+        "grantRolesToUser",
+        "revokeRolesFromUser",
+        "createRole",
+        "dropRole",
     ];
     if KEYS.iter().any(|key| command.contains_key(*key)) {
         return true;
@@ -385,6 +494,95 @@ fn is_leader_local(command: &bson::Document) -> bool {
 }
 
 async fn execute_replicated(
+    command: &bson::Document,
+    router: &PartitionRouter,
+    local_addr: std::net::SocketAddr,
+    replica: Option<&crate::replication::Replica>,
+    conn_id: u64,
+    session: &mut Option<Session>,
+) -> bson::Document {
+    let mut command = command.clone();
+    if let Err(message) = prepare_account(&mut command).await {
+        return bson::doc! { "ok": 0.0, "errmsg": message };
+    }
+    if let Err(message) = authorize(&mut command, session) {
+        return bson::doc! { "ok": 0.0, "errmsg": message };
+    }
+    let mut reply = dispatch_command(&command, router, local_addr, replica).await;
+    bind_session(&command, &mut reply, conn_id, session);
+    reply
+}
+
+/// Replaces a createUser password with its Argon2id hash before the
+/// command is logged or applied.
+async fn prepare_account(command: &mut bson::Document) -> Result<(), String> {
+    command.remove("$trusted");
+    if !command.contains_key("createUser") || command.contains_key("hash") {
+        command.remove("pwd");
+        return Ok(());
+    }
+    let pwd = command
+        .get_str("pwd")
+        .map_err(|_| "createUser requires a 'pwd' string".to_string())?
+        .to_string();
+    let hash = tokio::task::spawn_blocking(move || crate::security::hash_password(&pwd))
+        .await
+        .map_err(|err| err.to_string())??;
+    command.remove("pwd");
+    command.insert("hash", hash);
+    Ok(())
+}
+
+fn authorize(command: &mut bson::Document, session: &Option<Session>) -> Result<(), String> {
+    let enabled = crate::config::CONFIG.security.enabled;
+    if !enabled {
+        if command.contains_key("createUser") {
+            command.insert("$trusted", true);
+        }
+        return Ok(());
+    }
+    let Some(action) = crate::security::required_action(command) else {
+        return Ok(());
+    };
+    let Some(session) = session else {
+        if action == crate::security::Action::CreateUser && command.contains_key("createUser") {
+            return Ok(());
+        }
+        return Err("authentication required".into());
+    };
+    if !session.actions.iter().any(|held| held == action.name()) {
+        return Err(format!("unauthorized: {}", action.name()));
+    }
+    if command.contains_key("createUser") {
+        command.insert("$trusted", true);
+    }
+    Ok(())
+}
+
+fn bind_session(
+    command: &bson::Document,
+    reply: &mut bson::Document,
+    conn_id: u64,
+    session: &mut Option<Session>,
+) {
+    if command.contains_key("authenticate") && reply.get_f64("ok") == Ok(1.0) {
+        if let (Ok(user), Ok(actions)) = (reply.get_str("user"), reply.get_array("actions")) {
+            let user = user.to_string();
+            let actions = actions
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect();
+            connections().set_user(conn_id, user.clone());
+            *session = Some(Session { user, actions });
+        }
+    }
+    if let Ok(user) = reply.get_str("kovaDisabledUser").map(str::to_string) {
+        reply.remove("kovaDisabledUser");
+        connections().close_user(&user);
+    }
+}
+
+async fn dispatch_command(
     command: &bson::Document,
     router: &PartitionRouter,
     local_addr: std::net::SocketAddr,

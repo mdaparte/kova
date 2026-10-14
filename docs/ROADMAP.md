@@ -26,7 +26,7 @@ replication, and multi-model indexing.
 | 10 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ✅ Complete |
 | 11 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ✅ Complete |
 | 12 | On-Disk Page Compression (zstd, WiredTiger-style) | ✅ Complete |
-| 13 | Security (RBAC, Argon2id, AES-256-GCM, users) | ⚪ Planned |
+| 13 | Security (RBAC, Argon2id, AES-256-GCM, users) | ✅ Complete |
 | 14 | Monitoring (17 atomic counters, `serverStatus`) | ⚪ Planned |
 | 15 | Connection Pool (cap, tracking, lifecycle) | ⚪ Planned |
 | 16 | Lucene-like Views and Facet Queries | ⚪ Planned |
@@ -545,7 +545,7 @@ WiredTiger compresses the pages of a collection (snappy or zstd). Kova compresse
 - [x] Keep the buffer pool on the decompressed page. Leave the WAL uncompressed.
 - [x] Tests: smaller file for repetitive documents, full-page encode, restart round-trip.
 
-## Phase 13 — Security (RBAC, Argon2id, AES-256-GCM, users) ⚪ Planned
+## Phase 13 — Security (RBAC, Argon2id, AES-256-GCM, users) ✅
 
 With `[security] enabled = false` the process stays the open server it is today. Turning it on requires a user before any other command, checks that user's roles, and encrypts page files and WAL records.
 
@@ -598,11 +598,11 @@ Users live in the catalog, not in a second database of documents.
 
 ### Phase 13 — Sub-tasks
 
-- [ ] Catalog records for users, built-in roles, and custom roles.
-- [ ] Argon2id on `createUser`. `authenticate` binds the connection.
-- [ ] Reject a command whose actions the connection's roles do not include.
-- [ ] AES-256-GCM around the compressed page and the WAL record, with a random nonce per write.
-- [ ] Tests: each built-in role, a custom role, a disabled user, a bad password, and a restart that reads an encrypted page only with the key.
+- [x] Catalog records for users, built-in roles, and custom roles.
+- [x] Argon2id on `createUser`. `authenticate` binds the connection.
+- [x] Reject a command whose actions the connection's roles do not include.
+- [x] AES-256-GCM around the compressed page and the WAL record, with a random nonce per write.
+- [x] Tests: each built-in role, a custom role, a disabled user, a bad password, and a restart that reads an encrypted page only with the key.
 
 ## Phase 14 — Monitoring (17 atomic counters, `serverStatus`) ⚪ Planned
 
@@ -712,7 +712,6 @@ A replica set is the cluster for this command. Members are full copies, not shar
 | Gap | Phase | Notes |
 |-----|-------|-------|
 | Transactions are not in the oplog | 11 | `begin` / `commit` / `abort` and any command with `txnId` stay on the primary. |
-| No users, roles, or encryption | 13 | Open server until `[security]` is enabled. |
 | No `serverStatus` counters | 14 | Queries, writes, connections, bytes, WAL, pool, plans, transactions. |
 | The listener does not cap connections | 15 | `max_connections` and idle close. |
 | No saved views or facet counts | 16 | A view is a stored query. Facets ride on the reply. |
@@ -774,6 +773,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–12 are complete. Next is security (Phase 13): five built-in
-roles, custom roles over eleven actions, Argon2id passwords, AES-256-GCM
-at rest, and user management.*
+*Phases 1–13 are complete. Next is monitoring (Phase 14): seventeen
+atomic counters and `serverStatus`.*

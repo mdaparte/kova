@@ -178,7 +178,7 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 12 — On-disk page compression:** zstd on the BSON payload of each
   page, WiredTiger-style. The WAL stays uncompressed. ✅ Complete.
 - **Phase 13 — Security:** five built-in roles, custom roles over eleven
-  actions, Argon2id passwords, AES-256-GCM at rest, user management. ⚪ Planned.
+  actions, Argon2id passwords, AES-256-GCM at rest, user management. ✅ Complete.
 - **Phase 14 — Monitoring:** seventeen atomic counters and `serverStatus`. ⚪ Planned.
 - **Phase 15 — Connection pool:** `max_connections`, tracking, idle close. ⚪ Planned.
 - **Phase 16 — Views and facets:** a saved query plus facet counts on the reply. ⚪ Planned.

@@ -19,6 +19,7 @@
 mod aggregate;
 mod buffer_pool;
 mod crc;
+mod crypto;
 mod disk;
 mod engine;
 mod heap;
@@ -202,6 +203,9 @@ impl PartitionWorker {
             }
         }
         if let Err(message) = self.screen_schema(&command) {
+            return PartitionResult::Error { message };
+        }
+        if let Err(message) = self.vet_account(&command) {
             return PartitionResult::Error { message };
         }
         let images = match self.committed_images(&command) {
@@ -695,6 +699,63 @@ impl PartitionWorker {
                 }
                 self.engine.set_validator(&collection, validator);
                 PartitionResult::Created
+            }
+
+            PartitionCommand::CreateUser {
+                name,
+                hash,
+                roles,
+                trusted,
+            } => match self.engine.heap.create_user(&name, &hash, &roles, trusted) {
+                Ok(()) => PartitionResult::Account { disabled: None },
+                Err(message) => PartitionResult::Error { message },
+            },
+            PartitionCommand::UpdateUser { name, enabled } => {
+                match self.engine.heap.update_user(&name, enabled) {
+                    Ok(()) => PartitionResult::Account {
+                        disabled: if enabled { None } else { Some(name) },
+                    },
+                    Err(message) => PartitionResult::Error { message },
+                }
+            }
+            PartitionCommand::GrantRoles {
+                name,
+                roles,
+                revoke,
+            } => match self.engine.heap.grant_roles(&name, &roles, revoke) {
+                Ok(()) => PartitionResult::Account { disabled: None },
+                Err(message) => PartitionResult::Error { message },
+            },
+            PartitionCommand::CreateRole { name, actions } => {
+                match self.engine.heap.create_role(&name, &actions) {
+                    Ok(()) => PartitionResult::Account { disabled: None },
+                    Err(message) => PartitionResult::Error { message },
+                }
+            }
+            PartitionCommand::DropRole { name } => match self.engine.heap.drop_role(&name) {
+                Ok(()) => PartitionResult::Account { disabled: None },
+                Err(message) => PartitionResult::Error { message },
+            },
+            PartitionCommand::Authenticate { name, password } => {
+                match self.engine.heap.authenticate(&name, &password) {
+                    Ok(roles) => {
+                        let actions = match crate::security::expand_roles(
+                            &roles,
+                            &self.engine.heap.custom_roles(),
+                        ) {
+                            Ok(actions) => actions,
+                            Err(message) => return PartitionResult::Error { message },
+                        };
+                        PartitionResult::Authenticated {
+                            user: name,
+                            actions: actions
+                                .iter()
+                                .map(|action| action.name().to_string())
+                                .collect(),
+                        }
+                    }
+                    Err(message) => PartitionResult::Error { message },
+                }
             }
 
             PartitionCommand::BeginTransaction { .. }
@@ -1225,6 +1286,30 @@ impl PartitionWorker {
             validate_document(document, &schema)?;
         }
         Ok(())
+    }
+
+    fn vet_account(&self, command: &PartitionCommand) -> Result<(), String> {
+        match command {
+            PartitionCommand::CreateUser {
+                name,
+                roles,
+                trusted,
+                ..
+            } => self.engine.heap.can_create_user(name, roles, *trusted),
+            PartitionCommand::UpdateUser { name, enabled } => {
+                self.engine.heap.can_update_user(name, *enabled)
+            }
+            PartitionCommand::GrantRoles {
+                name,
+                roles,
+                revoke,
+            } => self.engine.heap.can_grant_roles(name, roles, *revoke),
+            PartitionCommand::CreateRole { name, actions } => {
+                self.engine.heap.can_create_role(name, actions)
+            }
+            PartitionCommand::DropRole { name } => self.engine.heap.can_drop_role(name),
+            _ => Ok(()),
+        }
     }
 
     /// Rejects an auto-commit write that breaks the collection validator.
@@ -2380,7 +2465,11 @@ impl PartitionRouter {
         command: PartitionCommand,
     ) -> Option<oneshot::Receiver<PartitionResult>> {
         let (tx, rx) = oneshot::channel();
-        let index = self.partition_index(command.collection());
+        let index = if command.is_account() {
+            0
+        } else {
+            self.partition_index(command.collection())
+        };
 
         let envelope = CommandEnvelope {
             command,
@@ -3757,6 +3846,7 @@ mod tests {
             checkpoint_every: 0,
             checkpoint_on_shutdown,
             ephemeral: false,
+            encryption_key: None,
         }
     }
 
@@ -3774,6 +3864,214 @@ mod tests {
             .expect("worker reachable")
             .await
             .expect("worker replied")
+    }
+
+    #[tokio::test]
+    async fn test_users_survive_restart_and_bad_passwords_match() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, true);
+        let root_hash = crate::security::hash_password("secret").unwrap();
+        let ada_hash = crate::security::hash_password("ada-secret").unwrap();
+        {
+            let router = PartitionRouter::with_storage(1, config.clone());
+            match dispatch(
+                &router,
+                PartitionCommand::CreateUser {
+                    name: "ada".into(),
+                    hash: ada_hash.clone(),
+                    roles: vec!["read".into()],
+                    trusted: true,
+                },
+            )
+            .await
+            {
+                PartitionResult::Error { message } => {
+                    assert!(message.contains("root"), "{message}");
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+
+            match dispatch(
+                &router,
+                PartitionCommand::CreateUser {
+                    name: "root".into(),
+                    hash: root_hash,
+                    roles: vec!["root".into()],
+                    trusted: false,
+                },
+            )
+            .await
+            {
+                PartitionResult::Account { disabled: None } => {}
+                other => panic!("expected Account, got {other:?}"),
+            }
+
+            match dispatch(
+                &router,
+                PartitionCommand::CreateRole {
+                    name: "analyst".into(),
+                    actions: vec!["dropDatabase".into()],
+                },
+            )
+            .await
+            {
+                PartitionResult::Error { message } => {
+                    assert!(message.contains("dropDatabase"), "{message}");
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+
+            dispatch(
+                &router,
+                PartitionCommand::CreateRole {
+                    name: "analyst".into(),
+                    actions: vec!["find".into(), "viewStatus".into()],
+                },
+            )
+            .await;
+            dispatch(
+                &router,
+                PartitionCommand::CreateUser {
+                    name: "ada".into(),
+                    hash: ada_hash,
+                    roles: vec!["read".into()],
+                    trusted: true,
+                },
+            )
+            .await;
+            dispatch(
+                &router,
+                PartitionCommand::GrantRoles {
+                    name: "ada".into(),
+                    roles: vec!["analyst".into()],
+                    revoke: false,
+                },
+            )
+            .await;
+
+            let bad = dispatch(
+                &router,
+                PartitionCommand::Authenticate {
+                    name: "ada".into(),
+                    password: "nope".into(),
+                },
+            )
+            .await;
+            let unknown = dispatch(
+                &router,
+                PartitionCommand::Authenticate {
+                    name: "nobody".into(),
+                    password: "nope".into(),
+                },
+            )
+            .await;
+            let (
+                PartitionResult::Error { message: bad },
+                PartitionResult::Error { message: unknown },
+            ) = (bad, unknown)
+            else {
+                panic!("bad and unknown passwords must fail");
+            };
+            assert_eq!(bad, "authentication failed");
+            assert_eq!(bad, unknown);
+
+            match dispatch(
+                &router,
+                PartitionCommand::Authenticate {
+                    name: "ada".into(),
+                    password: "ada-secret".into(),
+                },
+            )
+            .await
+            {
+                PartitionResult::Authenticated { user, actions } => {
+                    assert_eq!(user, "ada");
+                    assert!(actions.iter().any(|action| action == "find"));
+                    assert!(actions.iter().any(|action| action == "viewStatus"));
+                    assert!(!actions.iter().any(|action| action == "insert"));
+                }
+                other => panic!("expected Authenticated, got {other:?}"),
+            }
+
+            dispatch(
+                &router,
+                PartitionCommand::UpdateUser {
+                    name: "ada".into(),
+                    enabled: false,
+                },
+            )
+            .await;
+            match dispatch(
+                &router,
+                PartitionCommand::Authenticate {
+                    name: "ada".into(),
+                    password: "ada-secret".into(),
+                },
+            )
+            .await
+            {
+                PartitionResult::Error { message } => assert_eq!(message, "authentication failed"),
+                other => panic!("expected Error, got {other:?}"),
+            }
+
+            match dispatch(
+                &router,
+                PartitionCommand::UpdateUser {
+                    name: "root".into(),
+                    enabled: false,
+                },
+            )
+            .await
+            {
+                PartitionResult::Error { message } => {
+                    assert!(message.contains("last root"), "{message}");
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+
+            match dispatch(
+                &router,
+                PartitionCommand::DropRole {
+                    name: "read".into(),
+                },
+            )
+            .await
+            {
+                PartitionResult::Error { message } => {
+                    assert!(message.contains("built-in"), "{message}");
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+
+        let router = PartitionRouter::with_storage(1, config);
+        match dispatch(
+            &router,
+            PartitionCommand::Authenticate {
+                name: "root".into(),
+                password: "secret".into(),
+            },
+        )
+        .await
+        {
+            PartitionResult::Authenticated { actions, .. } => {
+                assert_eq!(actions.len(), 11);
+            }
+            other => panic!("expected Authenticated, got {other:?}"),
+        }
+        match dispatch(
+            &router,
+            PartitionCommand::Authenticate {
+                name: "ada".into(),
+                password: "ada-secret".into(),
+            },
+        )
+        .await
+        {
+            PartitionResult::Error { message } => assert_eq!(message, "authentication failed"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
