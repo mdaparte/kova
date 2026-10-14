@@ -35,7 +35,9 @@ stopwords = []
 # Env: KOVA_DATA_DIR
 data_dir = "data"
 
-# Fixed page size in bytes. Checkpoint images that do not fit are split.
+# Fixed page envelope in bytes. The payload inside is zstd-compressed,
+# so a page file is shorter than this when the BSON repeats. Checkpoint
+# images that do not fit are split.
 # Env: KOVA_PAGE_SIZE
 page_size = 16384
 

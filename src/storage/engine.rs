@@ -563,6 +563,46 @@ mod tests {
     }
 
     #[test]
+    fn test_compressed_pages_round_trip_after_restart() {
+        let dir = scratch();
+        let config = config(&dir);
+        let blob = "a".repeat(300);
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        engine
+            .insert_documents("db.emp", vec![doc! { "_id": "1", "blob": &blob }])
+            .unwrap();
+        engine.checkpoint_pages().unwrap();
+
+        let pages_dir = dir.join("partition-0").join("pages");
+        let mut saw_short = false;
+        for entry in fs::read_dir(&pages_dir).unwrap() {
+            let entry = entry.unwrap();
+            let len = entry.metadata().unwrap().len();
+            assert!(
+                len <= config.page_size as u64,
+                "page file {} is {len} bytes",
+                entry.path().display()
+            );
+            if len < config.page_size as u64 {
+                saw_short = true;
+            }
+        }
+        assert!(
+            saw_short,
+            "a compressed page file is shorter than the envelope"
+        );
+        drop(engine);
+
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let found = engine.find_documents("db.emp", &doc! {}).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].get_str("blob").unwrap(), blob);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn test_aggregate_scan_does_not_retain_documents() {
         let dir = scratch();
         let config = config(&dir);

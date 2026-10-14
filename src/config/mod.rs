@@ -417,9 +417,9 @@ impl StorageConfig {
                 CONFIG_FILE
             ));
         }
-        if self.page_size < 64 || self.page_size > 16 * 1024 * 1024 {
+        if self.page_size < 128 || self.page_size > 16 * 1024 * 1024 {
             return Err(format!(
-                "{}: storage.page_size {} must be between 64 and 16777216",
+                "{}: storage.page_size {} must be between 128 and 16777216",
                 CONFIG_FILE, self.page_size
             ));
         }

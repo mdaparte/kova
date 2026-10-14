@@ -295,7 +295,7 @@ mod tests {
     }
 
     fn pool(dir: &std::path::Path, capacity: usize) -> BufferPool {
-        let disk = PageStore::open(dir.join("pages"), 64).unwrap();
+        let disk = PageStore::open(dir.join("pages"), 128).unwrap();
         BufferPool::new(disk, capacity).unwrap()
     }
 

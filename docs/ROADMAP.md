@@ -25,7 +25,12 @@ replication, and multi-model indexing.
 | 9 | Transactional Storage (MVCC + ACID + Isolation) | ✅ Complete |
 | 10 | Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) | ✅ Complete |
 | 11 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ✅ Complete |
-| 12 | On-Disk Page Compression (zstd, WiredTiger-style) | ⚪ Planned |
+| 12 | On-Disk Page Compression (zstd, WiredTiger-style) | ✅ Complete |
+| 13 | Security (RBAC, Argon2id, AES-256-GCM, users) | ⚪ Planned |
+| 14 | Monitoring (17 atomic counters, `serverStatus`) | ⚪ Planned |
+| 15 | Connection Pool (cap, tracking, lifecycle) | ⚪ Planned |
+| 16 | Lucene-like Views and Facet Queries | ⚪ Planned |
+| 17 | MapReduce across the replica set | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -510,15 +515,16 @@ Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. 
 - Transactions are not in the oplog.
 - Sharding remains a later extension.
 
-## Phase 12 — On-Disk Page Compression ⚪ Planned
+## Phase 12 — On-Disk Page Compression ✅
 
-WiredTiger compresses the pages of a collection (snappy or zstd). Kova pages store the BSON payload uncompressed inside the 16 KB envelope. This phase compresses that payload. The WAL stays the operation log: compression applies to the page file, which is where the documents live.
+WiredTiger compresses the pages of a collection (snappy or zstd). Kova compresses the BSON payload of every page with zstd. The WAL stays the operation log: compression applies to the page file, which is where the documents live.
 
 ### 12.1 Codec
 
-- Compress the payload before the page checksum is computed, and decompress after the checksum is verified.
-- A flag in the existing page header records whether the payload is compressed, so a page written by Phase 7 still opens.
-- The default codec is zstd. The choice lives in `kova.toml` and can be overridden by an environment variable.
+- `Page::encode` compresses the payload, then computes the checksum over the header and the zstd frame. `Page::decode` verifies the checksum, then decompresses.
+- The header stays 32 bytes. The length field is the compressed size. There is no compression flag: every page is a zstd frame.
+- The on-disk file is the header plus that frame. It is not padded out to `page_size`, and it is never longer than `page_size`.
+- The logical payload capacity is the largest size whose worst-case zstd frame (`compress_bound`) still fits in the envelope, so a full page of incompressible bytes still encodes.
 
 ### 12.2 What is compressed
 
@@ -528,17 +534,158 @@ WiredTiger compresses the pages of a collection (snappy or zstd). Kova pages sto
 
 ### 12.3 Tests
 
-- A page of repetitive BSON occupies fewer bytes on disk than the same page written with compression off.
+- A page of repetitive BSON occupies fewer bytes on disk than the raw payload.
+- A page filled to the logical capacity still encodes inside `page_size`.
 - A restart reads the compressed page back to the original documents.
-- An uncompressed page from the current format still decodes.
 
 ### Phase 12 — Sub-tasks
 
-- [ ] Add a compression flag to the page header and a zstd codec around the payload.
-- [ ] Compress on flush and decompress on read in the page store.
-- [ ] Keep Phase 7 pages readable when the flag is clear.
-- [ ] Add `page_compression` to `kova.toml`, on by default for new pages.
-- [ ] Tests: smaller file for repetitive documents, restart round-trip, legacy uncompressed page still opens.
+- [x] Compress the payload with zstd in `Page::encode` and decompress it in `Page::decode`.
+- [x] Size the logical payload so `compress_bound` fits in the fixed envelope.
+- [x] Keep the buffer pool on the decompressed page. Leave the WAL uncompressed.
+- [x] Tests: smaller file for repetitive documents, full-page encode, restart round-trip.
+
+## Phase 13 — Security (RBAC, Argon2id, AES-256-GCM, users) ⚪ Planned
+
+With `[security] enabled = false` the process stays the open server it is today. Turning it on requires a user before any other command, checks that user's roles, and encrypts page files and WAL records.
+
+### 13.1 Roles
+
+Five built-in roles, plus custom roles. A custom role is a name and a subset of these eleven actions:
+
+| Action | Commands it allows |
+|--------|--------------------|
+| `find` | find, count, aggregate, search, `sql` |
+| `insert` | insert |
+| `update` | update |
+| `remove` | delete |
+| `createCollection` | create |
+| `dropCollection` | drop, dropDatabase |
+| `createIndex` | createIndexes |
+| `dropIndex` | dropIndexes, deleteIndexes |
+| `viewStatus` | collStats, dbStats, listCollections, listIndexes, listDatabases, serverStatus |
+| `createUser` | createUser, updateUser |
+| `grantRole` | createRole, dropRole, grantRolesToUser, revokeRolesFromUser |
+
+- `read` is `find`.
+- `readWrite` adds `insert`, `update`, and `remove`.
+- `dbAdmin` adds the collection, index, and `viewStatus` actions.
+- `userAdmin` is `createUser` and `grantRole`.
+- `root` is all eleven.
+- A custom role cannot name an action outside this list. The command fails and names the rejected action.
+
+### 13.2 Passwords
+
+- `createUser` stores an Argon2id hash. The plaintext password is not written to the catalog or the WAL.
+- Parameters: 19 MiB of memory, 2 iterations, parallelism 1.
+- `authenticate` checks that hash and binds the connection to the user. A later command on that connection is checked against the user's roles.
+- A disabled user fails `authenticate`. An unknown user fails the same way.
+
+### 13.3 Users
+
+Users live in the catalog, not in a second database of documents.
+
+- `createUser` with a name, a password, and one or more roles.
+- `updateUser` enables or disables the account. Disabling closes that user's open connections.
+- `grantRolesToUser` and `revokeRolesFromUser` change the role list. `root` can be granted. The last `root` cannot be revoked or disabled.
+- `createRole` and `dropRole` manage custom roles. A built-in role cannot be dropped.
+
+### 13.4 Encryption at rest
+
+- When `encryption_key` is set (32 bytes, or `KOVA_ENCRYPTION_KEY`), each page file and each WAL record is AES-256-GCM. The buffer pool and the query path still see plaintext.
+- Compress with zstd first, then encrypt. Each write uses a fresh 96-bit nonce. The nonce and the tag sit in the page image next to the ciphertext. The checksum covers that image.
+- Startup with encrypted files and no key fails. A data directory does not mix encrypted and plaintext pages.
+
+### Phase 13 — Sub-tasks
+
+- [ ] Catalog records for users, built-in roles, and custom roles.
+- [ ] Argon2id on `createUser`. `authenticate` binds the connection.
+- [ ] Reject a command whose actions the connection's roles do not include.
+- [ ] AES-256-GCM around the compressed page and the WAL record, with a random nonce per write.
+- [ ] Tests: each built-in role, a custom role, a disabled user, a bad password, and a restart that reads an encrypted page only with the key.
+
+## Phase 14 — Monitoring (17 atomic counters, `serverStatus`) ⚪ Planned
+
+Counters are atomics. A network task and a partition worker bump them without taking a lock on the command path. `serverStatus` returns the current values on the wire.
+
+| Counter | What it counts |
+|---------|----------------|
+| `queries` | find, count, aggregate, search, and `sql` |
+| `inserts` | insert commands |
+| `updates` | update commands |
+| `deletes` | delete commands |
+| `connectionsActive` | sockets open now |
+| `connectionsTotal` | sockets accepted since start |
+| `bytesIn` | bytes read from clients |
+| `bytesOut` | bytes written to clients |
+| `walWrites` | WAL records appended |
+| `bufferPoolHits` | page fetches served from the pool |
+| `bufferPoolMisses` | page fetches read from disk |
+| `bufferPoolEvictions` | pages dropped from the pool |
+| `indexLookups` | `IDHACK` and `IXSCAN` plans |
+| `collectionScans` | `COLLSCAN` plans |
+| `transactionsStarted` | `beginTransaction` |
+| `transactionsCommitted` | `commitTransaction` |
+| `transactionsAborted` | `abortTransaction`, including timeout |
+
+### Phase 14 — Sub-tasks
+
+- [ ] One atomic per counter, updated where the command or the pool already runs.
+- [ ] `serverStatus` returns the seventeen values and the uptime.
+- [ ] A test drives one insert, one indexed find, and one scan, then reads the counters back through `serverStatus`.
+
+## Phase 15 — Connection Pool ⚪ Planned
+
+The listener caps how many clients can be connected. This is the server side of that cap, not a pool inside a driver.
+
+- `max_connections` in `kova.toml`, overridable by `KOVA_MAX_CONNECTIONS`. Default 128.
+- Past the cap the listener accepts the socket, answers with an error, and closes it. `connectionsActive` does not count that socket.
+- Each accepted connection records peer address, start time, and the authenticated user once Phase 13 is on.
+- `max_connection_idle_ms` closes a connection that has not sent a command in that long. `0` disables the idle close.
+- Shutdown and a disabled user close the matching connections and free the slots.
+
+### Phase 15 — Sub-tasks
+
+- [ ] Enforce `max_connections` in the accept loop.
+- [ ] Track peer, start, idle deadline, and user on each live connection.
+- [ ] Close idle connections and connections of a disabled user.
+- [ ] Test: the connection past the cap is refused, and a closed connection frees a slot.
+
+## Phase 16 — Lucene-like Views and Facet Queries ⚪ Planned
+
+A view is a saved query, not a second copy of the documents. Facets are counts beside the hits, in the sense of a Lucene facet collector.
+
+- `createView` stores a name, a source collection, a filter, and a list of facet fields in the catalog. `dropView` removes that spec. `listCollections` marks the name as a view.
+- `find` and search on the view run the saved filter against the source collection. They read pages through the buffer pool. They do not write a new collection.
+- The reply adds `facets`: for each requested field, the distinct values in the match set and how many documents have that value.
+- A field that Tantivy already indexes is counted from that index. Any other field is counted while the page scan applies the filter.
+- `$facet` as a multi-pipeline aggregation stage is not this phase. A JavaScript function is not a view.
+
+### Phase 16 — Sub-tasks
+
+- [ ] Persist the view spec in the catalog and rebuild nothing extra on startup.
+- [ ] Route `find` and search on a view to the source collection with the saved filter.
+- [ ] Return facet buckets from Tantivy when the field is indexed, and from the match scan otherwise.
+- [ ] Test: two values of one field, a filter that drops one, and the bucket counts after a restart.
+
+## Phase 17 — MapReduce across the replica set ⚪ Planned
+
+A replica set is the cluster for this command. Members are full copies, not shards. The primary splits the input so each voter maps a different `_id` range. Any voter can map any range, because each one stores every document. An arbiter stores nothing and is not asked.
+
+- `mapReduce` takes a collection, a query, a map projection that emits `{ key, value }`, a reduce document of `$group` accumulators, and an `out` collection.
+- A JavaScript `map` or `reduce` string is rejected. The command names what it refused.
+- The primary assigns one `_id` range per voting member that is currently caught up. A member that does not answer in time loses its range to another voter.
+- Each member maps its range locally, through the buffer pool, and returns the pairs. The primary reduces them and writes `out` through the WAL, like `$out`.
+- With no `[replication]` section the same command runs on the single node, in one range.
+- This does not change ownership of documents. Sharding stays out of scope. A `mapReduce` inside a transaction is rejected.
+
+### Phase 17 — Sub-tasks
+
+- [ ] Parse `mapReduce` into a map projection, a reduce accumulator document, a query, and `out`.
+- [ ] Split the key space across caught-up voters. Skip arbiters.
+- [ ] Reduce on the primary and write `out` through the WAL.
+- [ ] Reassign a range when a member does not answer.
+- [ ] Test: three voters, one arbiter, a map that emits a key per document, and an `out` collection that matches a local `$group`.
 
 ## Architecture Principles
 
@@ -556,13 +703,20 @@ WiredTiger compresses the pages of a collection (snappy or zstd). Kova pages sto
    heartbeat monitoring.
 7. **Analytical brain**: DataFusion as the internal optimizer, with SQL parsing
    and execution against the storage layer.
+8. **Access control**: built-in and custom roles gate commands. Passwords are
+   Argon2id. Page files and the WAL can be AES-256-GCM.
+9. **Observable**: seventeen atomic counters, read back with `serverStatus`.
 
 ## Current Implementation Gaps
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
 | Transactions are not in the oplog | 11 | `begin` / `commit` / `abort` and any command with `txnId` stay on the primary. |
-| Pages are stored uncompressed | 12 | Compress the BSON payload in each page (zstd), the way WiredTiger compresses `.wt` pages. The WAL stays uncompressed. |
+| No users, roles, or encryption | 13 | Open server until `[security]` is enabled. |
+| No `serverStatus` counters | 14 | Queries, writes, connections, bytes, WAL, pool, plans, transactions. |
+| The listener does not cap connections | 15 | `max_connections` and idle close. |
+| No saved views or facet counts | 16 | A view is a stored query. Facets ride on the reply. |
+| `mapReduce` does not fan out | 17 | Voters map `_id` ranges. The primary reduces. |
 
 ## Architecture Diagram (updated)
 
@@ -620,6 +774,6 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phase 11 is complete: auto-commit writes replicate through an OpenRaft
-oplog inside the Kova process. Standalone mode is unchanged when
-`[replication]` is absent. Next is on-disk page compression (Phase 12).*
+*Phases 1–12 are complete. Next is security (Phase 13): five built-in
+roles, custom roles over eleven actions, Argon2id passwords, AES-256-GCM
+at rest, and user management.*

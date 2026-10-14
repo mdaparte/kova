@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use super::page::Page;
 
-/// Reads and writes fixed-size page files.
+/// Reads and writes page files.
+///
+/// Each file is at most `page_size` bytes: a header plus the zstd frame.
 pub struct PageStore {
     dir: PathBuf,
     page_size: usize,
@@ -31,19 +33,11 @@ impl PageStore {
         atomic_write(&path, &bytes)
     }
 
-    /// Reads one page. A short file or a bad checksum is an error.
+    /// Reads one page. A truncated file or a bad checksum is an error.
     pub fn read(&self, page_id: u64) -> Result<Page, String> {
         let path = self.path(page_id);
         let bytes = fs::read(&path).map_err(|err| io_err(&path, err))?;
-        if bytes.len() != self.page_size {
-            return Err(format!(
-                "page {} is {} bytes, expected {}",
-                page_id,
-                bytes.len(),
-                self.page_size
-            ));
-        }
-        Page::decode(&bytes)
+        Page::decode(&bytes, self.page_size)
     }
 
     /// Deletes one page file. Missing files are not an error.
@@ -126,7 +120,7 @@ mod tests {
     #[test]
     fn test_page_store_round_trip_and_retain() {
         let dir = scratch();
-        let store = PageStore::open(dir.join("pages"), 64).unwrap();
+        let store = PageStore::open(dir.join("pages"), 128).unwrap();
         store.write(&Page::new(1, 3, b"aa".to_vec())).unwrap();
         store.write(&Page::new(2, 3, b"bb".to_vec())).unwrap();
         assert_eq!(store.read(1).unwrap().payload, b"aa");

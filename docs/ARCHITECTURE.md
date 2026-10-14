@@ -285,6 +285,11 @@ about and ignored.
 | 10 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
 | 11 | Replication & HA: OpenRaft oplog, election, heartbeats. Transactions stay on the primary |
 | 12 | On-disk page compression: zstd on the BSON payload; WAL stays uncompressed |
+| 13 | Security: RBAC, Argon2id, AES-256-GCM at rest, user management |
+| 14 | Monitoring: 17 atomic counters, `serverStatus` |
+| 15 | Connection pool: cap, tracking, idle close |
+| 16 | Lucene-like views and facet queries |
+| 17 | MapReduce across replica-set members |
 
 ---
 

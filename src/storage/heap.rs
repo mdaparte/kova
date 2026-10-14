@@ -12,7 +12,7 @@ use bson::{doc, Bson, Document};
 
 use super::buffer_pool::BufferPool;
 use super::disk::PageStore;
-use super::page::{Page, PAGE_HEADER_LEN};
+use super::page::Page;
 use super::{apply_update, document_id_string, document_matches};
 
 const DOCS_MAGIC: u32 = 0x444F_4353; // DOCS
@@ -48,7 +48,8 @@ impl CollectionState {
 
 /// Page-resident collections for one partition.
 pub struct Heap {
-    page_size: usize,
+    /// Decompressed bytes that fit in one page after zstd's worst case.
+    payload_capacity: usize,
     applied_lsn: u64,
     next_page_id: u64,
     collections: HashMap<String, CollectionState>,
@@ -57,8 +58,10 @@ pub struct Heap {
 
 impl Heap {
     pub fn empty(page_size: usize) -> Self {
+        let payload_capacity =
+            Page::payload_capacity(page_size).expect("page size checked when the engine opens");
         Self {
-            page_size,
+            payload_capacity,
             applied_lsn: 0,
             next_page_id: 2,
             collections: HashMap::new(),
@@ -131,7 +134,7 @@ impl Heap {
     }
 
     fn capacity(&self) -> usize {
-        self.page_size - PAGE_HEADER_LEN
+        self.payload_capacity
     }
 
     /// Rebuilds the page lists from files already on disk, then overlays
