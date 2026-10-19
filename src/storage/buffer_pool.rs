@@ -105,11 +105,13 @@ impl BufferPool {
             self.frames[slot].pin = self.frames[slot].pin.saturating_add(1);
             self.touch(slot);
             self.hits += 1;
+            crate::metrics::METRICS.buffer_hit();
             LOGGER.debug(format!("buffer pool hit page {}", page_id));
             return Ok(self.frames[slot].page.clone());
         }
 
         self.misses += 1;
+        crate::metrics::METRICS.buffer_miss();
         LOGGER.debug(format!("buffer pool miss page {}", page_id));
         let page = self.disk.read(page_id)?;
         let slot = self.alloc_slot()?;
@@ -222,6 +224,7 @@ impl BufferPool {
         self.frames[slot].dirty = false;
         self.free.push(slot);
         self.evictions += 1;
+        crate::metrics::METRICS.buffer_evict();
         LOGGER.warn(format!("buffer pool evicted page {}", page_id));
         Ok(())
     }

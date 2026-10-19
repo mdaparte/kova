@@ -236,6 +236,16 @@ pub enum PartitionCommand {
         collection: String,
         validator: Document,
     },
+    /// A saved pipeline over `source` (`create` + `viewOn`).
+    ///
+    /// `kova` keeps engine options. `inverted: true` builds a Tantivy
+    /// index on disk for this view. Other keys are stored for later.
+    CreateView {
+        name: String,
+        source: String,
+        pipeline: Vec<Document>,
+        kova: Document,
+    },
     /// A data command that belongs to an open transaction.
     ///
     /// The write stays in the transaction until commit. The page and
@@ -354,6 +364,7 @@ impl PartitionCommand {
             | PartitionCommand::CommitTransaction { collection, .. }
             | PartitionCommand::AbortTransaction { collection, .. }
             | PartitionCommand::CollMod { collection, .. } => collection,
+            PartitionCommand::CreateView { source, .. } => source,
             PartitionCommand::Transactional { inner, .. } => inner.collection(),
             PartitionCommand::CreateUser { .. }
             | PartitionCommand::UpdateUser { .. }

@@ -134,6 +134,7 @@ impl ConnTable {
                 close,
             },
         );
+        crate::metrics::METRICS.connection_opened();
         (id, watch_rx)
     }
 
@@ -153,7 +154,15 @@ impl ConnTable {
     }
 
     fn close(&self, id: u64) {
-        self.slots.lock().expect("connections").remove(&id);
+        if self
+            .slots
+            .lock()
+            .expect("connections")
+            .remove(&id)
+            .is_some()
+        {
+            crate::metrics::METRICS.connection_closed();
+        }
     }
 }
 
@@ -263,6 +272,7 @@ async fn handle_frames(
                 .try_into()
                 .expect("exactly 16 bytes were read"),
         );
+        crate::metrics::METRICS.bytes_in(HEADER_SIZE as u64);
 
         // ---- sanity check -------------------------------------------
         // `messageLength` must cover at least the header itself and can
@@ -289,6 +299,7 @@ async fn handle_frames(
             let mut body_buf = BytesMut::with_capacity(body_len);
             body_buf.resize(body_len, 0);
             socket.read_exact(&mut body_buf).await?;
+            crate::metrics::METRICS.bytes_in(body_len as u64);
 
             if header.op_code == wire::OP_MSG {
                 LOGGER.debug(format!(
@@ -360,6 +371,7 @@ async fn process_op_msg(
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_reply(request_id, header.request_id, &reply_body)?;
+    crate::metrics::METRICS.bytes_out(frame.len() as u64);
 
     socket
         .write_all(&frame)
@@ -404,6 +416,7 @@ async fn process_op_query(
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_op_reply(request_id, header.request_id, &reply_body)?;
+    crate::metrics::METRICS.bytes_out(frame.len() as u64);
 
     socket
         .write_all(&frame)
@@ -701,6 +714,9 @@ async fn execute_command(
             Ok(result) => result,
             Err(err) => return bson::doc! { "ok": 0.0, "errmsg": err.to_string() },
         };
+        if prepared.is_none() {
+            crate::metrics::METRICS.query();
+        }
         if let (Some(filter), Some((_, collection, _))) = (pushed, prepared) {
             if let Some((stage, index_name)) = index_plan(router, &collection, filter).await {
                 let mut plan = bson::doc! { "stage": stage };
@@ -1951,5 +1967,107 @@ mod tests {
             databases[0].as_document().unwrap().get_str("name"),
             Ok("shop")
         );
+    }
+
+    #[tokio::test]
+    async fn test_server_status_counts_an_insert_an_index_find_and_a_scan() {
+        let router = PartitionRouter::new(1);
+        let local = "127.0.0.1:9".parse().unwrap();
+        let before = execute_command(&bson::doc! { "serverStatus": 1 }, &router, local).await;
+        let read = |doc: &bson::Document, key: &str| {
+            doc.get_i64(key)
+                .unwrap_or_else(|_| panic!("{key} missing from serverStatus"))
+        };
+
+        let inserted = execute_command(
+            &bson::doc! {
+                "insert": "emp",
+                "$db": "db",
+                "documents": [
+                    { "_id": "1", "name": "SMITH", "sal": 800 },
+                    { "_id": "2", "name": "KING", "sal": 5000 },
+                ],
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(inserted.get_f64("ok"), Ok(1.0), "{inserted}");
+
+        let created = execute_command(
+            &bson::doc! {
+                "createIndexes": "emp",
+                "$db": "db",
+                "indexes": [ { "name": "name_1", "key": { "name": 1 } } ],
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(created.get_f64("ok"), Ok(1.0), "{created}");
+
+        let by_name = execute_command(
+            &bson::doc! {
+                "find": "emp",
+                "$db": "db",
+                "filter": { "name": "SMITH" },
+            },
+            &router,
+            local,
+        )
+        .await;
+        let indexed = by_name
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("batch");
+        assert_eq!(indexed.len(), 1);
+
+        let scanned = execute_command(
+            &bson::doc! {
+                "find": "emp",
+                "$db": "db",
+                "filter": { "sal": { "$gt": 0 } },
+            },
+            &router,
+            local,
+        )
+        .await;
+        let batch = scanned
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("batch");
+        assert_eq!(batch.len(), 2);
+
+        let status = execute_command(&bson::doc! { "serverStatus": 1 }, &router, local).await;
+        assert_eq!(status.get_f64("ok"), Ok(1.0), "{status}");
+        assert!(status.get_i64("uptime").is_ok());
+        for key in [
+            "queries",
+            "inserts",
+            "updates",
+            "deletes",
+            "connectionsActive",
+            "connectionsTotal",
+            "bytesIn",
+            "bytesOut",
+            "walWrites",
+            "bufferPoolHits",
+            "bufferPoolMisses",
+            "bufferPoolEvictions",
+            "indexLookups",
+            "collectionScans",
+            "transactionsStarted",
+            "transactionsCommitted",
+            "transactionsAborted",
+        ] {
+            assert!(status.get_i64(key).is_ok(), "{key}");
+        }
+        assert!(read(&status, "inserts") >= read(&before, "inserts") + 1);
+        assert!(read(&status, "queries") >= read(&before, "queries") + 2);
+        assert!(read(&status, "indexLookups") >= read(&before, "indexLookups") + 1);
+        assert!(read(&status, "collectionScans") >= read(&before, "collectionScans") + 1);
+        assert!(read(&status, "walWrites") >= read(&before, "walWrites") + 1);
     }
 }

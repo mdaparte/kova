@@ -303,6 +303,7 @@ impl TransactionManager {
             .is_some_and(|limit| txn.started.elapsed() >= limit)
         {
             self.txns.remove(&txn_id);
+            crate::metrics::METRICS.transaction_aborted();
             return Err(format!("transaction {txn_id} aborted: timeout"));
         }
         if txn.isolation == Isolation::ReadCommitted {

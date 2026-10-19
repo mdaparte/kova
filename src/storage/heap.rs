@@ -45,6 +45,22 @@ struct RoleRecord {
     actions: Vec<String>,
 }
 
+/// A MongoDB view: a saved pipeline over `source`, not a copy of the documents.
+/// `kova` holds engine options. `inverted` is the one this phase reads.
+#[derive(Clone)]
+pub(super) struct ViewSpec {
+    pub name: String,
+    pub source: String,
+    pub pipeline: Vec<Document>,
+    pub kova: Document,
+}
+
+impl ViewSpec {
+    pub fn inverted(&self) -> bool {
+        self.kova.get_bool("inverted").unwrap_or(false)
+    }
+}
+
 impl CollectionState {
     fn empty() -> Self {
         Self {
@@ -68,6 +84,7 @@ pub struct Heap {
     live: HashSet<u64>,
     users: Vec<UserRecord>,
     roles: Vec<RoleRecord>,
+    views: Vec<ViewSpec>,
 }
 
 impl Heap {
@@ -82,6 +99,7 @@ impl Heap {
             live: HashSet::new(),
             users: Vec::new(),
             roles: Vec::new(),
+            views: Vec::new(),
         }
     }
 
@@ -250,6 +268,11 @@ impl Heap {
             .get_array("roles")
             .ok()
             .map(|values| values.iter().filter_map(role_from_bson).collect())
+            .unwrap_or_default();
+        self.views = body
+            .get_array("views")
+            .ok()
+            .map(|values| values.iter().filter_map(view_from_bson).collect())
             .unwrap_or_default();
         Ok(())
     }
@@ -480,6 +503,45 @@ impl Heap {
         Ok(user.roles.clone())
     }
 
+    pub fn view(&self, name: &str) -> Option<&ViewSpec> {
+        self.views.iter().find(|view| view.name == name)
+    }
+
+    pub fn views(&self) -> &[ViewSpec] {
+        &self.views
+    }
+
+    /// The first view whose documents come from `source`.
+    pub fn view_reading(&self, source: &str) -> Option<&ViewSpec> {
+        self.views.iter().find(|view| view.source == source)
+    }
+
+    pub fn insert_view(&mut self, spec: ViewSpec) -> Result<(), String> {
+        if spec.name.is_empty() {
+            return Err("create requires a view name".into());
+        }
+        if self.views.iter().any(|view| view.name == spec.name) {
+            return Err(format!("view {} already exists", spec.name));
+        }
+        if self.collections.contains_key(&spec.name) {
+            return Err(format!("collection {} already exists", spec.name));
+        }
+        if self.views.iter().any(|view| view.name == spec.source) {
+            return Err("a view cannot read another view".into());
+        }
+        self.views.push(spec);
+        Ok(())
+    }
+
+    pub fn remove_view(&mut self, name: &str) -> Result<ViewSpec, String> {
+        let position = self
+            .views
+            .iter()
+            .position(|view| view.name == name)
+            .ok_or_else(|| format!("ns not found: {name}"))?;
+        Ok(self.views.remove(position))
+    }
+
     pub fn custom_roles(&self) -> Vec<(String, Vec<String>)> {
         self.roles
             .iter()
@@ -540,6 +602,7 @@ impl Heap {
             "collections": cols,
             "users": Bson::Array(self.users.iter().map(user_to_bson).collect()),
             "roles": Bson::Array(self.roles.iter().map(role_to_bson).collect()),
+            "views": Bson::Array(self.views.iter().map(view_to_bson).collect()),
         };
         let bson = bson::to_vec(&body).map_err(|err| format!("catalog encode: {err}"))?;
         let mut payload = Vec::with_capacity(4 + bson.len());
@@ -1369,6 +1432,31 @@ fn role_from_bson(value: &Bson) -> Option<RoleRecord> {
     Some(RoleRecord {
         name: doc.get_str("name").ok()?.to_string(),
         actions: string_list(doc, "actions"),
+    })
+}
+
+fn view_to_bson(view: &ViewSpec) -> Bson {
+    Bson::Document(doc! {
+        "name": view.name.clone(),
+        "source": view.source.clone(),
+        "pipeline": view.pipeline.clone(),
+        "kova": view.kova.clone(),
+    })
+}
+
+fn view_from_bson(value: &Bson) -> Option<ViewSpec> {
+    let doc = value.as_document()?;
+    let pipeline = doc
+        .get_array("pipeline")
+        .ok()?
+        .iter()
+        .filter_map(|value| value.as_document().cloned())
+        .collect();
+    Some(ViewSpec {
+        name: doc.get_str("name").ok()?.to_string(),
+        source: doc.get_str("source").ok()?.to_string(),
+        pipeline,
+        kova: doc.get_document("kova").ok().cloned().unwrap_or_default(),
     })
 }
 

@@ -1,6 +1,7 @@
 mod config;
 mod index;
 mod logger;
+mod metrics;
 mod network;
 mod protocol;
 mod query_engine;

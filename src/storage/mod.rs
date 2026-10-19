@@ -74,6 +74,10 @@ pub struct PartitionWorker {
     /// then updated on every committed write. The catalog remembers
     /// which indexes exist.
     indexes: IndexManager,
+    /// `data/` root. View route files and the search directories live here.
+    data_dir: std::path::PathBuf,
+    /// Disk Tantivy indexes for views with `kova.inverted`.
+    inverted: std::collections::HashMap<String, crate::search::DiskIndex>,
 }
 
 impl PartitionWorker {
@@ -89,6 +93,7 @@ impl PartitionWorker {
         });
         let recovery = engine.load().unwrap_or_else(|err| abort_storage(id, err));
         let pending = recovery.pending;
+        let data_dir = std::path::PathBuf::from(&storage.data_dir);
         let mut worker = Self {
             id,
             receiver,
@@ -98,7 +103,10 @@ impl PartitionWorker {
             versions: VersionStore::new(),
             transactions: TransactionManager::new(),
             indexes: IndexManager::new(),
+            data_dir,
+            inverted: std::collections::HashMap::new(),
         };
+        worker.open_existing_indexes();
         // Replay before building the search index so tokenization sees
         // the pages after the WAL tail, and each document is indexed once.
         for record in pending {
@@ -116,6 +124,8 @@ impl PartitionWorker {
                 ));
             }
         }
+        worker.build_missing_indexes();
+        worker.publish_routes();
         if let Err(err) = worker.reindex_all() {
             abort_storage(id, err);
         }
@@ -208,6 +218,9 @@ impl PartitionWorker {
         if let Err(message) = self.vet_account(&command) {
             return PartitionResult::Error { message };
         }
+        if let Err(message) = self.screen_drop(&command) {
+            return PartitionResult::Error { message };
+        }
         let images = match self.committed_images(&command) {
             Ok(images) => images,
             Err(message) => return PartitionResult::Error { message },
@@ -264,6 +277,10 @@ impl PartitionWorker {
                     for document in &stored {
                         self.index_document(&collection, document);
                     }
+                    crate::metrics::METRICS.insert();
+                }
+                for document in &stored {
+                    self.note_view_document(&collection, document);
                 }
                 PartitionResult::Inserted {
                     inserted_count: stored.len() as u32,
@@ -281,6 +298,17 @@ impl PartitionWorker {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
                 }
+                if let Some(view) = self.engine.heap.view(&collection).cloned() {
+                    return self.read_view(
+                        view,
+                        &filter,
+                        projection,
+                        sort,
+                        skip,
+                        limit,
+                        touch_index,
+                    );
+                }
                 let documents = match self.planned_documents(&collection, &filter) {
                     Ok(documents) => documents,
                     Err(message) => return PartitionResult::Error { message },
@@ -292,7 +320,12 @@ impl PartitionWorker {
                     skip,
                     limit,
                 ) {
-                    Ok(documents) => PartitionResult::Found { documents },
+                    Ok(documents) => {
+                        if touch_index {
+                            crate::metrics::METRICS.query();
+                        }
+                        PartitionResult::Found { documents }
+                    }
                     Err(message) => PartitionResult::Error { message },
                 }
             }
@@ -301,20 +334,46 @@ impl PartitionWorker {
                 collection,
                 pipeline,
                 resolved,
-            } => self.execute_aggregate(&collection, &pipeline, &resolved),
+            } => {
+                if let Some(view) = self.engine.heap.view(&collection).cloned() {
+                    let mut full = view.pipeline;
+                    full.extend(pipeline);
+                    let result = self.execute_aggregate(&view.source, &full, &resolved);
+                    if touch_index && !matches!(result, PartitionResult::Error { .. }) {
+                        crate::metrics::METRICS.query();
+                    }
+                    return result;
+                }
+                let result = self.execute_aggregate(&collection, &pipeline, &resolved);
+                if touch_index && !matches!(result, PartitionResult::Error { .. }) {
+                    crate::metrics::METRICS.query();
+                }
+                result
+            }
 
             PartitionCommand::Count { collection, filter } => {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
                 }
+                if let Some(view) = self.engine.heap.view(&collection).cloned() {
+                    return self.count_view(view, &filter, touch_index);
+                }
                 let count = match self.indexes.access(&collection, &filter) {
-                    Access::Collection => self.engine.count_documents(&collection, &filter),
+                    Access::Collection => {
+                        crate::metrics::METRICS.collection_scan();
+                        self.engine.count_documents(&collection, &filter)
+                    }
                     Access::Id { .. } | Access::Index { .. } => self
                         .planned_documents(&collection, &filter)
                         .map(|documents| documents.len() as u64),
                 };
                 match count {
-                    Ok(count) => PartitionResult::Counted { count },
+                    Ok(count) => {
+                        if touch_index {
+                            crate::metrics::METRICS.query();
+                        }
+                        PartitionResult::Counted { count }
+                    }
                     Err(message) => PartitionResult::Error { message },
                 }
             }
@@ -346,6 +405,10 @@ impl PartitionWorker {
                         self.unindex_document(&collection, doc);
                         self.index_document(&collection, doc);
                     }
+                    crate::metrics::METRICS.update();
+                }
+                for doc in &updated {
+                    self.note_view_document(&collection, doc);
                 }
                 PartitionResult::Modified {
                     matched_count,
@@ -354,6 +417,9 @@ impl PartitionWorker {
             }
 
             PartitionCommand::Drop { collection } => {
+                if self.engine.heap.view(&collection).is_some() {
+                    return self.remove_view(&collection);
+                }
                 if let Err(message) = self.engine.drop_collection(&collection) {
                     return PartitionResult::Error { message };
                 }
@@ -540,6 +606,38 @@ impl PartitionWorker {
                     })
                     .filter(|info| document_matches(info, &filter))
                     .collect();
+                for view in self.engine.heap.views() {
+                    let bare_source = view
+                        .source
+                        .strip_prefix(&prefix)
+                        .unwrap_or(view.source.as_str());
+                    let bare_name = view
+                        .name
+                        .strip_prefix(&prefix)
+                        .unwrap_or(view.name.as_str());
+                    if bare_name.is_empty() || bare_name.contains('.') {
+                        continue;
+                    }
+                    let mut kova = view.kova.clone();
+                    if let Some(index) = self.inverted.get(&view.name) {
+                        let mut fields = doc! {};
+                        for (name, kind) in index.kinds() {
+                            fields.insert(name, kind.as_str());
+                        }
+                        kova.insert("fields", fields);
+                    }
+                    collections.push(doc! {
+                        "name": bare_name,
+                        "type": "view",
+                        "options": {
+                            "viewOn": bare_source,
+                            "pipeline": view.pipeline.clone(),
+                            "kova": kova,
+                        },
+                        "info": { "readOnly": true },
+                    });
+                }
+                collections.retain(|info| document_matches(info, &filter));
                 // Sorting keeps the merged reply stable regardless of
                 // which worker answers first.
                 collections.sort_by(|a, b| {
@@ -658,6 +756,9 @@ impl PartitionWorker {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
                 }
+                if let Some(view) = self.engine.heap.view(&collection).cloned() {
+                    return self.search_view(view, &query, &filter, touch_index);
+                }
                 let hits = match self.index.search(&collection, &query, &options.boosts) {
                     Ok(hits) => hits,
                     Err(err) => return PartitionResult::Error { message: err },
@@ -683,6 +784,9 @@ impl PartitionWorker {
                     apply_decay(&mut ranked, decay);
                 }
 
+                if touch_index {
+                    crate::metrics::METRICS.query();
+                }
                 PartitionResult::Found {
                     documents: ranked.into_iter().map(|(_, doc)| doc).collect(),
                 }
@@ -736,6 +840,12 @@ impl PartitionWorker {
                 Ok(()) => PartitionResult::Account { disabled: None },
                 Err(message) => PartitionResult::Error { message },
             },
+            PartitionCommand::CreateView {
+                name,
+                source,
+                pipeline,
+                kova,
+            } => self.create_view(name, source, pipeline, kova),
             PartitionCommand::Authenticate { name, password } => {
                 match self.engine.heap.authenticate(&name, &password) {
                     Ok(roles) => {
@@ -781,6 +891,10 @@ impl PartitionWorker {
                     for doc in &removed {
                         self.unindex_document(&collection, doc);
                     }
+                    crate::metrics::METRICS.delete();
+                }
+                for doc in &removed {
+                    self.note_view_removal(&collection, &document_id_string(doc));
                 }
                 PartitionResult::Deleted {
                     deleted_count: removed.len() as u32,
@@ -890,6 +1004,7 @@ impl PartitionWorker {
                     .begin(txn_id, parsed, timeout_ms, self.engine.last_lsn())
                 {
                     Ok(txn_id) => {
+                        crate::metrics::METRICS.transaction_started();
                         LOGGER.info(format!(
                             "partition {} transaction {} begin isolation {}",
                             self.id, txn_id, isolation
@@ -919,11 +1034,13 @@ impl PartitionWorker {
                     "partition {} transaction {} commit",
                     self.id, txn_id
                 ));
+                crate::metrics::METRICS.transaction_committed();
                 PartitionResult::Transaction { txn_id }
             }
             PartitionCommand::AbortTransaction { txn_id, .. } => {
                 match self.transactions.abort(txn_id) {
                     Ok(()) => {
+                        crate::metrics::METRICS.transaction_aborted();
                         LOGGER.info(format!(
                             "partition {} transaction {} abort",
                             self.id, txn_id
@@ -1041,7 +1158,11 @@ impl PartitionWorker {
                     skip,
                     limit,
                 ) {
-                    Ok(documents) => PartitionResult::Found { documents },
+                    Ok(documents) => {
+                        crate::metrics::METRICS.query();
+                        crate::metrics::METRICS.collection_scan();
+                        PartitionResult::Found { documents }
+                    }
                     Err(message) => PartitionResult::Error { message },
                 }
             }
@@ -1050,9 +1171,13 @@ impl PartitionWorker {
                     return PartitionResult::Error { message };
                 }
                 match self.matching(txn_id, &collection, &filter) {
-                    Ok(documents) => PartitionResult::Counted {
-                        count: documents.len() as u64,
-                    },
+                    Ok(documents) => {
+                        crate::metrics::METRICS.query();
+                        crate::metrics::METRICS.collection_scan();
+                        PartitionResult::Counted {
+                            count: documents.len() as u64,
+                        }
+                    }
                     Err(message) => PartitionResult::Error { message },
                 }
             }
@@ -1312,6 +1437,22 @@ impl PartitionWorker {
         }
     }
 
+    fn screen_drop(&self, command: &PartitionCommand) -> Result<(), String> {
+        let PartitionCommand::Drop { collection } = command else {
+            return Ok(());
+        };
+        if self.engine.heap.view(collection).is_some() {
+            return Ok(());
+        }
+        if let Some(view) = self.engine.heap.view_reading(collection) {
+            return Err(format!(
+                "cannot drop {collection}; view {} reads it",
+                view.name
+            ));
+        }
+        Ok(())
+    }
+
     /// Rejects an auto-commit write that breaks the collection validator.
     /// The check runs before the WAL append.
     fn screen_schema(&mut self, command: &PartitionCommand) -> Result<(), String> {
@@ -1538,6 +1679,354 @@ impl PartitionWorker {
         }
     }
 
+    fn read_view(
+        &mut self,
+        view: crate::storage::heap::ViewSpec,
+        filter: &Document,
+        projection: Option<Document>,
+        sort: Option<Document>,
+        skip: u64,
+        limit: Option<u64>,
+        touch_index: bool,
+    ) -> PartitionResult {
+        let mut pipeline = view.pipeline;
+        if !filter.is_empty() {
+            pipeline.push(doc! { "$match": filter.clone() });
+        }
+        if let Some(projection) = projection {
+            pipeline.push(doc! { "$project": projection });
+        }
+        if let Some(sort) = sort {
+            pipeline.push(doc! { "$sort": sort });
+        }
+        if skip > 0 {
+            pipeline.push(doc! { "$skip": skip as i64 });
+        }
+        if let Some(limit) = limit {
+            pipeline.push(doc! { "$limit": limit as i64 });
+        }
+        let result = self.execute_aggregate(&view.source, &pipeline, &[]);
+        if touch_index && !matches!(result, PartitionResult::Error { .. }) {
+            crate::metrics::METRICS.query();
+        }
+        result
+    }
+
+    fn count_view(
+        &mut self,
+        view: crate::storage::heap::ViewSpec,
+        filter: &Document,
+        touch_index: bool,
+    ) -> PartitionResult {
+        let mut pipeline = view.pipeline;
+        if !filter.is_empty() {
+            pipeline.push(doc! { "$match": filter.clone() });
+        }
+        match self.execute_aggregate(&view.source, &pipeline, &[]) {
+            PartitionResult::Found { documents } => {
+                if touch_index {
+                    crate::metrics::METRICS.query();
+                }
+                PartitionResult::Counted {
+                    count: documents.len() as u64,
+                }
+            }
+            PartitionResult::Error { message } => PartitionResult::Error { message },
+            other => PartitionResult::Error {
+                message: format!("view count failed: {other:?}"),
+            },
+        }
+    }
+
+    fn search_view(
+        &mut self,
+        view: crate::storage::heap::ViewSpec,
+        query: &str,
+        filter: &Document,
+        touch_index: bool,
+    ) -> PartitionResult {
+        let hits = if view.inverted() {
+            let Some(index) = self.inverted.get_mut(&view.name) else {
+                return PartitionResult::Error {
+                    message: format!("inverted index for {} is not open", view.name),
+                };
+            };
+            match index.search_text(query) {
+                Ok(hits) => hits,
+                Err(message) => return PartitionResult::Error { message },
+            }
+        } else {
+            match self.index.search(&view.source, query, &[]) {
+                Ok(hits) => hits.into_iter().map(|hit| (hit.id, hit.score)).collect(),
+                Err(message) => return PartitionResult::Error { message },
+            }
+        };
+        let mut ranked = Vec::new();
+        for (id, score) in hits {
+            let Some(document) = (match self.engine.find_by_id(&view.source, &id) {
+                Ok(document) => document,
+                Err(message) => return PartitionResult::Error { message },
+            }) else {
+                continue;
+            };
+            let passed = match self.project_view(&view.pipeline, document) {
+                Ok(document) => document,
+                Err(message) => return PartitionResult::Error { message },
+            };
+            let Some(document) = passed else {
+                continue;
+            };
+            if document_matches(&document, filter) {
+                ranked.push((score, document));
+            }
+        }
+        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        if touch_index {
+            crate::metrics::METRICS.query();
+        }
+        PartitionResult::Found {
+            documents: ranked.into_iter().map(|(_, document)| document).collect(),
+        }
+    }
+
+    fn create_view(
+        &mut self,
+        name: String,
+        source: String,
+        pipeline: Vec<Document>,
+        kova: Document,
+    ) -> PartitionResult {
+        if let Err(message) = aggregate::validate_pipeline(&pipeline) {
+            return PartitionResult::Error { message };
+        }
+        if pipeline.iter().any(|stage| stage.contains_key("$out")) {
+            return PartitionResult::Error {
+                message: "a view cannot use $out".into(),
+            };
+        }
+        let inverted = match kova.get("inverted") {
+            None => false,
+            Some(bson::Bson::Boolean(value)) => *value,
+            Some(_) => {
+                return PartitionResult::Error {
+                    message: "kova.inverted must be a boolean".into(),
+                };
+            }
+        };
+        if inverted {
+            if let Err(message) = inverted_pipeline(&pipeline) {
+                return PartitionResult::Error { message };
+            }
+        }
+        let spec = crate::storage::heap::ViewSpec {
+            name: name.clone(),
+            source: source.clone(),
+            pipeline,
+            kova,
+        };
+        if let Err(message) = self.engine.heap.insert_view(spec.clone()) {
+            return PartitionResult::Error { message };
+        }
+        if let Err(message) = write_view_route(&self.data_dir, &name, &source) {
+            return PartitionResult::Error { message };
+        }
+        if inverted {
+            if let Err(message) = self.rebuild_inverted(&spec) {
+                return PartitionResult::Error { message };
+            }
+        }
+        PartitionResult::Created
+    }
+
+    fn remove_view(&mut self, name: &str) -> PartitionResult {
+        let spec = match self.engine.heap.remove_view(name) {
+            Ok(spec) => spec,
+            Err(message) => return PartitionResult::Error { message },
+        };
+        let _ = std::fs::remove_file(view_route_path(&self.data_dir, name));
+        self.inverted.remove(name);
+        if spec.inverted() {
+            let _ = std::fs::remove_dir_all(index_path(&self.engine, name));
+        }
+        PartitionResult::Dropped {
+            collection: name.to_string(),
+        }
+    }
+
+    fn open_existing_indexes(&mut self) {
+        let views: Vec<_> = self
+            .engine
+            .heap
+            .views()
+            .iter()
+            .filter(|view| view.inverted())
+            .cloned()
+            .collect();
+        for view in views {
+            let path = index_path(&self.engine, &view.name);
+            if !path.join("meta.json").exists() {
+                continue;
+            }
+            match crate::search::DiskIndex::open(&path) {
+                Ok(index) => {
+                    self.inverted.insert(view.name, index);
+                }
+                Err(message) => LOGGER.warn(format!(
+                    "partition {} inverted index {}: {message}",
+                    self.id, view.name
+                )),
+            }
+        }
+    }
+
+    fn build_missing_indexes(&mut self) {
+        let views: Vec<_> = self
+            .engine
+            .heap
+            .views()
+            .iter()
+            .filter(|view| view.inverted() && !self.inverted.contains_key(&view.name))
+            .cloned()
+            .collect();
+        for view in views {
+            if let Err(message) = self.rebuild_inverted(&view) {
+                LOGGER.warn(format!(
+                    "partition {} inverted index {}: {message}",
+                    self.id, view.name
+                ));
+            }
+        }
+    }
+
+    fn publish_routes(&self) {
+        for view in self.engine.heap.views() {
+            if let Err(message) = write_view_route(&self.data_dir, &view.name, &view.source) {
+                LOGGER.warn(format!(
+                    "partition {} view route {}: {message}",
+                    self.id, view.name
+                ));
+            }
+        }
+    }
+
+    fn rebuild_inverted(&mut self, view: &crate::storage::heap::ViewSpec) -> Result<(), String> {
+        let docs = self.view_documents(view)?;
+        let path = index_path(&self.engine, &view.name);
+        let mut index = if let Some(index) = self.inverted.remove(&view.name) {
+            index
+        } else {
+            crate::search::DiskIndex::open(&path)?
+        };
+        index.rebuild(&docs)?;
+        self.inverted.insert(view.name.clone(), index);
+        Ok(())
+    }
+
+    fn view_documents(
+        &mut self,
+        view: &crate::storage::heap::ViewSpec,
+    ) -> Result<Vec<(String, Document)>, String> {
+        let input = self.engine.find_documents(&view.source, &doc! {})?;
+        let output = match aggregate::run(input, &view.pipeline, &mut |_| {
+            Ok(aggregate::Foreign::Remote)
+        })? {
+            aggregate::Output::Docs(documents) => documents,
+            aggregate::Output::Remote { namespace } => {
+                return Err(format!("view pipeline needs {namespace}"));
+            }
+            aggregate::Output::Out { .. } => return Err("a view cannot use $out".into()),
+        };
+        let mut pairs = Vec::with_capacity(output.len());
+        for document in output {
+            if document.get("_id").is_none() {
+                return Err("an inverted view must keep _id".into());
+            }
+            let id = document_id_string(&document);
+            pairs.push((id, document));
+        }
+        Ok(pairs)
+    }
+
+    fn project_view(
+        &mut self,
+        pipeline: &[Document],
+        document: Document,
+    ) -> Result<Option<Document>, String> {
+        match aggregate::run(vec![document], pipeline, &mut |_| {
+            Ok(aggregate::Foreign::Remote)
+        })? {
+            aggregate::Output::Docs(mut documents) => Ok(documents.pop()),
+            aggregate::Output::Remote { namespace } => {
+                Err(format!("view pipeline needs {namespace}"))
+            }
+            aggregate::Output::Out { .. } => Err("a view cannot use $out".into()),
+        }
+    }
+
+    fn note_view_document(&mut self, collection: &str, document: &Document) {
+        let id = document_id_string(document);
+        let views: Vec<_> = self
+            .engine
+            .heap
+            .views()
+            .iter()
+            .filter(|view| view.inverted() && view.source == collection)
+            .cloned()
+            .collect();
+        for view in views {
+            let passed = match self.project_view(&view.pipeline, document.clone()) {
+                Ok(passed) => passed,
+                Err(message) => {
+                    LOGGER.warn(format!("view {} skipped a write: {message}", view.name));
+                    continue;
+                }
+            };
+            let grew = {
+                let Some(index) = self.inverted.get_mut(&view.name) else {
+                    continue;
+                };
+                match passed {
+                    Some(projected) => match index.upsert(&id, &projected) {
+                        Ok(grew) => grew,
+                        Err(message) => {
+                            LOGGER.warn(format!("view {} index: {message}", view.name));
+                            continue;
+                        }
+                    },
+                    None => {
+                        if let Err(message) = index.remove(&id) {
+                            LOGGER.warn(format!("view {} index: {message}", view.name));
+                        }
+                        continue;
+                    }
+                }
+            };
+            if grew {
+                if let Err(message) = self.rebuild_inverted(&view) {
+                    LOGGER.warn(format!("view {} rebuild: {message}", view.name));
+                }
+            }
+        }
+    }
+
+    fn note_view_removal(&mut self, collection: &str, id: &str) {
+        let names: Vec<String> = self
+            .engine
+            .heap
+            .views()
+            .iter()
+            .filter(|view| view.inverted() && view.source == collection)
+            .map(|view| view.name.clone())
+            .collect();
+        for name in names {
+            if let Some(index) = self.inverted.get_mut(&name) {
+                if let Err(message) = index.remove(id) {
+                    LOGGER.warn(format!("view {name} index: {message}"));
+                }
+            }
+        }
+    }
+
     /// Reads through the index when one covers `filter`.
     ///
     /// An id lookup and an index scan still read pages. The index only
@@ -1549,8 +2038,12 @@ impl PartitionWorker {
         filter: &Document,
     ) -> Result<Vec<Document>, String> {
         match self.indexes.access(collection, filter) {
-            Access::Collection => self.engine.find_documents(collection, filter),
+            Access::Collection => {
+                crate::metrics::METRICS.collection_scan();
+                self.engine.find_documents(collection, filter)
+            }
             Access::Id { id } => {
+                crate::metrics::METRICS.index_lookup();
                 let mut documents = Vec::new();
                 if let Some(document) = self.engine.find_by_id(collection, &id)? {
                     if document_matches(&document, filter) {
@@ -1559,7 +2052,10 @@ impl PartitionWorker {
                 }
                 Ok(documents)
             }
-            Access::Index { ids, .. } => self.engine.find_ids(collection, &ids, filter),
+            Access::Index { ids, .. } => {
+                crate::metrics::METRICS.index_lookup();
+                self.engine.find_ids(collection, &ids, filter)
+            }
         }
     }
 }
@@ -2401,6 +2897,7 @@ struct RouterInner {
     handles: std::sync::Mutex<Vec<JoinHandle<()>>>,
     /// Temporary data directory removed after the workers exit.
     scratch: Option<std::path::PathBuf>,
+    data_dir: std::path::PathBuf,
 }
 
 impl PartitionRouter {
@@ -2451,6 +2948,7 @@ impl PartitionRouter {
                 senders,
                 handles: std::sync::Mutex::new(handles),
                 scratch,
+                data_dir: std::path::PathBuf::from(&storage.data_dir),
             }),
         }
     }
@@ -2465,10 +2963,20 @@ impl PartitionRouter {
         command: PartitionCommand,
     ) -> Option<oneshot::Receiver<PartitionResult>> {
         let (tx, rx) = oneshot::channel();
+        let named = command.collection();
+        let routed = if named.is_empty() {
+            String::new()
+        } else {
+            std::fs::read_to_string(view_route_path(&self.inner.data_dir, named))
+                .ok()
+                .map(|source| source.trim().to_string())
+                .filter(|source| !source.is_empty())
+                .unwrap_or_else(|| named.to_string())
+        };
         let index = if command.is_account() {
             0
         } else {
-            self.partition_index(command.collection())
+            self.partition_index(&routed)
         };
 
         let envelope = CommandEnvelope {
@@ -2547,6 +3055,57 @@ impl Drop for RouterInner {
         if let Some(path) = self.scratch.take() {
             let _ = std::fs::remove_dir_all(path);
         }
+    }
+}
+
+fn view_route_path(data_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let safe = name.replace(['/', '\\'], "_");
+    data_dir.join("view-routes").join(safe)
+}
+
+fn write_view_route(data_dir: &std::path::Path, name: &str, source: &str) -> Result<(), String> {
+    let path = view_route_path(data_dir, name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| format!("view route: {err}"))?;
+    }
+    std::fs::write(path, source).map_err(|err| format!("view route: {err}"))
+}
+
+fn index_path(engine: &StorageEngine, name: &str) -> std::path::PathBuf {
+    let safe = name.replace(['/', '\\'], "_");
+    engine.root().join("search").join(safe)
+}
+
+fn inverted_pipeline(pipeline: &[Document]) -> Result<(), String> {
+    for stage in pipeline {
+        let Some(name) = stage.keys().next() else {
+            return Err("a view stage is empty".into());
+        };
+        match name.as_str() {
+            "$match" => {}
+            "$project" => {
+                let spec = stage
+                    .get_document("$project")
+                    .map_err(|_| "$project requires a document".to_string())?;
+                if hides_id(spec) {
+                    return Err("an inverted view must keep _id".into());
+                }
+            }
+            other => {
+                return Err(format!(
+                    "an inverted view only allows $match and $project, found {other}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn hides_id(spec: &Document) -> bool {
+    match spec.get("_id") {
+        Some(bson::Bson::Int32(0) | bson::Bson::Int64(0) | bson::Bson::Boolean(false)) => true,
+        Some(bson::Bson::Double(number)) if *number == 0.0 => true,
+        _ => false,
     }
 }
 
@@ -4070,6 +4629,146 @@ mod tests {
         {
             PartitionResult::Error { message } => assert_eq!(message, "authentication failed"),
             other => panic!("expected Error, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_view_filters_and_inverted_index_survives_restart() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, true);
+        let router = PartitionRouter::with_storage(8, config.clone());
+        let source = "db.articles";
+        let view = (0..64)
+            .map(|n| format!("db.v{n}"))
+            .find(|name| router.partition_index(name) != router.partition_index(source))
+            .expect("a view name on another partition");
+
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: source.into(),
+                documents: vec![
+                    doc! { "_id": "1", "title": "rust engine", "sal": 10i32, "published": true },
+                    doc! { "_id": "2", "title": "other", "sal": 3i32, "published": false },
+                ],
+            },
+        )
+        .await;
+
+        let rejected = dispatch(
+            &router,
+            PartitionCommand::CreateView {
+                name: "db.grouped".into(),
+                source: source.into(),
+                pipeline: vec![doc! { "$group": { "_id": "$published", "n": { "$sum": 1 } } }],
+                kova: doc! { "inverted": true },
+            },
+        )
+        .await;
+        match rejected {
+            PartitionResult::Error { message } => assert!(message.contains("$group"), "{message}"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        match dispatch(
+            &router,
+            PartitionCommand::CreateView {
+                name: view.clone(),
+                source: source.into(),
+                pipeline: vec![doc! { "$match": { "published": true } }],
+                kova: doc! { "inverted": true, "later": "kept" },
+            },
+        )
+        .await
+        {
+            PartitionResult::Created => {}
+            other => panic!("expected Created, got {other:?}"),
+        }
+
+        match dispatch(&router, PartitionCommand::find(&view, doc! {})).await {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0].get_str("title").unwrap(), "rust engine");
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        let mut listed = Vec::new();
+        for rx in router.broadcast(PartitionCommand::ListCollections {
+            database: "db".into(),
+            filter: doc! {},
+        }) {
+            if let PartitionResult::ListedCollections { collections } =
+                rx.await.expect("worker replied")
+            {
+                listed.extend(collections);
+            }
+        }
+        let info = listed
+            .iter()
+            .find(|info| info.get_str("name") == Ok(view.trim_start_matches("db.")))
+            .unwrap_or_else(|| panic!("view missing from {listed:?}"));
+        assert_eq!(info.get_str("type").unwrap(), "view");
+        let options = info.get_document("options").unwrap();
+        assert_eq!(options.get_str("viewOn").unwrap(), "articles");
+        let kova = options.get_document("kova").unwrap();
+        assert_eq!(kova.get_str("later").unwrap(), "kept");
+        let fields = kova.get_document("fields").unwrap();
+        assert_eq!(fields.get_str("title").unwrap(), "text");
+        assert_eq!(fields.get_str("sal").unwrap(), "i64");
+        assert_eq!(fields.get_str("published").unwrap(), "bool");
+
+        match dispatch(
+            &router,
+            PartitionCommand::Search {
+                collection: view.clone(),
+                query: "rust".into(),
+                filter: doc! {},
+                options: SearchOptions::default(),
+            },
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1, "{documents:?}");
+                assert_eq!(documents[0].get_str("_id").unwrap(), "1");
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        match dispatch(
+            &router,
+            PartitionCommand::Drop {
+                collection: source.into(),
+            },
+        )
+        .await
+        {
+            PartitionResult::Error { message } => {
+                assert!(message.contains("reads it"), "{message}")
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        drop(router);
+
+        let router = PartitionRouter::with_storage(8, config);
+        match dispatch(
+            &router,
+            PartitionCommand::Search {
+                collection: view,
+                query: "rust".into(),
+                filter: doc! {},
+                options: SearchOptions::default(),
+            },
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1, "{documents:?}");
+                assert_eq!(documents[0].get_str("title").unwrap(), "rust engine");
+            }
+            other => panic!("expected Found, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(dir);
     }

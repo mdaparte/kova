@@ -245,6 +245,20 @@ impl WalOp {
             PartitionCommand::DropRole { name } => Some(Self::Auth {
                 spec: doc! { "op": "dropRole", "name": name.clone() },
             }),
+            PartitionCommand::CreateView {
+                name,
+                source,
+                pipeline,
+                kova,
+            } => Some(Self::Auth {
+                spec: doc! {
+                    "op": "createView",
+                    "name": name.clone(),
+                    "source": source.clone(),
+                    "pipeline": pipeline.clone(),
+                    "kova": kova.clone(),
+                },
+            }),
             PartitionCommand::Find { .. }
             | PartitionCommand::Aggregate { .. }
             | PartitionCommand::Count { .. }
@@ -351,6 +365,7 @@ impl WalOp {
                 "revokeRoles" => "revokeRoles",
                 "createRole" => "createRole",
                 "dropRole" => "dropRole",
+                "createView" => "createView",
                 _ => "auth",
             },
             Self::Transaction { .. } => "transaction",
@@ -474,7 +489,7 @@ impl WalOp {
                 validator: required_doc(&body, "validator")?,
             }),
             "createUser" | "updateUser" | "grantRoles" | "revokeRoles" | "createRole"
-            | "dropRole" => Ok(Self::Auth { spec: body }),
+            | "dropRole" | "createView" => Ok(Self::Auth { spec: body }),
             "transaction" => {
                 let values = body
                     .get_array("ops")
@@ -903,6 +918,20 @@ fn auth_command(spec: &Document) -> PartitionCommand {
                 .unwrap_or_default(),
         },
         "dropRole" => PartitionCommand::DropRole { name },
+        "createView" => PartitionCommand::CreateView {
+            name,
+            source: spec.get_str("source").unwrap_or("").to_string(),
+            pipeline: spec
+                .get_array("pipeline")
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_document().cloned())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            kova: spec.get_document("kova").ok().cloned().unwrap_or_default(),
+        },
         _ => PartitionCommand::CreateUser {
             name,
             hash: spec.get_str("hash").unwrap_or("").to_string(),

@@ -27,9 +27,9 @@ replication, and multi-model indexing.
 | 11 | Replication & High Availability (Oplog + Replica Sets + Heartbeat) | ✅ Complete |
 | 12 | On-Disk Page Compression (zstd, WiredTiger-style) | ✅ Complete |
 | 13 | Security (RBAC, Argon2id, AES-256-GCM, users) | ✅ Complete |
-| 14 | Monitoring (17 atomic counters, `serverStatus`) | ⚪ Planned |
+| 14 | Monitoring (17 atomic counters, `serverStatus`) | ✅ Complete |
 | 15 | Connection Pool (cap, tracking, lifecycle) | ⚪ Planned |
-| 16 | Lucene-like Views and Facet Queries | ⚪ Planned |
+| 16 | Views (`viewOn` + pipeline, optional disk Tantivy) | ✅ Complete |
 | 17 | MapReduce across the replica set | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
@@ -604,7 +604,7 @@ Users live in the catalog, not in a second database of documents.
 - [x] AES-256-GCM around the compressed page and the WAL record, with a random nonce per write.
 - [x] Tests: each built-in role, a custom role, a disabled user, a bad password, and a restart that reads an encrypted page only with the key.
 
-## Phase 14 — Monitoring (17 atomic counters, `serverStatus`) ⚪ Planned
+## Phase 14 — Monitoring (17 atomic counters, `serverStatus`) ✅
 
 Counters are atomics. A network task and a partition worker bump them without taking a lock on the command path. `serverStatus` returns the current values on the wire.
 
@@ -630,9 +630,9 @@ Counters are atomics. A network task and a partition worker bump them without ta
 
 ### Phase 14 — Sub-tasks
 
-- [ ] One atomic per counter, updated where the command or the pool already runs.
-- [ ] `serverStatus` returns the seventeen values and the uptime.
-- [ ] A test drives one insert, one indexed find, and one scan, then reads the counters back through `serverStatus`.
+- [x] One atomic per counter, updated where the command or the pool already runs.
+- [x] `serverStatus` returns the seventeen values and the uptime.
+- [x] A test drives one insert, one indexed find, and one scan, then reads the counters back through `serverStatus`.
 
 ## Phase 15 — Connection Pool ⚪ Planned
 
@@ -651,22 +651,32 @@ The listener caps how many clients can be connected. This is the server side of 
 - [ ] Close idle connections and connections of a disabled user.
 - [ ] Test: the connection past the cap is refused, and a closed connection frees a slot.
 
-## Phase 16 — Lucene-like Views and Facet Queries ⚪ Planned
+## Phase 16 — Views and optional disk inverted index ✅
 
-A view is a saved query, not a second copy of the documents. Facets are counts beside the hits, in the sense of a Lucene facet collector.
+A view is a MongoDB view: a name, a source collection, and a pipeline. It is not a copy of the documents. `find`, `count`, `aggregate`, and `$text` on the view run that pipeline against the source. `listCollections` reports `type: "view"`. `drop` removes the view. Dropping the source is refused while a view still reads it.
 
-- `createView` stores a name, a source collection, a filter, and a list of facet fields in the catalog. `dropView` removes that spec. `listCollections` marks the name as a view.
-- `find` and search on the view run the saved filter against the source collection. They read pages through the buffer pool. They do not write a new collection.
-- The reply adds `facets`: for each requested field, the distinct values in the match set and how many documents have that value.
-- A field that Tantivy already indexes is counted from that index. Any other field is counted while the page scan applies the filter.
-- `$facet` as a multi-pipeline aggregation stage is not this phase. A JavaScript function is not a view.
+Engine options live in the `kova` document on `create`. Keys added later stay in that document. The one key this phase reads is `inverted`.
+
+- `inverted: true` builds a Tantivy index on disk at `data/partition-N/search/<view>/`, in segments. The index survives a restart. Inserts, updates, and deletes on the source keep it up to date.
+- Field types are discovered from the documents that pass the pipeline. A string is text, an int is `i64`, a double is `f64`, a bool is bool, a date is a date. The first type seen for a field stays. A new field extends the schema and the index is rewritten.
+- An inverted view accepts only `$match` and `$project`, and the project must keep `_id`. A `$group` view is still a view. `inverted: true` on it fails and names the stage.
+- The existing `$text` index stays in RAM. `inverted` does not replace it.
+
+```javascript
+db.runCommand({
+  create: "published_search",
+  viewOn: "articles",
+  pipeline: [{ $match: { published: true } }],
+  kova: { inverted: true }
+})
+```
 
 ### Phase 16 — Sub-tasks
 
-- [ ] Persist the view spec in the catalog and rebuild nothing extra on startup.
-- [ ] Route `find` and search on a view to the source collection with the saved filter.
-- [ ] Return facet buckets from Tantivy when the field is indexed, and from the match scan otherwise.
-- [ ] Test: two values of one field, a filter that drops one, and the bucket counts after a restart.
+- [x] Persist the view (`name`, `viewOn`, `pipeline`, `kova`) in the catalog.
+- [x] Route `find`, `count`, `aggregate`, and `$text` on a view to the source collection.
+- [x] When `kova.inverted` is true, keep a Tantivy index on disk and discover field types.
+- [x] Test: a `$match` view, a rejected `$group` inverted view, discovered types, and a `$text` hit after restart.
 
 ## Phase 17 — MapReduce across the replica set ⚪ Planned
 
@@ -712,9 +722,7 @@ A replica set is the cluster for this command. Members are full copies, not shar
 | Gap | Phase | Notes |
 |-----|-------|-------|
 | Transactions are not in the oplog | 11 | `begin` / `commit` / `abort` and any command with `txnId` stay on the primary. |
-| No `serverStatus` counters | 14 | Queries, writes, connections, bytes, WAL, pool, plans, transactions. |
 | The listener does not cap connections | 15 | `max_connections` and idle close. |
-| No saved views or facet counts | 16 | A view is a stored query. Facets ride on the reply. |
 | `mapReduce` does not fan out | 17 | Voters map `_id` ranges. The primary reduces. |
 
 ## Architecture Diagram (updated)
@@ -773,5 +781,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–13 are complete. Next is monitoring (Phase 14): seventeen
-atomic counters and `serverStatus`.*
+*Phases 1–14 and 16 are complete. Still open: the connection cap
+(Phase 15) and mapReduce across the replica set (Phase 17).*

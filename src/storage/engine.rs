@@ -44,6 +44,7 @@ struct Manifest {
 /// Durability for one partition thread.
 pub struct StorageEngine {
     partition: usize,
+    root: PathBuf,
     sync: bool,
     checkpoint_every: u64,
     checkpoint_on_shutdown: bool,
@@ -80,6 +81,7 @@ impl StorageEngine {
         )?;
         Ok(Self {
             partition,
+            root: root.clone(),
             sync: config.wal_fsync,
             checkpoint_every: config.checkpoint_every,
             checkpoint_on_shutdown: config.checkpoint_on_shutdown,
@@ -90,6 +92,11 @@ impl StorageEngine {
             disk,
             heap: Heap::empty(page_size, config.encryption_key.is_some()),
         })
+    }
+
+    /// Partition directory (`data/partition-N`).
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Opens every page file, overlays the catalog, and returns the WAL
@@ -122,6 +129,7 @@ impl StorageEngine {
     /// Appends a mutation. The caller applies it to memory after this returns.
     pub fn append(&mut self, op: &WalOp) -> Result<u64, String> {
         let lsn = self.wal.append(op)?;
+        crate::metrics::METRICS.wal_write();
         self.appends_since_checkpoint += 1;
         Ok(lsn)
     }

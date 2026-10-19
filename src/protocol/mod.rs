@@ -386,11 +386,49 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
     // their "create collection" action fails and the collection never
     // appears in listings.
     if let Ok(collection) = command.get_str("create") {
-        // MongoDB rejects dotted collection names (3.6+): the storage
-        // namespace uses `.` as the db/collection separator, so a dot
-        // here would be ambiguous anyway.
         if collection.contains('.') {
             return Err("collection names cannot contain '.'".to_string());
+        }
+        if command.contains_key("viewOn") {
+            let source = command
+                .get_str("viewOn")
+                .map_err(|_| "viewOn must be a string")?;
+            if source.contains('.') {
+                return Err("viewOn cannot contain '.'".to_string());
+            }
+            let pipeline = match command.get("pipeline") {
+                None => Vec::new(),
+                Some(bson::Bson::Array(values)) => values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_document()
+                            .cloned()
+                            .ok_or_else(|| "view pipeline stages must be documents".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(_) => return Err("pipeline must be an array".into()),
+            };
+            let kova = match command.get("kova") {
+                None => doc! {},
+                Some(bson::Bson::Document(kova)) => kova.clone(),
+                Some(_) => return Err("kova must be a document".into()),
+            };
+            if kova
+                .get("inverted")
+                .is_some_and(|value| value.as_bool().is_none())
+            {
+                return Err("kova.inverted must be a boolean".into());
+            }
+            if txn_id.is_some() {
+                return Err("this command cannot run inside a transaction".into());
+            }
+            return Ok(PartitionCommand::CreateView {
+                name: namespaced(collection),
+                source: namespaced(source),
+                pipeline,
+                kova,
+            });
         }
         if command.get_bool("capped").unwrap_or(false) {
             warn_non_mongo(
@@ -1084,6 +1122,10 @@ fn warn_non_mongo(message: impl AsRef<str>) {
 ///
 /// Returns `None` when the command must be routed to storage instead.
 pub fn special_command(command: &Document) -> Option<Document> {
+    if command.contains_key("serverStatus") {
+        return Some(server_status_reply());
+    }
+
     if command.contains_key("ping") {
         return Some(doc! { "ok": 1.0 });
     }
@@ -1153,6 +1195,33 @@ pub fn special_command(command: &Document) -> Option<Document> {
     }
 
     None
+}
+
+/// The seventeen counters and how long this process has been up.
+fn server_status_reply() -> Document {
+    let sample = crate::metrics::METRICS.snapshot();
+    let n = |value: u64| bson::Bson::Int64(value as i64);
+    doc! {
+        "ok": 1.0,
+        "uptime": sample.uptime_secs as i64,
+        "queries": n(sample.queries),
+        "inserts": n(sample.inserts),
+        "updates": n(sample.updates),
+        "deletes": n(sample.deletes),
+        "connectionsActive": n(sample.connections_active),
+        "connectionsTotal": n(sample.connections_total),
+        "bytesIn": n(sample.bytes_in),
+        "bytesOut": n(sample.bytes_out),
+        "walWrites": n(sample.wal_writes),
+        "bufferPoolHits": n(sample.buffer_pool_hits),
+        "bufferPoolMisses": n(sample.buffer_pool_misses),
+        "bufferPoolEvictions": n(sample.buffer_pool_evictions),
+        "indexLookups": n(sample.index_lookups),
+        "collectionScans": n(sample.collection_scans),
+        "transactionsStarted": n(sample.transactions_started),
+        "transactionsCommitted": n(sample.transactions_committed),
+        "transactionsAborted": n(sample.transactions_aborted),
+    }
 }
 
 /// Builds the reply to a `buildInfo` request.

@@ -30,9 +30,12 @@ use tantivy::tokenizer::{
 };
 use tantivy::{doc, Index, IndexReader, IndexWriter, TantivyDocument, Term};
 
+mod disk;
+
 use crate::config::CONFIG;
 use crate::logger::LOGGER;
 use crate::types::SearchHit;
+pub use disk::DiskIndex;
 
 /// Memory budget (bytes) reserved for one field index writer.
 ///
@@ -40,7 +43,7 @@ use crate::types::SearchHit;
 /// this is the smallest legal power of two above that floor. The
 /// budget is the *ceiling*, not an upfront allocation, but it defines
 /// the worst-case cost of [`MAX_INDEXED_FIELDS`] indexes.
-const WRITER_MEMORY_BUDGET: usize = 1 << 24;
+pub(super) const WRITER_MEMORY_BUDGET: usize = 1 << 24;
 
 /// Maximum number of distinct field names indexed per partition.
 ///
@@ -60,7 +63,7 @@ const FUZZY_DISTANCE: u8 = 1;
 ///
 /// tantivy resolves the tokenizer by name at schema build time; the
 /// pipeline itself comes from the `[search]` section of `kova.toml`.
-const TOKENIZER_NAME: &str = "kova_text";
+pub(super) const TOKENIZER_NAME: &str = "kova_text";
 
 /// Every document field, indexed separately.
 ///
@@ -358,7 +361,7 @@ impl TextIndex {
 /// `default` splits on punctuation/whitespace and lowercases;
 /// `en_stem` adds English stemming for better recall. Configured stop
 /// words are appended last so they see lowercased tokens.
-fn build_analyzer(kind: &str, stopwords: &[String]) -> TextAnalyzer {
+pub(super) fn build_analyzer(kind: &str, stopwords: &[String]) -> TextAnalyzer {
     // `TextAnalyzerBuilder` is typed by its filter chain, so every
     // pipeline combination must be spelled out statically.
     let base = || {
