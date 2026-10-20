@@ -27,7 +27,7 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug seed indexes doc clean
+.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug seed indexes server-status views security demos doc clean
 
 help:
 	@printf '%s\n' \
@@ -47,13 +47,17 @@ help:
 		'  run-debug    cargo run with KOVA_LOG_LEVEL=debug' \
 		'  seed         Oracle emp/dept/salgrade/bonus into database db' \
 		'  indexes      index tour over the seeded emp collection' \
+		'  server-status  serverStatus counters' \
+		'  views        views and the on-disk inverted index' \
+		'  security     users, roles, and authenticate' \
+		'  demos        server-status, views, then security' \
 		'  doc          cargo doc --no-deps --open' \
 		'  clean        cargo clean' \
 		'' \
-		'seed and indexes talk to a server that is already running.' \
+		'The mongosh targets talk to a server that is already running.' \
 		'  make seed                 localhost:27018' \
-		'  make indexes              localhost:27018' \
-		'  make seed KOVA_PORT=27018'
+		'  make views                localhost:27018' \
+		'  make demos KOVA_PORT=27018'
 
 build:
 	$(CARGO) build
@@ -102,6 +106,19 @@ seed:
 # Walks emp indexes against the seeded sample. Does not drop the database.
 indexes:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/index-demo.js
+
+# serverStatus, views, and security. Each script prints ok/FAIL and exits
+# non-zero on the first failure. They share the port with seed and indexes.
+server-status:
+	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/server-status.js
+
+views:
+	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/views.js
+
+security:
+	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/security.js
+
+demos: server-status views security
 
 doc:
 	$(CARGO) doc --no-deps --open

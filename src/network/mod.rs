@@ -530,6 +530,12 @@ async fn execute_replicated(
 /// command is logged or applied.
 async fn prepare_account(command: &mut bson::Document) -> Result<(), String> {
     command.remove("$trusted");
+    // `authenticate` checks the password on this connection. It is not
+    // replicated, so the plaintext stays on the command until the worker
+    // reads it. Every other command drops `pwd` so a password is not logged.
+    if command.contains_key("authenticate") {
+        return Ok(());
+    }
     if !command.contains_key("createUser") || command.contains_key("hash") {
         command.remove("pwd");
         return Ok(());
