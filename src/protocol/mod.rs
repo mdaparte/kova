@@ -462,8 +462,16 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             let options = parse_text_options(text)?;
 
             // Keep the client's other predicates as a post-filter.
+            // `facets` is a count request, not a field on the document.
             let mut rest = filter.clone();
             rest.remove("$text");
+            let mut options = options;
+            options.facets = match rest.get("facets") {
+                None => Document::new(),
+                Some(bson::Bson::Document(facets)) => facets.clone(),
+                Some(_) => return Err("facets must be a document".into()),
+            };
+            rest.remove("facets");
 
             return bind_txn(
                 txn_id,
@@ -1016,7 +1024,7 @@ fn namespace(db: &str, collection: &str) -> String {
 /// `$search` is the only one MongoDB requires; the other three are
 /// Kova extensions (or unsupported MongoDB features) and produce a
 /// warning when `warn_on_non_mongo_queries` is enabled.
-const TEXT_OPERATORS: [&str; 4] = ["$search", "$boost", "$analyzer", "$decay"];
+const TEXT_OPERATORS: [&str; 5] = ["$search", "$boost", "$analyzer", "$decay", "$fuzzy"];
 
 /// Parses the ranking options of a `$text` filter.
 ///
@@ -1054,6 +1062,18 @@ fn parse_text_options(text: &Document) -> Result<SearchOptions, String> {
         warn_non_mongo(
             "'$text.$analyzer' is a Kova extension and is ignored (the analyzer is fixed in kova.toml [search])",
         );
+    }
+
+    if let Some(value) = text.get("$fuzzy") {
+        warn_non_mongo(
+            "'$text.$fuzzy' is a Kova extension (a fraction of each word's length, from 0 to 1)",
+        );
+        let ratio = bson_number(value)
+            .ok_or_else(|| "$text.$fuzzy must be a number from 0 to 1".to_string())?;
+        if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+            return Err("$text.$fuzzy must be a number from 0 to 1".into());
+        }
+        options.fuzzy = ratio;
     }
 
     if let Ok(decay) = text.get_document("$decay") {
@@ -1321,6 +1341,22 @@ fn hello_reply() -> Document {
     }
 }
 
+fn cursor_reply(documents: &[Document], facets: Option<&Document>) -> Document {
+    let mut reply = doc! { "ok": 1.0 };
+    reply.insert(
+        "cursor",
+        doc! {
+            "id": 0i64,
+            "ns": "",
+            "firstBatch": documents.to_vec(),
+        },
+    );
+    if let Some(facets) = facets {
+        reply.insert("facets", facets.clone());
+    }
+    reply
+}
+
 /// Converts a [`PartitionResult`] into the BSON body of a Mongo reply.
 pub fn reply_document(result: &PartitionResult) -> Document {
     match result {
@@ -1328,18 +1364,8 @@ pub fn reply_document(result: &PartitionResult) -> Document {
             "ok": 1.0,
             "n": *inserted_count as i64,
         },
-        PartitionResult::Found { documents } => {
-            let mut reply = doc! { "ok": 1.0 };
-            reply.insert(
-                "cursor",
-                doc! {
-                    "id": 0i64,
-                    "ns": "",
-                    "firstBatch": documents.clone(),
-                },
-            );
-            reply
-        }
+        PartitionResult::Found { documents } => cursor_reply(documents, None),
+        PartitionResult::Faceted { documents, facets } => cursor_reply(documents, Some(facets)),
         PartitionResult::Counted { count } => doc! {
             "ok": 1.0,
             "n": *count as i64,
@@ -1908,6 +1934,34 @@ mod tests {
                 assert_eq!(options, SearchOptions::default());
             }
             other => panic!("expected Search, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_find_with_text_keeps_facets_out_of_the_filter() {
+        let command = doc! {
+            "find": "emp_search",
+            "filter": {
+                "$text": { "$search": "clerk", "$fuzzy": 0.3 },
+                "facets": {
+                    "job": { "terms": { "field": "job" } },
+                    "deptno": 30,
+                },
+            },
+        };
+        let parsed = command_from_document(&command).expect("parse");
+        match parsed {
+            PartitionCommand::Search {
+                filter, options, ..
+            } => {
+                assert!(
+                    filter.is_empty(),
+                    "facets must not filter documents: {filter:?}"
+                );
+                assert!(options.facets.contains_key("job"));
+                assert!((options.fuzzy - 0.3).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Search, got {other:?}"),
         }
     }
 

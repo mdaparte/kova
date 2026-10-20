@@ -757,7 +757,19 @@ impl PartitionWorker {
                     return PartitionResult::Error { message };
                 }
                 if let Some(view) = self.engine.heap.view(&collection).cloned() {
-                    return self.search_view(view, &query, &filter, touch_index);
+                    return self.search_view(
+                        view,
+                        &query,
+                        &filter,
+                        &options.facets,
+                        options.fuzzy,
+                        touch_index,
+                    );
+                }
+                if !options.facets.is_empty() {
+                    return PartitionResult::Error {
+                        message: "facets require kova.inverted".into(),
+                    };
                 }
                 let hits = match self.index.search(&collection, &query, &options.boosts) {
                     Ok(hits) => hits,
@@ -1743,21 +1755,51 @@ impl PartitionWorker {
         view: crate::storage::heap::ViewSpec,
         query: &str,
         filter: &Document,
+        facets: &Document,
+        fuzzy: f64,
         touch_index: bool,
     ) -> PartitionResult {
-        let hits = if view.inverted() {
+        if !facets.is_empty() && !view.inverted() {
+            return PartitionResult::Error {
+                message: "facets require kova.inverted".into(),
+            };
+        }
+        if view.inverted() && !facets.is_empty() {
+            let ready = self
+                .inverted
+                .get(&view.name)
+                .is_some_and(|index| index.fast_ready());
+            if !ready {
+                if let Err(message) = self.rebuild_inverted(&view) {
+                    return PartitionResult::Error { message };
+                }
+            }
+        }
+        let (hits, facet_doc) = if view.inverted() {
             let Some(index) = self.inverted.get_mut(&view.name) else {
                 return PartitionResult::Error {
                     message: format!("inverted index for {} is not open", view.name),
                 };
             };
-            match index.search_text(query) {
+            let hits = match index.search_text(query, fuzzy) {
                 Ok(hits) => hits,
                 Err(message) => return PartitionResult::Error { message },
-            }
+            };
+            let facet_doc = if facets.is_empty() {
+                None
+            } else {
+                match index.aggregate(query, facets, fuzzy) {
+                    Ok(facets) => Some(facets),
+                    Err(message) => return PartitionResult::Error { message },
+                }
+            };
+            (hits, facet_doc)
         } else {
             match self.index.search(&view.source, query, &[]) {
-                Ok(hits) => hits.into_iter().map(|hit| (hit.id, hit.score)).collect(),
+                Ok(hits) => (
+                    hits.into_iter().map(|hit| (hit.id, hit.score)).collect(),
+                    None,
+                ),
                 Err(message) => return PartitionResult::Error { message },
             }
         };
@@ -1784,8 +1826,10 @@ impl PartitionWorker {
         if touch_index {
             crate::metrics::METRICS.query();
         }
-        PartitionResult::Found {
-            documents: ranked.into_iter().map(|(_, document)| document).collect(),
+        let documents = ranked.into_iter().map(|(_, document)| document).collect();
+        match facet_doc {
+            Some(facets) => PartitionResult::Faceted { documents, facets },
+            None => PartitionResult::Found { documents },
         }
     }
 
@@ -1868,9 +1912,13 @@ impl PartitionWorker {
                 continue;
             }
             match crate::search::DiskIndex::open(&path) {
-                Ok(index) => {
+                Ok(index) if index.fast_ready() => {
                     self.inverted.insert(view.name, index);
                 }
+                Ok(_) => LOGGER.info(format!(
+                    "partition {} inverted index {} will be rebuilt for facets",
+                    self.id, view.name
+                )),
                 Err(message) => LOGGER.warn(format!(
                     "partition {} inverted index {}: {message}",
                     self.id, view.name
@@ -4321,6 +4369,7 @@ mod tests {
                 options: SearchOptions {
                     boosts: vec![("title".to_string(), 20.0)],
                     decay: None,
+                    ..SearchOptions::default()
                 },
             })
             .expect("worker reachable");
@@ -4379,6 +4428,7 @@ mod tests {
                         field: "created_at".into(),
                         half_life_secs: 86_400.0,
                     }),
+                    ..SearchOptions::default()
                 },
             })
             .expect("worker reachable");
@@ -4725,14 +4775,52 @@ mod tests {
                 collection: view.clone(),
                 query: "rust".into(),
                 filter: doc! {},
-                options: SearchOptions::default(),
+                options: SearchOptions {
+                    facets: doc! {
+                        "title": { "terms": { "field": "title" } },
+                        "sal": { "range": { "field": "sal", "ranges": [ { "to": 5 }, { "from": 5 } ] } },
+                    },
+                    ..SearchOptions::default()
+                },
+            },
+        )
+        .await
+        {
+            PartitionResult::Faceted { documents, facets } => {
+                assert_eq!(documents.len(), 1, "{documents:?}");
+                assert_eq!(documents[0].get_str("_id").unwrap(), "1");
+                let title = facets.get_document("title").expect("title facet");
+                let buckets = title.get_array("buckets").expect("buckets");
+                assert!(
+                    buckets.iter().any(|bucket| {
+                        bucket.as_document().is_some_and(|entry| {
+                            entry.get_str("key") == Ok("rust engine")
+                                && entry.get_i64("doc_count") == Ok(1)
+                        })
+                    }),
+                    "{facets:?}"
+                );
+            }
+            other => panic!("expected Faceted, got {other:?}"),
+        }
+
+        match dispatch(
+            &router,
+            PartitionCommand::Search {
+                collection: view.clone(),
+                query: "engien".into(),
+                filter: doc! {},
+                options: SearchOptions {
+                    fuzzy: 0.3,
+                    ..SearchOptions::default()
+                },
             },
         )
         .await
         {
             PartitionResult::Found { documents } => {
                 assert_eq!(documents.len(), 1, "{documents:?}");
-                assert_eq!(documents[0].get_str("_id").unwrap(), "1");
+                assert_eq!(documents[0].get_str("title").unwrap(), "rust engine");
             }
             other => panic!("expected Found, got {other:?}"),
         }

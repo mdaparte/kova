@@ -45,10 +45,10 @@ help:
 		'  run          cargo run' \
 		'  run-release  cargo run --release' \
 		'  run-debug    cargo run with KOVA_LOG_LEVEL=debug' \
-		'  seed         Oracle emp/dept/salgrade/bonus into database db' \
+		'  seed         Oracle sample, emp indexes, and views into database db' \
 		'  indexes      index tour over the seeded emp collection' \
 		'  server-status  serverStatus counters' \
-		'  views        views and the on-disk inverted index' \
+		'  views        checks the views seed left on emp' \
 		'  security     users, roles, and authenticate' \
 		'  demos        server-status, views, then security' \
 		'  doc          cargo doc --no-deps --open' \
@@ -98,12 +98,13 @@ run-release:
 run-debug:
 	KOVA_LOG_LEVEL=debug $(CARGO) run
 
-# Reloads the Oracle Scott sample into database `db`. Drops that database first.
-# The server must already be listening. Default port matches kova.toml (27018).
+# Reloads the Oracle Scott sample into database `db`, then creates the
+# five emp indexes and the well_paid / emp_search views. Drops that
+# database first. The server must already be listening.
 seed:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/seed-oracle.js
 
-# Walks emp indexes against the seeded sample. Does not drop the database.
+# Walks emp indexes against the seeded sample. Leaves the five indexes.
 indexes:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/index-demo.js
 
@@ -112,6 +113,7 @@ indexes:
 server-status:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/server-status.js
 
+# Checks well_paid and emp_search. Requires `make seed`. Does not drop them.
 views:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/views.js
 

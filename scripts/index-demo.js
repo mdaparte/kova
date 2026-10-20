@@ -1,9 +1,10 @@
 // Index tour over the Scott sample in database `db`.
 //
-// Assumes `make seed` already loaded emp. Creates five indexes, checks
-// the people each one returns, rejects a second SMITH, moves SMITH's
-// salary through a range and puts it back, then drops and recreates the
-// salary index. The sample is unchanged when the script finishes.
+// Assumes `make seed` already loaded emp and created the five indexes.
+// Checks the people each one returns, rejects a second SMITH, moves
+// SMITH's salary through a range and puts it back, then drops and
+// recreates the salary index. Creating an index that is already there
+// is harmless. The sample, and the five indexes, stay when it finishes.
 //
 //   make indexes
 

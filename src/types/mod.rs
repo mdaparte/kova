@@ -95,6 +95,11 @@ pub enum PartitionResult {
         stage: String,
         index_name: Option<String>,
     },
+    /// A `$text` result that also counted facet buckets.
+    Faceted {
+        documents: Vec<Document>,
+        facets: Document,
+    },
     /// `authenticate` succeeded. `actions` are the expanded privilege names.
     Authenticated { user: String, actions: Vec<String> },
     /// A user or role change. `disabled` names a user whose connections must close.
@@ -299,6 +304,13 @@ pub struct SearchOptions {
     /// Optional recency decay (`$text.$decay`), applied by the worker
     /// as a re-rank over the BM25 ordering.
     pub decay: Option<DecaySpec>,
+    /// Term and range buckets for an inverted view. Empty means the
+    /// search returns documents only.
+    pub facets: Document,
+    /// `$text.$fuzzy`, a fraction of each word's length from 0 to 1.
+    /// The edit distance is that fraction, rounded up, and never more
+    /// than 2. Zero keeps the query exact.
+    pub fuzzy: f64,
 }
 
 /// Exponential half-life decay over a date field.

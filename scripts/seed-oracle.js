@@ -13,11 +13,44 @@
 //   bonus       ships empty in Oracle. The rows below are discretionary awards
 //                 keyed by empno so a $lookup can attach them. `comm` here is
 //                 the award amount, not the commission stored on emp.
+//
+// After the rows, the script leaves the five emp indexes that
+// `scripts/index-demo.js` checks, plus two views:
+//   well_paid   emp rows with sal > 2000
+//   emp_search  every emp row, with a Tantivy index on disk (`kova.inverted`)
 
 const database = db.getSiblingDB("db");
 const n = (value) => NumberInt(value);
 const day = (iso) => ISODate(iso);
 
+function command(spec) {
+    let reply;
+    try {
+        reply = database.runCommand(spec);
+    } catch (err) {
+        print("FAIL " + (err.message || err));
+        quit(1);
+    }
+    if (!reply || !reply.ok) {
+        print("FAIL " + ((reply && reply.errmsg) || "no reply"));
+        quit(1);
+    }
+    return reply;
+}
+
+// Views read emp, so they have to go before the database drop. A missing
+// name is not an error: the first seed has nothing to remove.
+for (const name of ["well_paid", "emp_search"]) {
+    try {
+        database.runCommand({ drop: name });
+    } catch (err) {
+        const message = String(err.message || err);
+        if (!message.includes("not found")) {
+            print("FAIL drop " + name + ": " + message);
+            quit(1);
+        }
+    }
+}
 database.dropDatabase();
 
 const dept = database.dept.insertMany([
@@ -70,8 +103,28 @@ function inserted(result) {
     return Object.keys(result.insertedIds).length;
 }
 
+database.emp.createIndex({ sal: 1 }, { name: "sal_1" });
+database.emp.createIndex({ job: "hashed" }, { name: "job_hashed" });
+database.emp.createIndex({ ename: 1 }, { name: "ename_1", unique: true });
+database.emp.createIndex({ deptno: 1, sal: 1 }, { name: "deptno_1_sal_1" });
+database.emp.createIndex({ comm: 1 }, { name: "comm_1", sparse: true });
+
+command({
+    create: "well_paid",
+    viewOn: "emp",
+    pipeline: [{ $match: { sal: { $gt: n(2000) } } }],
+});
+command({
+    create: "emp_search",
+    viewOn: "emp",
+    pipeline: [],
+    kova: { inverted: true, analyzer: "en_stem" }
+});
+
 print("seeded database db");
 print("  dept     " + inserted(dept));
 print("  emp      " + inserted(emp));
 print("  salgrade " + inserted(salgrade));
 print("  bonus    " + inserted(bonus));
+print("  indexes  sal_1, job_hashed, ename_1, deptno_1_sal_1, comm_1");
+print("  views    well_paid, emp_search");

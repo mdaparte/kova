@@ -9,12 +9,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bson::{Bson, Document};
+use tantivy::aggregation::agg_req::Aggregations;
+use tantivy::aggregation::{AggregationCollector, AggregationLimits};
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, Query, QueryParser};
 use tantivy::schema::{
-    DateOptions, Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, INDEXED,
-    STORED, STRING,
+    DateOptions, Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST,
+    INDEXED, STORED, STRING,
 };
 use tantivy::{doc, DateTime, Index, IndexReader, IndexWriter, TantivyDocument, Term};
 
@@ -95,7 +97,7 @@ impl DiskIndex {
     /// Rewrites the index from the view's current documents.
     pub fn rebuild(&mut self, docs: &[(String, Document)]) -> Result<(), String> {
         let kinds = discover(docs);
-        if kinds != self.kinds || !index_exists(&self.path) {
+        if kinds != self.kinds || !self.fast_ready() || !index_exists(&self.path) {
             let path = self.path.clone();
             drop(self.writer.commit());
             // Replace the directory so the new schema is the only one.
@@ -112,21 +114,14 @@ impl DiskIndex {
         self.commit()
     }
 
-    pub fn search_text(&mut self, query: &str) -> Result<Vec<(String, f32)>, String> {
-        let text_fields: Vec<Field> = self
-            .kinds
-            .iter()
-            .filter(|(_, kind)| **kind == Kind::Text)
-            .filter_map(|(name, _)| self.fields.get(name).copied())
-            .collect();
+    pub fn search_text(&mut self, query: &str, fuzzy: f64) -> Result<Vec<(String, f32)>, String> {
+        let text_fields = self.text_fields();
         if text_fields.is_empty() || query.trim().is_empty() {
             return Ok(Vec::new());
         }
         self.commit()?;
         let searcher = self.reader.searcher();
-        let parsed = QueryParser::for_index(&self.index, text_fields)
-            .parse_query(query)
-            .map_err(|err| format!("search query: {err}"))?;
+        let parsed = self.parsed_query(query, fuzzy)?;
         let hits = searcher
             .search(&parsed, &TopDocs::with_limit(100))
             .map_err(|err| format!("search: {err}"))?;
@@ -144,6 +139,65 @@ impl DiskIndex {
             out.push((id, score));
         }
         Ok(out)
+    }
+
+    /// True when every discovered field has the columnar copy facets read.
+    pub fn fast_ready(&self) -> bool {
+        self.index
+            .schema()
+            .fields()
+            .all(|(_, entry)| entry.name() == "_id" || entry.field_type().is_fast())
+    }
+
+    /// Counts term and range buckets for the same text query as [`Self::search_text`].
+    pub fn aggregate(
+        &mut self,
+        query: &str,
+        facets: &Document,
+        fuzzy: f64,
+    ) -> Result<Document, String> {
+        if facets.is_empty() {
+            return Ok(Document::new());
+        }
+        if !self.fast_ready() {
+            return Err("facet columns are missing".into());
+        }
+        if self.text_fields().is_empty() || query.trim().is_empty() {
+            return Err("facets require a text query".into());
+        }
+        self.commit()?;
+        let parsed = self.parsed_query(query, fuzzy)?;
+        let spec = serde_json::to_value(facets).map_err(|err| format!("facets: {err}"))?;
+        let aggs: Aggregations =
+            serde_json::from_value(spec).map_err(|err| format!("facets: {err}"))?;
+        let collector = AggregationCollector::from_aggs(aggs, AggregationLimits::default());
+        let results = self
+            .reader
+            .searcher()
+            .search(&parsed, &collector)
+            .map_err(|err| format!("facets: {err}"))?;
+        let bson = bson::to_bson(&results).map_err(|err| format!("facets: {err}"))?;
+        bson.as_document()
+            .cloned()
+            .ok_or_else(|| "facets did not return a document".into())
+    }
+
+    fn text_fields(&self) -> Vec<Field> {
+        self.kinds
+            .iter()
+            .filter(|(_, kind)| **kind == Kind::Text)
+            .filter_map(|(name, _)| self.fields.get(name).copied())
+            .collect()
+    }
+
+    fn parsed_query(&self, query: &str, fuzzy: f64) -> Result<Box<dyn Query>, String> {
+        let fields = self.text_fields();
+        if fuzzy > 0.0 {
+            return Ok(fuzzy_terms(&fields, query, fuzzy));
+        }
+        QueryParser::for_index(&self.index, fields)
+            .parse_query(query)
+            .map_err(|err| format!("search query: {err}"))
     }
 
     fn grows(&self, document: &Document) -> bool {
@@ -198,19 +252,22 @@ impl DiskIndex {
         for (name, kind) in &kinds {
             let field = match kind {
                 Kind::Text => {
-                    let options = TextOptions::default().set_indexing_options(
-                        TextFieldIndexing::default()
-                            .set_tokenizer(TOKENIZER_NAME)
-                            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-                    );
+                    let options = TextOptions::default()
+                        .set_indexing_options(
+                            TextFieldIndexing::default()
+                                .set_tokenizer(TOKENIZER_NAME)
+                                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                        )
+                        .set_fast(None);
                     builder.add_text_field(name, options)
                 }
-                Kind::I64 => builder.add_i64_field(name, INDEXED | STORED),
-                Kind::F64 => builder.add_f64_field(name, INDEXED | STORED),
-                Kind::Bool => builder.add_bool_field(name, INDEXED | STORED),
-                Kind::Date => {
-                    builder.add_date_field(name, DateOptions::default().set_indexed().set_stored())
-                }
+                Kind::I64 => builder.add_i64_field(name, INDEXED | STORED | FAST),
+                Kind::F64 => builder.add_f64_field(name, INDEXED | STORED | FAST),
+                Kind::Bool => builder.add_bool_field(name, INDEXED | STORED | FAST),
+                Kind::Date => builder.add_date_field(
+                    name,
+                    DateOptions::default().set_indexed().set_stored().set_fast(),
+                ),
             };
             fields.insert(name.clone(), field);
         }
@@ -242,6 +299,37 @@ impl DiskIndex {
             fields,
         })
     }
+}
+
+/// One edit per fraction of the word, rounded up, and never more than 2.
+fn edit_distance(term: &str, ratio: f64) -> u8 {
+    let letters = term.chars().count() as f64;
+    let edits = (letters * ratio).ceil() as u8;
+    edits.min(2)
+}
+
+/// OR of fuzzy terms across every text field. A swapped pair of letters
+/// counts as one edit.
+fn fuzzy_terms(fields: &[Field], query: &str, ratio: f64) -> Box<dyn Query> {
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    for term in query.split(|c: char| !c.is_alphanumeric()) {
+        if term.is_empty() {
+            continue;
+        }
+        let distance = edit_distance(term, ratio);
+        let lower = term.to_lowercase();
+        for field in fields {
+            clauses.push((
+                Occur::Should,
+                Box::new(FuzzyTermQuery::new(
+                    Term::from_field_text(*field, &lower),
+                    distance,
+                    true,
+                )),
+            ));
+        }
+    }
+    Box::new(BooleanQuery::from(clauses))
 }
 
 pub fn discover(docs: &[(String, Document)]) -> BTreeMap<String, Kind> {
