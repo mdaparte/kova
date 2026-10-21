@@ -184,7 +184,7 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   shutdown or a disabled user free the slot. ✅ Complete.
 - **Phase 16 — Views:** a MongoDB view (`viewOn` + pipeline). `kova.inverted`
   adds a Tantivy index on disk with discovered field types. ✅ Complete.
-- **Phase 17 — MapReduce:** replica-set members map `_id` ranges; the primary reduces. ⚪ Planned.
+- **Phase 17 — Map projection:** `mapReduce` returns `{ key, value }` for each match. No `out`, no fan-out. ✅ Complete.
 
 ---
 

@@ -113,6 +113,12 @@ indexes:
 server-status:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/server-status.js
 
+# Department pay rollup over the Scott sample. Requires `make seed`.
+# Prints each department, then the unweighted and weighted company averages.
+# Leaves the department rows in `deptPay`.
+dept-pay:
+	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/dept-pay.js
+
 # Checks well_paid and emp_search. Requires `make seed`. Does not drop them.
 views:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/views.js

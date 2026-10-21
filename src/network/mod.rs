@@ -937,6 +937,10 @@ async fn execute_command(
         return result;
     }
 
+    if command.contains_key("mapReduce") {
+        return map_reduce(command, router).await;
+    }
+
     if let Some(explained) = protocol::explain_reply(command) {
         let mut reply = match explained {
             Ok(reply) => reply,
@@ -1314,6 +1318,90 @@ async fn dispatch_one(
             .await
             .map_err(|_| "partition worker dropped the request".to_string()),
         None => Err("storage partition unavailable".to_string()),
+    }
+}
+
+/// Reads one collection and returns `{ key, value }` for each match.
+///
+/// `map` is a projection. A `$field` string reads that field; any other
+/// value is copied as a literal. `reduce` and `out` are refused: the
+/// reply is the projection, and nothing is written.
+async fn map_reduce(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
+    if command.contains_key("txnId") {
+        return bson::doc! { "ok": 0.0, "errmsg": "mapReduce cannot run inside a transaction" };
+    }
+    if command.get("map").is_some_and(|value| value.as_str().is_some()) {
+        return bson::doc! { "ok": 0.0, "errmsg": "mapReduce refused JavaScript map" };
+    }
+    if command.contains_key("reduce") {
+        return bson::doc! { "ok": 0.0, "errmsg": "mapReduce refused reduce" };
+    }
+    if command.contains_key("out") {
+        return bson::doc! { "ok": 0.0, "errmsg": "mapReduce refused out" };
+    }
+    let Ok(collection) = command.get_str("mapReduce") else {
+        return bson::doc! { "ok": 0.0, "errmsg": "mapReduce requires a collection name" };
+    };
+    if collection.is_empty() {
+        return bson::doc! { "ok": 0.0, "errmsg": "mapReduce requires a collection name" };
+    }
+    let Ok(map) = command.get_document("map") else {
+        return bson::doc! { "ok": 0.0, "errmsg": "map must be a document" };
+    };
+    if !map.contains_key("key") || !map.contains_key("value") {
+        return bson::doc! { "ok": 0.0, "errmsg": "map requires 'key' and 'value'" };
+    }
+    let query = match command.get("query") {
+        None => bson::Document::new(),
+        Some(bson::Bson::Document(query)) => query.clone(),
+        Some(_) => return bson::doc! { "ok": 0.0, "errmsg": "query must be a document" },
+    };
+    let db = command.get_str("$db").unwrap_or("");
+    let namespace = if db.is_empty() {
+        collection.to_string()
+    } else {
+        format!("{db}.{collection}")
+    };
+    let documents = match load_collection_documents(router, &namespace, &query).await {
+        Ok(documents) => documents,
+        Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+    };
+    let pairs = documents
+        .iter()
+        .map(|document| {
+            bson::doc! {
+                "key": project_operand(document, map.get("key").expect("key")),
+                "value": project_operand(document, map.get("value").expect("value")),
+            }
+        })
+        .collect();
+    cursor_batch(&namespace, pairs)
+}
+
+fn project_operand(document: &bson::Document, operand: &bson::Bson) -> bson::Bson {
+    let bson::Bson::String(path) = operand else {
+        return operand.clone();
+    };
+    let Some(field) = path.strip_prefix('$') else {
+        return operand.clone();
+    };
+    if field.is_empty() || field.starts_with('$') {
+        return operand.clone();
+    }
+    lookup_path(document, field)
+        .cloned()
+        .unwrap_or(bson::Bson::Null)
+}
+
+fn lookup_path<'a>(document: &'a bson::Document, path: &str) -> Option<&'a bson::Bson> {
+    let (head, tail) = match path.split_once('.') {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (path, None),
+    };
+    let value = document.get(head)?;
+    match tail {
+        None => Some(value),
+        Some(rest) => lookup_path(value.as_document()?, rest),
     }
 }
 
@@ -2448,6 +2536,127 @@ mod tests {
             "disabling the user should close the socket, got {closed:?}"
         );
         wait_until(|| table.len() == 0).await;
+    }
+
+    #[tokio::test]
+    async fn map_reduce_returns_the_projection_and_writes_no_collection() {
+        // Fails if the command drops a match, keeps a non-match, or creates a collection.
+        let router = PartitionRouter::new(1);
+        let local = "127.0.0.1:1".parse().unwrap();
+        let inserted = execute_command(
+            &bson::doc! {
+                "insert": "emp",
+                "$db": "db",
+                "documents": [
+                    { "_id": "1", "job": "CLERK", "sal": 800i32 },
+                    { "_id": "2", "job": "CLERK", "sal": 1100i32 },
+                    { "_id": "3", "job": "PRESIDENT", "sal": 5000i32 },
+                ],
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(inserted.get_f64("ok"), Ok(1.0), "{inserted}");
+
+        let reply = execute_command(
+            &bson::doc! {
+                "mapReduce": "emp",
+                "$db": "db",
+                "query": { "sal": { "$gt": 1000i32 } },
+                "map": { "key": "$job", "value": "$sal" },
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(reply.get_f64("ok"), Ok(1.0), "{reply}");
+        let batch = reply
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("batch");
+        let pairs: Vec<(String, i32)> = batch
+            .iter()
+            .map(|row| {
+                let doc = row.as_document().expect("pair");
+                let key = doc.get_str("key").expect("key").to_string();
+                let value = doc.get_i32("value").expect("value");
+                (key, value)
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![("CLERK".to_string(), 1100), ("PRESIDENT".to_string(), 5000)]
+        );
+
+        let listed = execute_command(
+            &bson::doc! { "listCollections": 1i32, "$db": "db" },
+            &router,
+            local,
+        )
+        .await;
+        let names: Vec<String> = listed
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("batch")
+            .iter()
+            .filter_map(|row| row.as_document()?.get_str("name").ok().map(str::to_string))
+            .collect();
+        assert_eq!(names, vec!["emp".to_string()], "{listed}");
+    }
+
+    #[tokio::test]
+    async fn map_reduce_names_what_it_refuses() {
+        let router = PartitionRouter::new(1);
+        let local = "127.0.0.1:1".parse().unwrap();
+        let cases = [
+            (
+                bson::doc! {
+                    "mapReduce": "emp",
+                    "$db": "db",
+                    "map": "function() { emit(this.job, this.sal); }",
+                },
+                "JavaScript",
+            ),
+            (
+                bson::doc! {
+                    "mapReduce": "emp",
+                    "$db": "db",
+                    "map": { "key": "$job", "value": "$sal" },
+                    "reduce": { "_id": "$key", "n": { "$sum": 1i32 } },
+                },
+                "reduce",
+            ),
+            (
+                bson::doc! {
+                    "mapReduce": "emp",
+                    "$db": "db",
+                    "map": { "key": "$job", "value": "$sal" },
+                    "out": "totals",
+                },
+                "out",
+            ),
+            (
+                bson::doc! {
+                    "mapReduce": "emp",
+                    "$db": "db",
+                    "map": { "key": "$job", "value": "$sal" },
+                    "txnId": 1i32,
+                },
+                "transaction",
+            ),
+        ];
+        for (command, named) in cases {
+            let reply = execute_command(&command, &router, local).await;
+            assert_eq!(reply.get_f64("ok"), Ok(0.0), "{reply}");
+            let message = reply.get_str("errmsg").unwrap_or("");
+            assert!(
+                message.contains(named),
+                "refusal should name {named}: {message}"
+            );
+        }
     }
 
     async fn spawn_listener(table: Arc<ConnTable>) -> std::net::SocketAddr {

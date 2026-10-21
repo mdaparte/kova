@@ -30,7 +30,7 @@ replication, and multi-model indexing.
 | 14 | Monitoring (17 atomic counters, `serverStatus`) | ✅ Complete |
 | 15 | Connection Pool (cap, tracking, lifecycle) | ✅ Complete |
 | 16 | Views (`viewOn` + pipeline, optional disk Tantivy) | ✅ Complete |
-| 17 | MapReduce across the replica set | ⚪ Planned |
+| 17 | Map projection (`mapReduce`, no `out`) | ✅ Complete |
 | 18 | Transactions in the oplog | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
@@ -679,24 +679,23 @@ db.runCommand({
 - [x] When `kova.inverted` is true, keep a Tantivy index on disk and discover field types.
 - [x] Test: a `$match` view, a rejected `$group` inverted view, discovered types, and a `$text` hit after restart.
 
-## Phase 17 — MapReduce across the replica set ⚪ Planned
+## Phase 17 — Map projection (`mapReduce`) ✅
 
-A replica set is the cluster for this command. Members are full copies, not shards. The primary splits the input so each voter maps a different `_id` range. Any voter can map any range, because each one stores every document. An arbiter stores nothing and is not asked.
+`mapReduce` reads one collection and returns one `{ key, value }` document per match. It does not write a collection. It does not fan out across the replica set: every voter already stores every document, so splitting the scan would add network cost without reducing the work. The read stays on the node that received it, the same way `find` does.
 
-- `mapReduce` takes a collection, a query, a map projection that emits `{ key, value }`, a reduce document of `$group` accumulators, and an `out` collection.
-- A JavaScript `map` or `reduce` string is rejected. The command names what it refused.
-- The primary assigns one `_id` range per voting member that is currently caught up. A member that does not answer in time loses its range to another voter.
-- Each member maps its range locally, through the buffer pool, and returns the pairs. The primary reduces them and writes `out` through the WAL, like `$out`.
-- With no `[replication]` section the same command runs on the single node, in one range.
-- This does not change ownership of documents. Sharding stays out of scope. A `mapReduce` inside a transaction is rejected.
+- `mapReduce` names the collection. `query` is the find filter. Absent means every document.
+- `map` is a document with `key` and `value`. A string that starts with `$` reads that field, including a dotted path. Any other value is a literal. A missing field is null.
+- The reply is a cursor (`firstBatch`), the same shape as `find`.
+- A JavaScript `map` string is rejected. The error names it.
+- `reduce` and `out` are rejected. The error names the field. Nothing is written.
+- A command carrying `txnId` is rejected.
 
 ### Phase 17 — Sub-tasks
 
-- [ ] Parse `mapReduce` into a map projection, a reduce accumulator document, a query, and `out`.
-- [ ] Split the key space across caught-up voters. Skip arbiters.
-- [ ] Reduce on the primary and write `out` through the WAL.
-- [ ] Reassign a range when a member does not answer.
-- [ ] Test: three voters, one arbiter, a map that emits a key per document, and an `out` collection that matches a local `$group`.
+- [x] Parse `mapReduce` into a collection, a query, and a map projection.
+- [x] Return one `{ key, value }` per matching document. Write no collection.
+- [x] Reject a JavaScript `map`, `reduce`, `out`, and `txnId`, naming what was refused.
+- [x] Test: a query keeps the matches, the pairs are the projection, and `listCollections` still shows only the source.
 
 ## Phase 18 — Transactions in the oplog ⚪ Planned
 
@@ -743,7 +742,6 @@ A commit's writes live in the primary's worker. `beginTransaction`, `commitTrans
 | Gap | Phase | Notes |
 |-----|-------|-------|
 | Transactions are not in the oplog | 18 | `begin` / `commit` / `abort` and any command with `txnId` stay on the primary. A commit is not an oplog entry. |
-| `mapReduce` does not fan out | 17 | Voters map `_id` ranges. The primary reduces. |
 
 ## Architecture Diagram (updated)
 
@@ -801,5 +799,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–16 are complete. Still open: mapReduce across the replica set
-(Phase 17) and transactions in the oplog (Phase 18).*
+*Phases 1–17 are complete. Still open: transactions in the oplog
+(Phase 18).*

@@ -296,7 +296,7 @@ about and ignored.
 | 14 | Monitoring: 17 atomic counters, `serverStatus` |
 | 15 | Connection pool: cap, tracking, idle close |
 | 16 | Lucene-like views and facet queries |
-| 17 | MapReduce across replica-set members |
+| 17 | Map projection: `mapReduce` returns `{ key, value }`. No `out` collection |
 
 ---
 
