@@ -28,9 +28,10 @@ replication, and multi-model indexing.
 | 12 | On-Disk Page Compression (zstd, WiredTiger-style) | ✅ Complete |
 | 13 | Security (RBAC, Argon2id, AES-256-GCM, users) | ✅ Complete |
 | 14 | Monitoring (17 atomic counters, `serverStatus`) | ✅ Complete |
-| 15 | Connection Pool (cap, tracking, lifecycle) | ⚪ Planned |
+| 15 | Connection Pool (cap, tracking, lifecycle) | ✅ Complete |
 | 16 | Views (`viewOn` + pipeline, optional disk Tantivy) | ✅ Complete |
 | 17 | MapReduce across the replica set | ⚪ Planned |
+| 18 | Transactions in the oplog | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -492,7 +493,7 @@ Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. 
 - A committed auto-commit command is applied on the leader and on every follower through the partition workers. The network task proposes the command; the worker does not propose it again.
 - `find` on `local.oplog.rs` returns entries after `ts` (`$gt` / `$gte`). `ts` is the log index.
 - Inserts without `_id` receive one before the command is logged, so every replica stores the same id.
-- Transactions (`beginTransaction`, `commitTransaction`, `abortTransaction`, and any command carrying `txnId`) stay on the primary. A commit's writes live in that worker and are not an oplog entry.
+- Transactions (`beginTransaction`, `commitTransaction`, `abortTransaction`, and any command carrying `txnId`) stay on the primary. A commit's writes live in that worker and are not an oplog entry. Phase 18 logs the commit.
 - Snapshot shipping is off (`SnapshotPolicy::Never`). A follower that falls outside the retained log cannot catch up from a document snapshot.
 
 ### 11.2 Replica Sets
@@ -512,7 +513,7 @@ Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. 
 - [x] Heartbeats are Raft AppendEntries. A missed election timeout starts a campaign.
 - [x] Auto-commit writes are proposed from the network task and applied through the partition workers.
 - [x] Tests: three voters replicate a write and elect a new leader; an arbiter keeps the oplog and stores no documents.
-- Transactions are not in the oplog.
+- Transactions in the oplog are Phase 18. Until then, `begin` / `commit` / `abort` and any command with `txnId` stay on the primary.
 - Sharding remains a later extension.
 
 ## Phase 12 — On-Disk Page Compression ✅
@@ -634,7 +635,7 @@ Counters are atomics. A network task and a partition worker bump them without ta
 - [x] `serverStatus` returns the seventeen values and the uptime.
 - [x] A test drives one insert, one indexed find, and one scan, then reads the counters back through `serverStatus`.
 
-## Phase 15 — Connection Pool ⚪ Planned
+## Phase 15 — Connection Pool ✅
 
 The listener caps how many clients can be connected. This is the server side of that cap, not a pool inside a driver.
 
@@ -646,10 +647,10 @@ The listener caps how many clients can be connected. This is the server side of 
 
 ### Phase 15 — Sub-tasks
 
-- [ ] Enforce `max_connections` in the accept loop.
-- [ ] Track peer, start, idle deadline, and user on each live connection.
-- [ ] Close idle connections and connections of a disabled user.
-- [ ] Test: the connection past the cap is refused, and a closed connection frees a slot.
+- [x] Enforce `max_connections` in the accept loop.
+- [x] Track peer, start, idle deadline, and user on each live connection.
+- [x] Close idle connections and connections of a disabled user.
+- [x] Test: the connection past the cap is refused, and a closed connection frees a slot.
 
 ## Phase 16 — Views and optional disk inverted index ✅
 
@@ -697,6 +698,26 @@ A replica set is the cluster for this command. Members are full copies, not shar
 - [ ] Reassign a range when a member does not answer.
 - [ ] Test: three voters, one arbiter, a map that emits a key per document, and an `out` collection that matches a local `$group`.
 
+## Phase 18 — Transactions in the oplog ⚪ Planned
+
+A commit's writes live in the primary's worker. `beginTransaction`, `commitTransaction`, `abortTransaction`, and any command carrying `txnId` are refused as oplog entries, so a secondary never applies them. This phase logs the commit, not the open transaction.
+
+- `beginTransaction` and each statement that only stages writes stay on the primary. They are not oplog entries.
+- `commitTransaction` proposes one oplog entry that carries the writes that transaction made. Followers apply that entry through the partition workers, the same path as an auto-commit command. They do not open a transaction.
+- `abortTransaction` writes nothing to the oplog. Uncommitted images never reach a follower.
+- The entry is one Raft record, matching the one WAL record a commit already is, so a crash publishes every write in the transaction or none of them.
+- A transaction still names one collection, and that collection's partition owns it. A collection on another partition stays outside the transaction.
+- An arbiter stores the entry and applies no documents.
+- `$out` inside a transaction stays rejected. `mapReduce` inside a transaction stays rejected (Phase 17).
+- With no `[replication]` section the commit stays the local WAL record it is today.
+
+### Phase 18 — Sub-tasks
+
+- [ ] Propose the committed writes as one oplog entry from `commitTransaction`.
+- [ ] Apply that entry on every follower without opening a transaction.
+- [ ] Leave `beginTransaction`, staged statements, and `abortTransaction` off the oplog.
+- [ ] Test: three voters commit a transaction on the primary, and a secondary `find` returns those documents. An abort leaves the secondary unchanged.
+
 ## Architecture Principles
 
 1. **Hybrid memory+disk**: documents live in pages. RAM holds the buffer
@@ -721,8 +742,7 @@ A replica set is the cluster for this command. Members are full copies, not shar
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| Transactions are not in the oplog | 11 | `begin` / `commit` / `abort` and any command with `txnId` stay on the primary. |
-| The listener does not cap connections | 15 | `max_connections` and idle close. |
+| Transactions are not in the oplog | 18 | `begin` / `commit` / `abort` and any command with `txnId` stay on the primary. A commit is not an oplog entry. |
 | `mapReduce` does not fan out | 17 | Voters map `_id` ranges. The primary reduces. |
 
 ## Architecture Diagram (updated)
@@ -781,5 +801,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–14 and 16 are complete. Still open: the connection cap
-(Phase 15) and mapReduce across the replica set (Phase 17).*
+*Phases 1–16 are complete. Still open: mapReduce across the replica set
+(Phase 17) and transactions in the oplog (Phase 18).*

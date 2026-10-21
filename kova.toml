@@ -9,6 +9,17 @@
 # Env: KOVA_PORT
 port = 27018
 
+# Simultaneous clients. Past this the listener accepts the socket,
+# replies with an error, and closes it. That socket is not counted
+# in connectionsActive.
+# Env: KOVA_MAX_CONNECTIONS
+max_connections = 128
+
+# Close a connection that has not sent a command in this many
+# milliseconds. 0 disables the idle close.
+# Env: KOVA_MAX_CONNECTION_IDLE_MS
+max_connection_idle_ms = 0
+
 # Minimum log level: "debug" | "info" | "warn" | "error".
 # Env: KOVA_LOG_LEVEL
 log_level = "info"

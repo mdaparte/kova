@@ -5,7 +5,8 @@
 //! 1. **Environment variables** (highest) — `KOVA_PORT`, `KOVA_LOG_LEVEL`,
 //!    `KOVA_WARN_NON_MONGO_QUERIES`, `KOVA_DATA_DIR`, `KOVA_PAGE_SIZE`,
 //!    `KOVA_BUFFER_POOL_PAGES`, `KOVA_WAL_FSYNC`,
-//!    `KOVA_SECURITY_ENABLED`, `KOVA_ENCRYPTION_KEY`.
+//!    `KOVA_SECURITY_ENABLED`, `KOVA_ENCRYPTION_KEY`,
+//!    `KOVA_MAX_CONNECTIONS`, `KOVA_MAX_CONNECTION_IDLE_MS`.
 //! 2. **Configuration file** — `kova.toml` in the working directory, or
 //!    the path given by `KOVA_CONFIG`.
 //! 3. **Built-in defaults** (lowest).
@@ -42,9 +43,23 @@ const POOL_PAGES_ENV: &str = "KOVA_BUFFER_POOL_PAGES";
 const WAL_FSYNC_ENV: &str = "KOVA_WAL_FSYNC";
 const SECURITY_ENABLED_ENV: &str = "KOVA_SECURITY_ENABLED";
 const ENCRYPTION_KEY_ENV: &str = "KOVA_ENCRYPTION_KEY";
+const MAX_CONNECTIONS_ENV: &str = "KOVA_MAX_CONNECTIONS";
+const MAX_CONNECTION_IDLE_ENV: &str = "KOVA_MAX_CONNECTION_IDLE_MS";
 
-/// Default TCP port (the standard MongoDB port).
+fn default_max_connections() -> usize {
+    DEFAULT_MAX_CONNECTIONS
+}
+
+fn default_idle_ms() -> u64 {
+    0
+}
+
+/// Default TCP port. 27018 leaves 27017 free for a local mongod.
 const DEFAULT_PORT: u16 = 27018;
+
+/// Simultaneous clients the listener will keep. One more is accepted,
+/// answered with an error, and closed.
+const DEFAULT_MAX_CONNECTIONS: usize = 128;
 
 /// The global configuration, resolved on first access.
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
@@ -66,6 +81,14 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
 pub struct Config {
     /// TCP port for the MongoDB wire protocol listener.
     pub port: u16,
+    /// Simultaneous clients. Past this the listener accepts the socket,
+    /// replies with an error, and closes it without counting it.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    /// Milliseconds without a command before the connection is closed.
+    /// `0` leaves it open until the client or the server closes it.
+    #[serde(default = "default_idle_ms")]
+    pub max_connection_idle_ms: u64,
     /// Minimum log level: `"debug"`, `"info"`, `"warn"` or `"error"`.
     ///
     /// Kept as a string here so unknown values produce a friendly
@@ -105,6 +128,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             port: DEFAULT_PORT,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_connection_idle_ms: 0,
             log_level: Level::Info.as_str().to_ascii_lowercase(),
             warn_on_non_mongo_queries: true,
             search: SearchConfig::default(),
@@ -390,6 +415,12 @@ impl Config {
         if let Some(port) = env_override::<u16>(PORT_ENV, |raw| raw.trim().parse().ok()) {
             self.port = port;
         }
+        if let Some(max) = env_override(MAX_CONNECTIONS_ENV, |raw| raw.trim().parse().ok()) {
+            self.max_connections = max;
+        }
+        if let Some(idle) = env_override(MAX_CONNECTION_IDLE_ENV, |raw| raw.trim().parse().ok()) {
+            self.max_connection_idle_ms = idle;
+        }
         if let Some(level) = env_override(LOG_LEVEL_ENV, Level::parse) {
             self.log_level = level.as_str().to_ascii_lowercase();
         }
@@ -456,6 +487,12 @@ impl Config {
     fn validate(&self) -> Result<(), String> {
         if self.port == 0 {
             return Err(format!("{}: port must be non-zero", CONFIG_FILE));
+        }
+        if self.max_connections == 0 {
+            return Err(format!(
+                "{}: max_connections must be at least 1",
+                CONFIG_FILE
+            ));
         }
         if Level::parse(&self.log_level).is_none() {
             return Err(format!(
@@ -539,12 +576,32 @@ mod tests {
     fn test_builtin_defaults() {
         let config = Config::default();
         assert_eq!(config.port, 27018);
+        assert_eq!(config.max_connections, 128);
+        assert_eq!(config.max_connection_idle_ms, 0);
         assert_eq!(config.log_level(), Level::Info);
         assert!(config.warn_on_non_mongo_queries);
         assert_eq!(config.search, SearchConfig::default());
         assert_eq!(config.storage, StorageConfig::default());
         assert!(config.storage.wal_fsync);
         assert!(config.storage.checkpoint_on_shutdown);
+    }
+
+    #[test]
+    fn test_connection_cap_comes_from_the_file() {
+        let config = Config::from_toml(
+            r#"
+            max_connections = 4
+            max_connection_idle_ms = 1000
+            "#,
+        )
+        .expect("valid toml");
+        config.validate().expect("cap is usable");
+        assert_eq!(config.max_connections, 4);
+        assert_eq!(config.max_connection_idle_ms, 1000);
+
+        let closed = Config::from_toml("max_connections = 0").expect("parse ok");
+        let err = closed.validate().expect_err("zero cap");
+        assert!(err.contains("max_connections"), "{err}");
     }
 
     #[test]
@@ -600,6 +657,8 @@ mod tests {
     fn test_from_toml_partial_file_keeps_other_defaults() {
         let config = Config::from_toml("port = 30000").expect("valid toml");
         assert_eq!(config.port, 30000);
+        assert_eq!(config.max_connections, 128);
+        assert_eq!(config.max_connection_idle_ms, 0);
         assert_eq!(config.log_level(), Level::Info);
         assert_eq!(config.search.analyzer, "default");
     }

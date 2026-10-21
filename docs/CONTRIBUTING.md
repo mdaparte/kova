@@ -180,7 +180,8 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 13 — Security:** five built-in roles, custom roles over eleven
   actions, Argon2id passwords, AES-256-GCM at rest, user management. ✅ Complete.
 - **Phase 14 — Monitoring:** seventeen atomic counters and `serverStatus`. ✅ Complete.
-- **Phase 15 — Connection pool:** `max_connections`, tracking, idle close. ⚪ Planned.
+- **Phase 15 — Connection pool:** `max_connections`, idle close, and
+  shutdown or a disabled user free the slot. ✅ Complete.
 - **Phase 16 — Views:** a MongoDB view (`viewOn` + pipeline). `kova.inverted`
   adds a Tantivy index on disk with discovered field types. ✅ Complete.
 - **Phase 17 — MapReduce:** replica-set members map `_id` ranges; the primary reduces. ⚪ Planned.

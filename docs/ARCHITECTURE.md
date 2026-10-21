@@ -105,6 +105,11 @@ Rust concurrency, memory management, and storage engine design.
 
 - TCP listener on port 27018 (configurable via `KOVA_PORT`).
 - Accepts connections and spawns a `tokio::spawn` task per client.
+  `max_connections` (default 128) caps how many stay open. The socket
+  past the cap is answered with an error and closed, and it is not
+  counted. `max_connection_idle_ms` of `0` leaves a quiet connection
+  open; any other value closes it. Shutdown and a disabled user close
+  the matching connections and free the slots.
 - Reads 16-byte Wire Protocol header (little-endian): `messageLength`,
   `requestId`, `responseTo`, `opCode`.
 - Handles `OP_MSG (2013)` and legacy `OP_QUERY (2004)`; `OP_QUERY` is
@@ -256,6 +261,8 @@ about and ignored.
 | Key | Env override | Default | Meaning |
 |---|---|---|---|
 | `port` | `KOVA_PORT` | `27018` | TCP listener port |
+| `max_connections` | `KOVA_MAX_CONNECTIONS` | `128` | Simultaneous clients. One more is refused |
+| `max_connection_idle_ms` | `KOVA_MAX_CONNECTION_IDLE_MS` | `0` | Idle close. `0` disables it |
 | `log_level` | `KOVA_LOG_LEVEL` | `info` | Minimum emitted level |
 | `warn_on_non_mongo_queries` | `KOVA_WARN_NON_MONGO_QUERIES` | `true` | WARN on non-Mongo operators |
 | `search.analyzer` | — | `default` | `default` \| `en_stem` |

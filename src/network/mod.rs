@@ -106,36 +106,119 @@ fn resolve_port() -> u16 {
 static REPLY_REQUEST_ID: AtomicI32 = AtomicI32::new(1);
 
 struct LiveConn {
+    peer: std::net::SocketAddr,
+    started: std::time::Instant,
+    /// `None` when idle close is disabled.
+    idle_deadline: Mutex<Option<std::time::Instant>>,
     user: Mutex<Option<String>>,
     close: watch::Sender<bool>,
 }
 
 struct ConnTable {
     next: AtomicU64,
+    max_connections: usize,
+    /// `None` disables the idle close (`max_connection_idle_ms = 0`).
+    idle: Option<std::time::Duration>,
     slots: Mutex<HashMap<u64, LiveConn>>,
+    stop: watch::Sender<bool>,
 }
 
-fn connections() -> &'static ConnTable {
-    static TABLE: OnceLock<ConnTable> = OnceLock::new();
-    TABLE.get_or_init(|| ConnTable {
-        next: AtomicU64::new(1),
-        slots: Mutex::new(HashMap::new()),
-    })
+fn connections() -> Arc<ConnTable> {
+    static TABLE: OnceLock<Arc<ConnTable>> = OnceLock::new();
+    TABLE
+        .get_or_init(|| Arc::new(ConnTable::from_config()))
+        .clone()
 }
 
 impl ConnTable {
-    fn open(&self) -> (u64, watch::Receiver<bool>) {
+    fn from_config() -> Self {
+        let config = &crate::config::CONFIG;
+        Self::new(config.max_connections, config.max_connection_idle_ms)
+    }
+
+    /// A table with its own cap. `idle_ms` of 0 disables idle close.
+    fn limited(max_connections: usize, idle_ms: u64) -> Arc<Self> {
+        Arc::new(Self::new(max_connections, idle_ms))
+    }
+
+    fn new(max_connections: usize, idle_ms: u64) -> Self {
+        let (stop, _) = watch::channel(false);
+        Self {
+            next: AtomicU64::new(1),
+            max_connections,
+            idle: (idle_ms > 0).then(|| std::time::Duration::from_millis(idle_ms)),
+            slots: Mutex::new(HashMap::new()),
+            stop,
+        }
+    }
+
+    fn subscribe_stop(&self) -> watch::Receiver<bool> {
+        self.stop.subscribe()
+    }
+
+    /// Reserves a slot. `None` means the cap is already full; the caller
+    /// answers with an error and does not count the socket.
+    fn try_open(&self, peer: std::net::SocketAddr) -> Option<(u64, watch::Receiver<bool>)> {
+        let mut slots = self.slots.lock().expect("connections");
+        if slots.len() >= self.max_connections {
+            return None;
+        }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (close, watch_rx) = watch::channel(false);
-        self.slots.lock().expect("connections").insert(
+        let now = std::time::Instant::now();
+        slots.insert(
             id,
             LiveConn {
+                peer,
+                started: now,
+                idle_deadline: Mutex::new(self.idle.map(|idle| now + idle)),
                 user: Mutex::new(None),
                 close,
             },
         );
+        drop(slots);
         crate::metrics::METRICS.connection_opened();
-        (id, watch_rx)
+        Some((id, watch_rx))
+    }
+
+    fn note_command(&self, id: u64) {
+        let Some(idle) = self.idle else {
+            return;
+        };
+        let slots = self.slots.lock().expect("connections");
+        if let Some(slot) = slots.get(&id) {
+            *slot.idle_deadline.lock().expect("idle") = Some(std::time::Instant::now() + idle);
+        }
+    }
+
+    /// Time left until this connection should close for silence.
+    /// `None` means idle close is off, or the connection is already gone.
+    fn idle_remaining(&self, id: u64) -> Option<std::time::Duration> {
+        self.idle?;
+        let slots = self.slots.lock().expect("connections");
+        let slot = slots.get(&id)?;
+        let deadline = (*slot.idle_deadline.lock().expect("idle"))?;
+        Some(deadline.saturating_duration_since(std::time::Instant::now()))
+    }
+
+    fn len(&self) -> usize {
+        self.slots.lock().expect("connections").len()
+    }
+
+    fn only_peer(&self) -> Option<std::net::SocketAddr> {
+        let slots = self.slots.lock().expect("connections");
+        if slots.len() != 1 {
+            return None;
+        }
+        slots.values().next().map(|slot| slot.peer)
+    }
+
+    fn only_id(&self) -> Option<u64> {
+        let slots = self.slots.lock().expect("connections");
+        if slots.len() != 1 {
+            return None;
+        }
+        slots.keys().next().copied()
     }
 
     fn set_user(&self, id: u64, user: String) {
@@ -154,14 +237,93 @@ impl ConnTable {
     }
 
     fn close(&self, id: u64) {
-        if self
-            .slots
-            .lock()
-            .expect("connections")
-            .remove(&id)
-            .is_some()
-        {
+        let removed = self.slots.lock().expect("connections").remove(&id);
+        if let Some(slot) = removed {
+            LOGGER.debug(format!(
+                "Connection {} from {} closed after {} ms",
+                id,
+                slot.peer,
+                slot.started.elapsed().as_millis()
+            ));
             crate::metrics::METRICS.connection_closed();
+        }
+    }
+
+    /// Closes every live connection and stops the accept loop.
+    fn shutdown(&self) {
+        let _ = self.stop.send(true);
+        self.close_all();
+    }
+
+    fn close_all(&self) {
+        for slot in self.slots.lock().expect("connections").values() {
+            let _ = slot.close.send(true);
+        }
+    }
+}
+
+async fn wait_idle(table: &ConnTable, id: u64) {
+    match table.idle_remaining(id) {
+        Some(duration) => tokio::time::sleep(duration).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn refuse_connection(socket: &mut TcpStream) -> std::io::Result<()> {
+    let body = bson::doc! {
+        "ok": 0.0,
+        "errmsg": "too many connections",
+    };
+    let frame = protocol::encode_reply(0, 0, &body)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    socket.write_all(&frame).await?;
+    socket.shutdown().await?;
+    Ok(())
+}
+
+async fn run_listener(
+    listener: TcpListener,
+    router: PartitionRouter,
+    replica: Option<Arc<crate::replication::Replica>>,
+    table: Arc<ConnTable>,
+) -> std::io::Result<()> {
+    let mut stop = table.subscribe_stop();
+    loop {
+        if *stop.borrow() {
+            table.close_all();
+            return Ok(());
+        }
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    table.close_all();
+                    return Ok(());
+                }
+            }
+            accepted = listener.accept() => {
+                let (mut socket, addr) = accepted?;
+                LOGGER.info(format!("Connection received from {}", addr));
+                let client_router = router.clone();
+                let client_replica = replica.clone();
+                let table = Arc::clone(&table);
+                spawn(async move {
+                    if let Err(err) = serve_client(
+                        &mut socket,
+                        &client_router,
+                        client_replica.as_deref(),
+                        &table,
+                    )
+                    .await
+                    {
+                        match err.kind() {
+                            std::io::ErrorKind::UnexpectedEof => {
+                                LOGGER.info(format!("Client {} disconnected", addr));
+                            }
+                            _ => LOGGER.error(format!("Error processing client {}: {}", addr, err)),
+                        }
+                    }
+                });
+            }
         }
     }
 }
@@ -188,29 +350,21 @@ pub async fn start_server(
 ) -> std::io::Result<()> {
     let port = resolve_port();
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
-    LOGGER.info(format!("Network server started on port {}", port));
-
-    loop {
-        let (mut socket, addr) = listener.accept().await?;
-        LOGGER.info(format!("Connection received from {}", addr));
-
-        // Each client gets its own task; `Arc` lets every task share
-        // the same router without cloning worker channels individually.
-        let client_router = router.clone();
-        let client_replica = replica.clone();
-        spawn(async move {
-            if let Err(err) =
-                handle_client(&mut socket, &client_router, client_replica.as_deref()).await
-            {
-                match err.kind() {
-                    std::io::ErrorKind::UnexpectedEof => {
-                        LOGGER.info(format!("Client {} disconnected", addr));
-                    }
-                    _ => LOGGER.error(format!("Error processing client {}: {}", addr, err)),
-                }
-            }
-        });
-    }
+    let table = connections();
+    LOGGER.info(format!(
+        "Network server started on port {} (max_connections {}, idle_ms {})",
+        port,
+        table.max_connections,
+        table.idle.map(|idle| idle.as_millis()).unwrap_or(0),
+    ));
+    let shutdown = Arc::clone(&table);
+    spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            LOGGER.info("Shutdown requested; closing connections".to_string());
+            shutdown.shutdown();
+        }
+    });
+    run_listener(listener, router, replica, table).await
 }
 
 /// Reads OP_MSG frames from one client until it disconnects.
@@ -223,10 +377,34 @@ async fn handle_client(
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
 ) -> std::io::Result<()> {
-    let (conn_id, mut close) = connections().open();
+    serve_client(socket, router, replica, connections().as_ref()).await
+}
+
+async fn serve_client(
+    socket: &mut TcpStream,
+    router: &PartitionRouter,
+    replica: Option<&crate::replication::Replica>,
+    table: &ConnTable,
+) -> std::io::Result<()> {
+    let peer = socket
+        .peer_addr()
+        .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
+    let Some((conn_id, mut close)) = table.try_open(peer) else {
+        LOGGER.warn(format!("Refusing {}: too many connections", peer));
+        return refuse_connection(socket).await;
+    };
     let mut session = None;
-    let outcome = handle_frames(socket, router, replica, conn_id, &mut close, &mut session).await;
-    connections().close(conn_id);
+    let outcome = handle_frames(
+        socket,
+        router,
+        replica,
+        table,
+        conn_id,
+        &mut close,
+        &mut session,
+    )
+    .await;
+    table.close(conn_id);
     outcome
 }
 
@@ -234,6 +412,7 @@ async fn handle_frames(
     socket: &mut TcpStream,
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
+    table: &ConnTable,
     conn_id: u64,
     close: &mut watch::Receiver<bool>,
     session: &mut Option<Session>,
@@ -250,6 +429,7 @@ async fn handle_frames(
 
         let read = tokio::select! {
             _ = close.changed() => None,
+            _ = wait_idle(table, conn_id) => None,
             result = socket.read_exact(&mut header_buf) => Some(result),
         };
         let Some(result) = read else {
@@ -292,6 +472,8 @@ async fn handle_frames(
             ));
         }
 
+        table.note_command(conn_id);
+
         // ---- body --------------------------------------------------
         let body_len = header.message_length.saturating_sub(HEADER_SIZE as u32) as usize;
 
@@ -308,7 +490,7 @@ async fn handle_frames(
                 ));
 
                 if let Err(err) = process_op_msg(
-                    &header, &body_buf, router, replica, socket, conn_id, session,
+                    &header, &body_buf, router, replica, table, socket, conn_id, session,
                 )
                 .await
                 {
@@ -336,7 +518,7 @@ async fn handle_frames(
                 ));
 
                 if let Err(err) = process_op_query(
-                    &header, &body_buf, router, replica, socket, conn_id, session,
+                    &header, &body_buf, router, replica, table, socket, conn_id, session,
                 )
                 .await
                 {
@@ -358,6 +540,7 @@ async fn process_op_msg(
     body: &[u8],
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
+    table: &ConnTable,
     socket: &mut TcpStream,
     conn_id: u64,
     session: &mut Option<Session>,
@@ -366,8 +549,16 @@ async fn process_op_msg(
     let local_addr = socket
         .local_addr()
         .map_err(|err| format!("failed to read local address: {}", err))?;
-    let reply_body =
-        execute_replicated(&msg.command, router, local_addr, replica, conn_id, session).await;
+    let reply_body = execute_replicated(
+        &msg.command,
+        router,
+        local_addr,
+        replica,
+        table,
+        conn_id,
+        session,
+    )
+    .await;
 
     let request_id = REPLY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let frame = protocol::encode_reply(request_id, header.request_id, &reply_body)?;
@@ -396,6 +587,7 @@ async fn process_op_query(
     body: &[u8],
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
+    table: &ConnTable,
     socket: &mut TcpStream,
     conn_id: u64,
     session: &mut Option<Session>,
@@ -409,6 +601,7 @@ async fn process_op_query(
         router,
         local_addr,
         replica,
+        table,
         conn_id,
         session,
     )
@@ -511,6 +704,7 @@ async fn execute_replicated(
     router: &PartitionRouter,
     local_addr: std::net::SocketAddr,
     replica: Option<&crate::replication::Replica>,
+    table: &ConnTable,
     conn_id: u64,
     session: &mut Option<Session>,
 ) -> bson::Document {
@@ -522,7 +716,7 @@ async fn execute_replicated(
         return bson::doc! { "ok": 0.0, "errmsg": message };
     }
     let mut reply = dispatch_command(&command, router, local_addr, replica).await;
-    bind_session(&command, &mut reply, conn_id, session);
+    bind_session(&command, &mut reply, table, conn_id, session);
     reply
 }
 
@@ -581,6 +775,7 @@ fn authorize(command: &mut bson::Document, session: &Option<Session>) -> Result<
 fn bind_session(
     command: &bson::Document,
     reply: &mut bson::Document,
+    table: &ConnTable,
     conn_id: u64,
     session: &mut Option<Session>,
 ) {
@@ -591,13 +786,13 @@ fn bind_session(
                 .iter()
                 .filter_map(|value| value.as_str().map(str::to_string))
                 .collect();
-            connections().set_user(conn_id, user.clone());
+            table.set_user(conn_id, user.clone());
             *session = Some(Session { user, actions });
         }
     }
     if let Ok(user) = reply.get_str("kovaDisabledUser").map(str::to_string) {
         reply.remove("kovaDisabledUser");
-        connections().close_user(&user);
+        table.close_user(&user);
     }
 }
 
@@ -2075,5 +2270,195 @@ mod tests {
         assert!(read(&status, "indexLookups") >= read(&before, "indexLookups") + 1);
         assert!(read(&status, "collectionScans") >= read(&before, "collectionScans") + 1);
         assert!(read(&status, "walWrites") >= read(&before, "walWrites") + 1);
+    }
+
+    /// Reads one OP_MSG reply that is already on `socket`.
+    async fn read_op_msg(socket: &mut TcpStream) -> bson::Document {
+        let mut header_buf = [0u8; HEADER_SIZE];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.read_exact(&mut header_buf),
+        )
+        .await
+        .expect("reply timed out")
+        .expect("reply header");
+        let header = MessageHeader::parse(&header_buf);
+        assert_eq!(header.op_code, OP_MSG, "reply must be OP_MSG");
+        let body_len = header.message_length as usize - HEADER_SIZE;
+        let mut body = vec![0u8; body_len];
+        socket.read_exact(&mut body).await.expect("reply body");
+        protocol::decode_op_msg(&body).expect("decode reply").command
+    }
+
+    async fn wait_until(mut ready: impl FnMut() -> bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !ready() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting");
+    }
+
+    #[tokio::test]
+    async fn a_connection_past_the_cap_is_refused_and_closing_one_frees_the_slot() {
+        // Fails if the listener admits the extra socket, counts it, or
+        // keeps the slot after the held client disconnects.
+        let table = ConnTable::limited(1, 0);
+        let router = PartitionRouter::new(1);
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server_table = Arc::clone(&table);
+        tokio::spawn(async move {
+            let _ = run_listener(listener, router, None, server_table).await;
+        });
+
+        let mut held = TcpStream::connect(addr).await.expect("held connect");
+        let ping = protocol::encode_reply(1, 0, &bson::doc! { "ping": 1 }).expect("ping");
+        held.write_all(&ping).await.expect("ping write");
+        let admitted = read_op_msg(&mut held).await;
+        assert_eq!(admitted.get_f64("ok"), Ok(1.0), "{admitted}");
+        assert_eq!(table.len(), 1);
+        assert_eq!(
+            table.only_peer(),
+            Some(held.local_addr().expect("held addr"))
+        );
+
+        let mut extra = TcpStream::connect(addr).await.expect("extra connect");
+        let refused = read_op_msg(&mut extra).await;
+        assert_eq!(refused.get_f64("ok"), Ok(0.0), "{refused}");
+        assert!(
+            refused
+                .get_str("errmsg")
+                .unwrap_or("")
+                .contains("too many connections"),
+            "{refused}"
+        );
+        assert_eq!(table.len(), 1, "a refused socket is not an active connection");
+        let mut tail = [0u8; 1];
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            extra.read(&mut tail),
+        )
+        .await
+        .expect("refused socket should close")
+        .expect("read");
+        assert_eq!(closed, 0);
+
+        drop(held);
+        wait_until(|| table.len() == 0).await;
+
+        let mut again = TcpStream::connect(addr).await.expect("again");
+        let ping = protocol::encode_reply(2, 0, &bson::doc! { "ping": 1 }).expect("ping");
+        again.write_all(&ping).await.expect("ping write");
+        let admitted = read_op_msg(&mut again).await;
+        assert_eq!(admitted.get_f64("ok"), Ok(1.0), "{admitted}");
+        assert_eq!(table.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_idle_connection_is_closed_and_frees_its_slot() {
+        // Fails if a client that never sends a command stays open.
+        let table = ConnTable::limited(4, 80);
+        let addr = spawn_listener(table.clone()).await;
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
+            .await;
+        assert!(
+            matches!(closed, Ok(Ok(0))),
+            "idle connection should be closed, got {closed:?}"
+        );
+        wait_until(|| table.len() == 0).await;
+
+        let mut again = TcpStream::connect(addr).await.expect("again");
+        let ping = protocol::encode_reply(1, 0, &bson::doc! { "ping": 1 }).expect("ping");
+        again.write_all(&ping).await.expect("write");
+        let admitted = read_op_msg(&mut again).await;
+        assert_eq!(admitted.get_f64("ok"), Ok(1.0), "{admitted}");
+    }
+
+    #[tokio::test]
+    async fn a_command_postpones_idle_close_then_frees_the_slot() {
+        // Fails if the idle clock starts at accept and ignores later commands.
+        let table = ConnTable::limited(4, 300);
+        let addr = spawn_listener(table.clone()).await;
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        for request_id in 1..=3 {
+            let frame =
+                protocol::encode_reply(request_id, 0, &bson::doc! { "ping": 1 }).expect("ping");
+            client.write_all(&frame).await.expect("write");
+            let reply = read_op_msg(&mut client).await;
+            assert_eq!(reply.get_f64("ok"), Ok(1.0), "{reply}");
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
+            .await;
+        assert!(
+            matches!(closed, Ok(Ok(0))),
+            "connection should close after commands stop, got {closed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_live_connections_and_frees_their_slots() {
+        let table = ConnTable::limited(4, 0);
+        let addr = spawn_listener(table.clone()).await;
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        let ping = protocol::encode_reply(1, 0, &bson::doc! { "ping": 1 }).expect("ping");
+        client.write_all(&ping).await.expect("write");
+        let reply = read_op_msg(&mut client).await;
+        assert_eq!(reply.get_f64("ok"), Ok(1.0), "{reply}");
+        wait_until(|| table.len() == 1).await;
+
+        table.shutdown();
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
+            .await;
+        assert!(
+            matches!(closed, Ok(Ok(0))),
+            "shutdown should close the socket, got {closed:?}"
+        );
+        wait_until(|| table.len() == 0).await;
+    }
+
+    #[tokio::test]
+    async fn closing_a_disabled_user_frees_that_connection() {
+        let table = ConnTable::limited(4, 0);
+        let addr = spawn_listener(table.clone()).await;
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        let ping = protocol::encode_reply(1, 0, &bson::doc! { "ping": 1 }).expect("ping");
+        client.write_all(&ping).await.expect("write");
+        let reply = read_op_msg(&mut client).await;
+        assert_eq!(reply.get_f64("ok"), Ok(1.0), "{reply}");
+        wait_until(|| table.len() == 1).await;
+
+        let id = table.only_id().expect("the live connection");
+        table.set_user(id, "ada".to_string());
+        table.close_user("ada");
+
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
+            .await;
+        assert!(
+            matches!(closed, Ok(Ok(0))),
+            "disabling the user should close the socket, got {closed:?}"
+        );
+        wait_until(|| table.len() == 0).await;
+    }
+
+    async fn spawn_listener(table: Arc<ConnTable>) -> std::net::SocketAddr {
+        let router = PartitionRouter::new(1);
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = run_listener(listener, router, None, table).await;
+        });
+        addr
     }
 }
