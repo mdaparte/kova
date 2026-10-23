@@ -33,7 +33,7 @@ replication, and multi-model indexing.
 | 17 | Map projection (`mapReduce`, no `out`) | ✅ Complete |
 | 18 | Transactions in the oplog | ✅ Complete |
 | 19 | Snapshot shipping | ✅ Complete |
-| 20 | ODBC connector | ⚪ Planned |
+| 20 | ODBC connector | ✅ Complete |
 | 21 | `kovadump` backup and restore | ⚪ Planned |
 | 22 | Sharding | ⚪ Planned |
 
@@ -736,18 +736,18 @@ A follower that falls behind the retained oplog installs a snapshot of the pages
 - [x] Leave an arbiter without document pages.
 - [x] Test: a follower with an empty data directory catches up and a `find` returns the primary's documents.
 
-## Phase 20 — ODBC connector ⚪ Planned
+## Phase 20 — ODBC connector ✅
 
-SQL already runs inside the server: `db.runCommand({ sql: "..." })` on the MongoDB wire, executed by DataFusion. This phase adds an ODBC connector so a client that speaks ODBC can send that same SQL.
+SQL already runs inside the server: `db.runCommand({ sql: "..." })` on the MongoDB wire, executed by DataFusion. This phase adds a unixODBC driver on Linux, `libkova.so`, built with the server. The driver sends that same SQL string. The Windows driver manager stays out until it is named.
 
-The connector is a separate driver. It accepts an SQL string from the ODBC client and runs it through the existing DataFusion path. It does not add a second SQL engine. The shape of the driver (which driver manager, which platforms, how a DSN names the Kova host) is still open and will be fixed when this phase starts.
+The connection string is `DRIVER=Kova;SERVER=host;PORT=27018;DATABASE=name`. `SERVER` is the host, including a machine on the network. `PORT` defaults to 27018. `DATABASE` is the `$db` of the command. `UID` and `PWD`, or the user and password of `SQLConnect`, send `{ authenticate, user, pwd }` on that socket before any SQL. A connection with neither value stays anonymous, which matches security left off. A connection with only one of the two is refused. A wrong password is refused with the server's `authentication failed`.
 
 ### Phase 20 — Sub-tasks
 
-- [ ] Accept an SQL string over ODBC and run it through the DataFusion path.
-- [ ] Return the rows to the ODBC client.
-- [ ] Fix the driver manager, the platforms, and the DSN when the phase starts.
-- [ ] Test: an ODBC client runs a `SELECT` and gets the same rows as `db.runCommand({ sql })`.
+- [x] Accept an SQL string over ODBC and run it through the DataFusion path.
+- [x] Return the rows to the ODBC client.
+- [x] Pin unixODBC on Linux, and the connection string `SERVER`, `PORT`, `DATABASE`, `UID`, `PWD`.
+- [x] Test: an ODBC client runs a `SELECT` and gets the same rows as `db.runCommand({ sql })`. A wrong password is refused and the right one runs the query.
 
 ## Phase 21 — `kovadump` backup and restore ⚪ Planned
 
@@ -803,7 +803,6 @@ A replica set is still a full copy of every document on each voter. This phase s
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| No ODBC client | 20 | SQL is the MongoDB command `sql`. The driver shape is still open. |
 | No backup binary | 21 | `kovadump` restores a Kova dump, `pg_dump`, `mongodump`, or `mysqldump`. |
 | Sharding is not implemented | 22 | Routing scheme is chosen when the phase starts. |
 
@@ -863,5 +862,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–19 are complete. Still open: the ODBC connector (Phase 20),
-`kovadump` (Phase 21), and sharding (Phase 22).*
+*Phases 1–20 are complete. Still open: `kovadump` (Phase 21) and sharding
+(Phase 22).*

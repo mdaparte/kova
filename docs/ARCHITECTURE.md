@@ -134,6 +134,9 @@ Rust concurrency, memory management, and storage engine design.
   (in-memory + disk via the buffer pool). Results are returned as BSON
   via the MongoDB wire protocol.
 - **Entry Point:** `db.runCommand({ sql: "SELECT ... FROM ... WHERE ..." })`.
+- **ODBC:** `libkova.so` is the unixODBC driver. `SERVER`, `PORT`, and
+  `DATABASE` open the MongoDB port. `UID` and `PWD` send `authenticate`
+  on that connection before the SQL.
 
 ### 4.3 Storage Layer (Phase 6+)
 

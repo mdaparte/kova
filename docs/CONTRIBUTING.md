@@ -191,8 +191,8 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 19 — Snapshot shipping:** a follower outside the retained oplog
   installs a snapshot of the pages and replays from that index. An arbiter
   does not install document pages. ✅ Complete.
-- **Phase 20 — ODBC connector:** an ODBC client runs the same SQL as
-  `db.runCommand({ sql })`. The driver shape is still open. ⚪ Planned.
+- **Phase 20 — ODBC connector:** unixODBC on Linux (`libkova.so`) runs the
+  same SQL as `db.runCommand({ sql })`. `UID` and `PWD` call `authenticate`. ✅ Complete.
 - **Phase 21 — `kovadump`:** backup and restore. Restore reads a Kova dump,
   `pg_dump` plain SQL, `mongodump`, or `mysqldump` SQL. ⚪ Planned.
 - **Phase 22 — Sharding:** documents split across shards. The routing
