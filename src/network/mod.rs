@@ -372,7 +372,7 @@ pub async fn start_server(
 /// Each iteration reads the 16-byte header, then the remaining
 /// `messageLength - 16` bytes, decodes the OP_MSG body, executes the
 /// command through the router and writes the reply.
-async fn handle_client(
+pub(crate) async fn handle_client(
     socket: &mut TcpStream,
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,

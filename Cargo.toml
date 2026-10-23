@@ -3,6 +3,10 @@ name = "kova"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "kova"
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
