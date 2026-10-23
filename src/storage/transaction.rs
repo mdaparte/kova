@@ -231,6 +231,19 @@ impl TransactionManager {
             .unwrap_or_default()
     }
 
+    /// Checks conflicts and copies the staged writes. The transaction
+    /// stays open so a failed replication attempt can still commit.
+    ///
+    /// A conflict or a timeout aborts the transaction here.
+    pub(super) fn preview(
+        &mut self,
+        txn_id: u64,
+        versions: &VersionStore,
+    ) -> Result<Vec<Write>, String> {
+        self.reject_conflicts(txn_id, versions)?;
+        Ok(self.txn(txn_id)?.writes.clone())
+    }
+
     /// Checks conflicts and removes the transaction, returning its writes.
     ///
     /// The caller appends those writes to the WAL. A conflict or a
@@ -241,6 +254,11 @@ impl TransactionManager {
         txn_id: u64,
         versions: &VersionStore,
     ) -> Result<Vec<Write>, String> {
+        self.reject_conflicts(txn_id, versions)?;
+        Ok(self.txns.remove(&txn_id).expect("txn exists").writes)
+    }
+
+    fn reject_conflicts(&mut self, txn_id: u64, versions: &VersionStore) -> Result<(), String> {
         self.touch(txn_id, 0)?;
         let conflict = {
             let txn = self.txn(txn_id)?;
@@ -276,7 +294,7 @@ impl TransactionManager {
             self.txns.remove(&txn_id);
             return Err(message);
         }
-        Ok(self.txns.remove(&txn_id).expect("txn exists").writes)
+        Ok(())
     }
 
     /// Smallest snapshot still held. Read Committed does not hold one

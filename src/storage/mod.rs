@@ -196,10 +196,14 @@ impl PartitionWorker {
             command,
             PartitionCommand::BeginTransaction { .. }
                 | PartitionCommand::CommitTransaction { .. }
+                | PartitionCommand::CommitPreview { .. }
                 | PartitionCommand::AbortTransaction { .. }
                 | PartitionCommand::Transactional { .. }
         ) {
             return self.execute_transaction(command);
+        }
+        if let PartitionCommand::ApplyTransaction { txn_id, ops, .. } = command {
+            return self.apply_replicated_commit(txn_id, ops);
         }
         // An insert without `_id` gets one before the WAL record is
         // written. Replay then sees the same id and does not store a
@@ -882,6 +886,8 @@ impl PartitionWorker {
 
             PartitionCommand::BeginTransaction { .. }
             | PartitionCommand::CommitTransaction { .. }
+            | PartitionCommand::CommitPreview { .. }
+            | PartitionCommand::ApplyTransaction { .. }
             | PartitionCommand::AbortTransaction { .. }
             | PartitionCommand::Transactional { .. } => PartitionResult::Error {
                 message: "transaction command reached the page apply path".into(),
@@ -1026,6 +1032,24 @@ impl PartitionWorker {
                     Err(message) => PartitionResult::Error { message },
                 }
             }
+            PartitionCommand::CommitPreview { txn_id, .. } => {
+                let writes = match self.transactions.preview(txn_id, &self.versions) {
+                    Ok(writes) => writes,
+                    Err(message) => {
+                        LOGGER.warn(format!("partition {} {}", self.id, message));
+                        self.versions.gc(self.transactions.oldest_snapshot());
+                        return PartitionResult::Error { message };
+                    }
+                };
+                let mut ops = Vec::with_capacity(writes.len());
+                for write in &writes {
+                    match wal_op_for(write).to_document() {
+                        Ok(document) => ops.push(document),
+                        Err(message) => return PartitionResult::Error { message },
+                    }
+                }
+                PartitionResult::CommitPreview { txn_id, ops }
+            }
             PartitionCommand::CommitTransaction { txn_id, .. } => {
                 let writes = match self.transactions.commit(txn_id, &self.versions) {
                     Ok(writes) => writes,
@@ -1108,6 +1132,73 @@ impl PartitionWorker {
             self.write_checkpoint()?;
         }
         Ok(())
+    }
+
+    /// Applies one replicated commit. The primary drops the staged
+    /// transaction first, so the pages are written from the oplog entry
+    /// and not from the in-memory writes a second time.
+    fn apply_replicated_commit(&mut self, txn_id: u64, encoded: Vec<Document>) -> PartitionResult {
+        let mut ops = Vec::with_capacity(encoded.len());
+        for document in &encoded {
+            match WalOp::from_document(document) {
+                Ok(op) => ops.push(op),
+                Err(message) => return PartitionResult::Error { message },
+            }
+        }
+        if txn_id != 0 {
+            let _ = self.transactions.abort(txn_id);
+        }
+        if ops.is_empty() {
+            crate::metrics::METRICS.transaction_committed();
+            return PartitionResult::Transaction { txn_id };
+        }
+        let commands: Vec<PartitionCommand> =
+            ops.iter().cloned().flat_map(WalOp::into_commands).collect();
+        for command in &commands {
+            if let Err(message) = self.screen_schema(command) {
+                return PartitionResult::Error { message };
+            }
+        }
+        let mut images = Vec::new();
+        for command in &commands {
+            match self.committed_images(command) {
+                Ok(more) => images.extend(more),
+                Err(message) => return PartitionResult::Error { message },
+            }
+        }
+        if let Err(message) = self.rehearse_images(&images) {
+            return PartitionResult::Error { message };
+        }
+        if let Err(message) = self.engine.append(&WalOp::Transaction { ops }) {
+            LOGGER.error(format!(
+                "partition {} replicated commit failed: {}",
+                self.id, message
+            ));
+            return PartitionResult::Error { message };
+        }
+        let lsn = self.engine.last_lsn();
+        for command in commands {
+            let result = self.apply_recorded(command, true);
+            if let PartitionResult::Error { message } = result {
+                return PartitionResult::Error { message };
+            }
+        }
+        self.observe_committed(&images, lsn);
+        self.sync_indexes(&images);
+        if self.engine.should_checkpoint() {
+            if let Err(message) = self.write_checkpoint() {
+                LOGGER.error(format!(
+                    "partition {} checkpoint failed: {}",
+                    self.id, message
+                ));
+            }
+        }
+        crate::metrics::METRICS.transaction_committed();
+        LOGGER.info(format!(
+            "partition {} transaction {} replicated commit",
+            self.id, txn_id
+        ));
+        PartitionResult::Transaction { txn_id }
     }
 
     fn in_transaction(&mut self, txn_id: u64, command: PartitionCommand) -> PartitionResult {

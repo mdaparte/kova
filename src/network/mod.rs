@@ -651,9 +651,12 @@ impl crate::replication::CommandApplier for StorageApplier {
 }
 
 /// Auto-commit mutations travel through Raft. Reads stay on this node.
-/// Transactions stay on the primary: a commit replays writes that exist
-/// only in that worker, so the command itself is not an oplog entry.
+/// `begin`, staged statements, and `abort` stay on the primary. A commit
+/// is proposed separately as one `applyTransaction` entry.
 fn is_replicated_write(command: &bson::Document) -> bool {
+    if command.contains_key("applyTransaction") {
+        return true;
+    }
     if command.contains_key("txnId") {
         return false;
     }
@@ -693,9 +696,14 @@ fn is_replicated_write(command: &bson::Document) -> bool {
 }
 
 fn is_leader_local(command: &bson::Document) -> bool {
+    if command.contains_key("applyTransaction") {
+        return false;
+    }
     command.contains_key("txnId")
         || command.contains_key("beginTransaction")
+        || command.contains_key("commit")
         || command.contains_key("commitTransaction")
+        || command.contains_key("abort")
         || command.contains_key("abortTransaction")
 }
 
@@ -824,10 +832,96 @@ async fn dispatch_command(
     if (is_replicated_write(command) || is_leader_local(command)) && !replica.is_leader() {
         return crate::replication::not_primary();
     }
+    if command.contains_key("commit") || command.contains_key("commitTransaction") {
+        return propose_commit(command, router, replica).await.0;
+    }
     if is_replicated_write(command) {
         return replica.propose(command.clone()).await.0;
     }
     execute_command(command, router, local_addr).await
+}
+
+/// Proposes one oplog entry for a commit. The entry carries the staged
+/// writes. Followers apply it as one WAL record and do not open a
+/// transaction. An empty commit stays on this node.
+pub async fn propose_commit(
+    command: &bson::Document,
+    router: &PartitionRouter,
+    replica: &crate::replication::Replica,
+) -> (bson::Document, u64) {
+    let (collection, txn_id) = match protocol::command_from_document(command) {
+        Ok(PartitionCommand::CommitTransaction { collection, txn_id }) => (collection, txn_id),
+        Ok(_) => {
+            return (
+                bson::doc! { "ok": 0.0, "errmsg": "commit requires a collection and txnId" },
+                0,
+            )
+        }
+        Err(message) => return (bson::doc! { "ok": 0.0, "errmsg": message }, 0),
+    };
+    let preview = match router.dispatch(PartitionCommand::CommitPreview {
+        collection: collection.clone(),
+        txn_id,
+    }) {
+        Some(receiver) => receiver.await,
+        None => {
+            return (
+                bson::doc! { "ok": 0.0, "errmsg": "storage partition unavailable" },
+                0,
+            )
+        }
+    };
+    let ops = match preview {
+        Ok(PartitionResult::CommitPreview { ops, .. }) => ops,
+        Ok(PartitionResult::Error { message }) => {
+            return (bson::doc! { "ok": 0.0, "errmsg": message }, 0)
+        }
+        Ok(other) => {
+            return (
+                bson::doc! { "ok": 0.0, "errmsg": format!("unexpected commit preview {other:?}") },
+                0,
+            )
+        }
+        Err(_) => {
+            return (
+                bson::doc! { "ok": 0.0, "errmsg": "partition worker dropped the request" },
+                0,
+            )
+        }
+    };
+    if ops.is_empty() {
+        let committed =
+            match router.dispatch(PartitionCommand::CommitTransaction { collection, txn_id }) {
+                Some(receiver) => receiver.await,
+                None => {
+                    return (
+                        bson::doc! { "ok": 0.0, "errmsg": "storage partition unavailable" },
+                        0,
+                    )
+                }
+            };
+        let result = committed.unwrap_or(PartitionResult::Error {
+            message: "partition worker dropped the request".into(),
+        });
+        return (protocol::reply_document(&result), 0);
+    }
+    let (db, name) = split_namespace(&collection);
+    let mut entry = bson::doc! {
+        "applyTransaction": name,
+        "commitTxn": txn_id as i64,
+        "ops": ops,
+    };
+    if !db.is_empty() {
+        entry.insert("$db", db);
+    }
+    replica.propose(entry).await
+}
+
+fn split_namespace(namespace: &str) -> (String, String) {
+    match namespace.split_once('.') {
+        Some((db, collection)) => (db.to_string(), collection.to_string()),
+        None => (String::new(), namespace.to_string()),
+    }
 }
 
 /// Runs one decoded command and returns the reply document.
@@ -1330,7 +1424,10 @@ async fn map_reduce(command: &bson::Document, router: &PartitionRouter) -> bson:
     if command.contains_key("txnId") {
         return bson::doc! { "ok": 0.0, "errmsg": "mapReduce cannot run inside a transaction" };
     }
-    if command.get("map").is_some_and(|value| value.as_str().is_some()) {
+    if command
+        .get("map")
+        .is_some_and(|value| value.as_str().is_some())
+    {
         return bson::doc! { "ok": 0.0, "errmsg": "mapReduce refused JavaScript map" };
     }
     if command.contains_key("reduce") {
@@ -1671,9 +1768,21 @@ mod tests {
         assert!(!is_replicated_write(
             &bson::doc! { "aggregate": "emp", "pipeline": [ { "$match": {} } ] }
         ));
+        assert!(is_replicated_write(
+            &bson::doc! { "applyTransaction": "emp", "ops": [], "commitTxn": 1i64 }
+        ));
+        assert!(!is_replicated_write(
+            &bson::doc! { "commit": 1i32, "collection": "emp", "txnId": 1i64 }
+        ));
         assert!(is_leader_local(&bson::doc! { "beginTransaction": "emp" }));
         assert!(is_leader_local(
-            &bson::doc! { "commitTransaction": 1i32, "txnId": 1i64 }
+            &bson::doc! { "commit": 1i32, "collection": "emp", "txnId": 1i64 }
+        ));
+        assert!(is_leader_local(
+            &bson::doc! { "abort": 1i32, "collection": "emp", "txnId": 1i64 }
+        ));
+        assert!(!is_leader_local(
+            &bson::doc! { "applyTransaction": "emp", "ops": [], "commitTxn": 1i64 }
         ));
     }
 
@@ -2375,7 +2484,9 @@ mod tests {
         let body_len = header.message_length as usize - HEADER_SIZE;
         let mut body = vec![0u8; body_len];
         socket.read_exact(&mut body).await.expect("reply body");
-        protocol::decode_op_msg(&body).expect("decode reply").command
+        protocol::decode_op_msg(&body)
+            .expect("decode reply")
+            .command
     }
 
     async fn wait_until(mut ready: impl FnMut() -> bool) {
@@ -2394,9 +2505,7 @@ mod tests {
         // keeps the slot after the held client disconnects.
         let table = ConnTable::limited(1, 0);
         let router = PartitionRouter::new(1);
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let server_table = Arc::clone(&table);
         tokio::spawn(async move {
@@ -2424,15 +2533,16 @@ mod tests {
                 .contains("too many connections"),
             "{refused}"
         );
-        assert_eq!(table.len(), 1, "a refused socket is not an active connection");
+        assert_eq!(
+            table.len(),
+            1,
+            "a refused socket is not an active connection"
+        );
         let mut tail = [0u8; 1];
-        let closed = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            extra.read(&mut tail),
-        )
-        .await
-        .expect("refused socket should close")
-        .expect("read");
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), extra.read(&mut tail))
+            .await
+            .expect("refused socket should close")
+            .expect("read");
         assert_eq!(closed, 0);
 
         drop(held);
@@ -2453,8 +2563,8 @@ mod tests {
         let addr = spawn_listener(table.clone()).await;
         let mut client = TcpStream::connect(addr).await.expect("connect");
         let mut buf = [0u8; 1];
-        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
-            .await;
+        let closed =
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf)).await;
         assert!(
             matches!(closed, Ok(Ok(0))),
             "idle connection should be closed, got {closed:?}"
@@ -2483,8 +2593,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
         let mut buf = [0u8; 1];
-        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
-            .await;
+        let closed =
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf)).await;
         assert!(
             matches!(closed, Ok(Ok(0))),
             "connection should close after commands stop, got {closed:?}"
@@ -2504,8 +2614,8 @@ mod tests {
 
         table.shutdown();
         let mut buf = [0u8; 1];
-        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
-            .await;
+        let closed =
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf)).await;
         assert!(
             matches!(closed, Ok(Ok(0))),
             "shutdown should close the socket, got {closed:?}"
@@ -2529,8 +2639,8 @@ mod tests {
         table.close_user("ada");
 
         let mut buf = [0u8; 1];
-        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
-            .await;
+        let closed =
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf)).await;
         assert!(
             matches!(closed, Ok(Ok(0))),
             "disabling the user should close the socket, got {closed:?}"
@@ -2661,9 +2771,7 @@ mod tests {
 
     async fn spawn_listener(table: Arc<ConnTable>) -> std::net::SocketAddr {
         let router = PartitionRouter::new(1);
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
             let _ = run_listener(listener, router, None, table).await;

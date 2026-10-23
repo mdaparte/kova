@@ -88,6 +88,11 @@ pub enum PartitionResult {
     Error { message: String },
     /// `beginTransaction`, `commit`, or `abort` completed.
     Transaction { txn_id: u64 },
+    /// Staged writes of a commit that has not been logged yet.
+    ///
+    /// `ops` are WAL operation documents. Empty means the commit has
+    /// nothing to replicate.
+    CommitPreview { txn_id: u64, ops: Vec<Document> },
     /// `dropIndexes` removed one index, or every secondary index.
     IndexesDropped { n_indexes_was: u32 },
     /// `explain` asked the worker which access path it would use.
@@ -234,6 +239,21 @@ pub enum PartitionCommand {
     },
     /// Makes the transaction's writes durable in one WAL record.
     CommitTransaction { collection: String, txn_id: u64 },
+    /// Copies the staged writes and leaves the transaction open.
+    ///
+    /// Replication uses this before proposing the commit. A conflict
+    /// still aborts the transaction.
+    CommitPreview { collection: String, txn_id: u64 },
+    /// Applies a replicated commit. Followers do not open a transaction.
+    ///
+    /// `txn_id` drops that transaction on the primary, where the writes
+    /// were staged. Followers ignore an id they do not have. `ops` are
+    /// WAL operation documents, appended as one record.
+    ApplyTransaction {
+        collection: String,
+        txn_id: u64,
+        ops: Vec<Document>,
+    },
     /// Discards the transaction's writes.
     AbortTransaction { collection: String, txn_id: u64 },
     /// Sets or replaces a collection's document validator.
@@ -374,6 +394,8 @@ impl PartitionCommand {
             | PartitionCommand::Aggregate { collection, .. }
             | PartitionCommand::BeginTransaction { collection, .. }
             | PartitionCommand::CommitTransaction { collection, .. }
+            | PartitionCommand::CommitPreview { collection, .. }
+            | PartitionCommand::ApplyTransaction { collection, .. }
             | PartitionCommand::AbortTransaction { collection, .. }
             | PartitionCommand::CollMod { collection, .. } => collection,
             PartitionCommand::CreateView { source, .. } => source,

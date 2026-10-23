@@ -354,6 +354,26 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         return Ok(account);
     }
 
+    if let Ok(collection) = command.get_str("applyTransaction") {
+        let commit_txn = non_negative_field(command, "commitTxn")?.unwrap_or(0);
+        let values = command
+            .get_array("ops")
+            .map_err(|_| "applyTransaction requires an 'ops' array")?;
+        let mut ops = Vec::with_capacity(values.len());
+        for value in values {
+            let document = value
+                .as_document()
+                .cloned()
+                .ok_or_else(|| "applyTransaction ops must be documents".to_string())?;
+            ops.push(document);
+        }
+        return Ok(PartitionCommand::ApplyTransaction {
+            collection: namespaced(collection),
+            txn_id: commit_txn,
+            ops,
+        });
+    }
+
     if command.contains_key("insert") {
         let collection = command.get_str("insert").unwrap();
         let values = command
@@ -740,7 +760,7 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         });
     }
 
-    if command.contains_key("commit") {
+    if command.contains_key("commit") || command.contains_key("commitTransaction") {
         let collection = command
             .get_str("collection")
             .map_err(|_| "commit requires a collection".to_string())?;
@@ -751,7 +771,7 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         });
     }
 
-    if command.contains_key("abort") {
+    if command.contains_key("abort") || command.contains_key("abortTransaction") {
         let collection = command
             .get_str("collection")
             .map_err(|_| "abort requires a collection".to_string())?;
@@ -1474,6 +1494,11 @@ pub fn reply_document(result: &PartitionResult) -> Document {
         PartitionResult::Transaction { txn_id } => doc! {
             "ok": 1.0,
             "txnId": *txn_id as i64,
+        },
+        PartitionResult::CommitPreview { txn_id, ops } => doc! {
+            "ok": 1.0,
+            "txnId": *txn_id as i64,
+            "ops": ops.clone(),
         },
         PartitionResult::IndexesDropped { n_indexes_was } => doc! {
             "ok": 1.0,

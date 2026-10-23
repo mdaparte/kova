@@ -174,7 +174,7 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 10 — Indexing subsystem:** B-Tree, hash, unique, and sparse indexes,
   rebuilt from document pages and maintained on every write. ✅ Complete.
 - **Phase 11 — Replication and HA:** OpenRaft oplog, election, heartbeats,
-  and replica fields on `hello`. Transactions stay on the primary. ✅ Complete.
+  and replica fields on `hello`. ✅ Complete.
 - **Phase 12 — On-disk page compression:** zstd on the BSON payload of each
   page, WiredTiger-style. The WAL stays uncompressed. ✅ Complete.
 - **Phase 13 — Security:** five built-in roles, custom roles over eleven
@@ -185,6 +185,9 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 16 — Views:** a MongoDB view (`viewOn` + pipeline). `kova.inverted`
   adds a Tantivy index on disk with discovered field types. ✅ Complete.
 - **Phase 17 — Map projection:** `mapReduce` returns `{ key, value }` for each match. No `out`, no fan-out. ✅ Complete.
+- **Phase 18 — Transactions in the oplog:** `commit` proposes one
+  `applyTransaction` entry. Followers apply it as one WAL record.
+  `begin`, staged statements, and `abort` stay on the primary. ✅ Complete.
 
 ---
 

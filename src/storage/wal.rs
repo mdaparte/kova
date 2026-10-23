@@ -270,6 +270,8 @@ impl WalOp {
             | PartitionCommand::Search { .. }
             | PartitionCommand::BeginTransaction { .. }
             | PartitionCommand::CommitTransaction { .. }
+            | PartitionCommand::CommitPreview { .. }
+            | PartitionCommand::ApplyTransaction { .. }
             | PartitionCommand::AbortTransaction { .. }
             | PartitionCommand::Explain { .. }
             | PartitionCommand::Transactional { .. }
@@ -372,7 +374,7 @@ impl WalOp {
         }
     }
 
-    fn encode(&self) -> Result<Vec<u8>, String> {
+    pub(super) fn to_document(&self) -> Result<Document, String> {
         let mut body = doc! { "op": self.name() };
         match self {
             Self::Insert {
@@ -442,54 +444,56 @@ impl WalOp {
                 );
             }
         }
-        bson::to_vec(&body).map_err(|err| format!("wal encode: {}", err))
+        Ok(body)
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let body: Document =
-            bson::from_slice(bytes).map_err(|err| format!("wal payload: {}", err))?;
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        bson::to_vec(&self.to_document()?).map_err(|err| format!("wal encode: {}", err))
+    }
+
+    pub(super) fn from_document(body: &Document) -> Result<Self, String> {
         let op = body
             .get_str("op")
             .map_err(|_| "wal payload is missing op".to_string())?;
         match op {
             "insert" => Ok(Self::Insert {
-                collection: required_str(&body, "ns")?,
-                documents: required_docs(&body, "docs")?,
+                collection: required_str(body, "ns")?,
+                documents: required_docs(body, "docs")?,
             }),
             "update" => Ok(Self::Update {
-                collection: required_str(&body, "ns")?,
-                filter: required_doc(&body, "filter")?,
-                update: required_doc(&body, "update")?,
+                collection: required_str(body, "ns")?,
+                filter: required_doc(body, "filter")?,
+                update: required_doc(body, "update")?,
                 multi: body.get_bool("multi").unwrap_or(false),
             }),
             "delete" => Ok(Self::Delete {
-                collection: required_str(&body, "ns")?,
-                filter: required_doc(&body, "filter")?,
+                collection: required_str(body, "ns")?,
+                filter: required_doc(body, "filter")?,
                 limit: body.get_i64("limit").unwrap_or(0) as u32,
             }),
             "drop" => Ok(Self::Drop {
-                collection: required_str(&body, "ns")?,
+                collection: required_str(body, "ns")?,
             }),
             "dropDatabase" => Ok(Self::DropDatabase {
-                database: required_str(&body, "db")?,
+                database: required_str(body, "db")?,
             }),
             "create" => Ok(Self::CreateCollection {
-                collection: required_str(&body, "ns")?,
+                collection: required_str(body, "ns")?,
             }),
             "createIndexes" => Ok(Self::CreateIndexes {
-                collection: required_str(&body, "ns")?,
-                indexes: required_docs(&body, "indexes")?,
+                collection: required_str(body, "ns")?,
+                indexes: required_docs(body, "indexes")?,
             }),
             "dropIndexes" => Ok(Self::DropIndexes {
-                collection: required_str(&body, "ns")?,
-                index: required_str(&body, "index")?,
+                collection: required_str(body, "ns")?,
+                index: required_str(body, "index")?,
             }),
             "collMod" => Ok(Self::CollMod {
-                collection: required_str(&body, "ns")?,
-                validator: required_doc(&body, "validator")?,
+                collection: required_str(body, "ns")?,
+                validator: required_doc(body, "validator")?,
             }),
             "createUser" | "updateUser" | "grantRoles" | "revokeRoles" | "createRole"
-            | "dropRole" | "createView" => Ok(Self::Auth { spec: body }),
+            | "dropRole" | "createView" => Ok(Self::Auth { spec: body.clone() }),
             "transaction" => {
                 let values = body
                     .get_array("ops")
@@ -506,6 +510,12 @@ impl WalOp {
             }
             other => Err(format!("wal payload has unknown op {}", other)),
         }
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let body: Document =
+            bson::from_slice(bytes).map_err(|err| format!("wal payload: {}", err))?;
+        Self::from_document(&body)
     }
 }
 

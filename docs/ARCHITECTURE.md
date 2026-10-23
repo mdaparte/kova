@@ -230,8 +230,11 @@ leader rejects writes with code 10107. `nearest` is chosen by the driver
 from `hosts`. Without `[replication]`, `hello` stays a standalone primary.
 
 An arbiter is a learner: it stores the oplog, applies no documents, and
-does not vote. Transactions are not logged. Sharding is not implemented.
-Snapshot shipping is off, so a follower catches up from the log.
+does not vote. `begin`, staged statements, and `abort` stay on the
+primary. `commit` proposes one `applyTransaction` entry carrying the
+writes. Followers apply that entry as one WAL record and do not open a
+transaction. Sharding is not implemented. Snapshot shipping is off, so a
+follower catches up from the log.
 
 ## 5. Data Flow
 
@@ -290,13 +293,14 @@ about and ignored.
 | 8 | Query language and aggregation pipeline, reading pages through the buffer pool |
 | 9 | Transactional storage: MVCC, ACID, multiple isolation levels |
 | 10 | Indexing subsystem: B-Tree, Hash, Unique, Sparse, auto-maintain |
-| 11 | Replication & HA: OpenRaft oplog, election, heartbeats. Transactions stay on the primary |
+| 11 | Replication & HA: OpenRaft oplog, election, heartbeats |
 | 12 | On-disk page compression: zstd on the BSON payload; WAL stays uncompressed |
 | 13 | Security: RBAC, Argon2id, AES-256-GCM at rest, user management |
 | 14 | Monitoring: 17 atomic counters, `serverStatus` |
 | 15 | Connection pool: cap, tracking, idle close |
 | 16 | Lucene-like views and facet queries |
 | 17 | Map projection: `mapReduce` returns `{ key, value }`. No `out` collection |
+| 18 | Transactions in the oplog: a commit is one `applyTransaction` entry |
 
 ---
 

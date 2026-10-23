@@ -31,7 +31,7 @@ replication, and multi-model indexing.
 | 15 | Connection Pool (cap, tracking, lifecycle) | ✅ Complete |
 | 16 | Views (`viewOn` + pipeline, optional disk Tantivy) | ✅ Complete |
 | 17 | Map projection (`mapReduce`, no `out`) | ✅ Complete |
-| 18 | Transactions in the oplog | ⚪ Planned |
+| 18 | Transactions in the oplog | ✅ Complete |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -493,7 +493,7 @@ Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. 
 - A committed auto-commit command is applied on the leader and on every follower through the partition workers. The network task proposes the command; the worker does not propose it again.
 - `find` on `local.oplog.rs` returns entries after `ts` (`$gt` / `$gte`). `ts` is the log index.
 - Inserts without `_id` receive one before the command is logged, so every replica stores the same id.
-- Transactions (`beginTransaction`, `commitTransaction`, `abortTransaction`, and any command carrying `txnId`) stay on the primary. A commit's writes live in that worker and are not an oplog entry. Phase 18 logs the commit.
+- `beginTransaction`, each staged statement, and `abort` stay on the primary. `commit` proposes one oplog entry, `applyTransaction`, that carries the writes. Followers apply that entry as one WAL record and do not open a transaction.
 - Snapshot shipping is off (`SnapshotPolicy::Never`). A follower that falls outside the retained log cannot catch up from a document snapshot.
 
 ### 11.2 Replica Sets
@@ -513,7 +513,7 @@ Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. 
 - [x] Heartbeats are Raft AppendEntries. A missed election timeout starts a campaign.
 - [x] Auto-commit writes are proposed from the network task and applied through the partition workers.
 - [x] Tests: three voters replicate a write and elect a new leader; an arbiter keeps the oplog and stores no documents.
-- Transactions in the oplog are Phase 18. Until then, `begin` / `commit` / `abort` and any command with `txnId` stay on the primary.
+- A commit is one oplog entry (`applyTransaction`). `begin`, staged statements, and `abort` stay on the primary.
 - Sharding remains a later extension.
 
 ## Phase 12 — On-Disk Page Compression ✅
@@ -697,13 +697,13 @@ db.runCommand({
 - [x] Reject a JavaScript `map`, `reduce`, `out`, and `txnId`, naming what was refused.
 - [x] Test: a query keeps the matches, the pairs are the projection, and `listCollections` still shows only the source.
 
-## Phase 18 — Transactions in the oplog ⚪ Planned
+## Phase 18 — Transactions in the oplog ✅
 
-A commit's writes live in the primary's worker. `beginTransaction`, `commitTransaction`, `abortTransaction`, and any command carrying `txnId` are refused as oplog entries, so a secondary never applies them. This phase logs the commit, not the open transaction.
+A commit's writes used to live only in the primary's worker. `beginTransaction`, staged statements, and `abort` are still refused as oplog entries. This phase logs the commit, not the open transaction.
 
 - `beginTransaction` and each statement that only stages writes stay on the primary. They are not oplog entries.
-- `commitTransaction` proposes one oplog entry that carries the writes that transaction made. Followers apply that entry through the partition workers, the same path as an auto-commit command. They do not open a transaction.
-- `abortTransaction` writes nothing to the oplog. Uncommitted images never reach a follower.
+- `commit` proposes one oplog entry, `applyTransaction`, that carries the writes that transaction made. Followers apply that entry through the partition workers as one WAL record. They do not open a transaction.
+- `abort` writes nothing to the oplog. Uncommitted images never reach a follower.
 - The entry is one Raft record, matching the one WAL record a commit already is, so a crash publishes every write in the transaction or none of them.
 - A transaction still names one collection, and that collection's partition owns it. A collection on another partition stays outside the transaction.
 - An arbiter stores the entry and applies no documents.
@@ -712,10 +712,10 @@ A commit's writes live in the primary's worker. `beginTransaction`, `commitTrans
 
 ### Phase 18 — Sub-tasks
 
-- [ ] Propose the committed writes as one oplog entry from `commitTransaction`.
-- [ ] Apply that entry on every follower without opening a transaction.
-- [ ] Leave `beginTransaction`, staged statements, and `abortTransaction` off the oplog.
-- [ ] Test: three voters commit a transaction on the primary, and a secondary `find` returns those documents. An abort leaves the secondary unchanged.
+- [x] Propose the committed writes as one oplog entry from `commit`.
+- [x] Apply that entry on every follower without opening a transaction.
+- [x] Leave `beginTransaction`, staged statements, and `abort` off the oplog.
+- [x] Test: three voters commit a transaction on the primary, and a secondary `find` returns those documents. An abort leaves the secondary unchanged.
 
 ## Architecture Principles
 
@@ -741,7 +741,8 @@ A commit's writes live in the primary's worker. `beginTransaction`, `commitTrans
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| Transactions are not in the oplog | 18 | `begin` / `commit` / `abort` and any command with `txnId` stay on the primary. A commit is not an oplog entry. |
+| A follower outside the retained log cannot catch up | — | Snapshot shipping is off (`SnapshotPolicy::Never`). |
+| Sharding is not implemented | — | Left as a later extension. |
 
 ## Architecture Diagram (updated)
 
@@ -799,5 +800,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–17 are complete. Still open: transactions in the oplog
-(Phase 18).*
+*Phases 1–18 are complete. Still open, without a phase number: snapshot
+shipping, and sharding.*

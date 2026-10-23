@@ -815,7 +815,7 @@ mod tests {
     use crate::config::StorageConfig;
     use crate::protocol;
     use crate::storage::PartitionRouter;
-    use crate::types::PartitionResult;
+    use crate::types::{PartitionCommand, PartitionResult};
 
     use super::*;
 
@@ -1093,6 +1093,141 @@ mod tests {
         assert!(hello.get_bool("arbiterOnly").expect("arbiter"));
         assert!(!hello.get_bool("isWritablePrimary").expect("writable"));
         assert_ne!(arbiter.replica.id, leader);
+        for node in &nodes {
+            node.replica.shutdown().await;
+        }
+    }
+
+    async fn local(router: &PartitionRouter, command: PartitionCommand) -> PartitionResult {
+        router
+            .dispatch(command)
+            .expect("worker")
+            .await
+            .expect("reply")
+    }
+
+    fn oplog_bodies(node: &Node) -> Vec<Document> {
+        node.replica
+            .oplog
+            .commands_after(0)
+            .iter()
+            .filter_map(|(_, _, body)| {
+                Document::from_reader(&mut Cursor::new(body.as_slice())).ok()
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_commit_replicates_and_an_abort_stays_on_the_primary() {
+        let nodes = start_set(&[(1, false), (2, false), (3, false)]).await;
+        let leader = leader_id(&nodes).await;
+        let primary = nodes
+            .iter()
+            .find(|node| node.replica.id == leader)
+            .expect("primary");
+
+        let kept = match local(
+            &primary.router,
+            PartitionCommand::BeginTransaction {
+                collection: "db.emp".into(),
+                txn_id: 0,
+                isolation: "snapshot".into(),
+                timeout_ms: None,
+            },
+        )
+        .await
+        {
+            PartitionResult::Transaction { txn_id } => txn_id,
+            other => panic!("expected a transaction, got {other:?}"),
+        };
+        local(
+            &primary.router,
+            PartitionCommand::Transactional {
+                txn_id: kept,
+                inner: Box::new(PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "_id": "king", "ename": "KING" }],
+                }),
+            },
+        )
+        .await;
+
+        let dropped = match local(
+            &primary.router,
+            PartitionCommand::BeginTransaction {
+                collection: "db.emp".into(),
+                txn_id: 0,
+                isolation: "snapshot".into(),
+                timeout_ms: None,
+            },
+        )
+        .await
+        {
+            PartitionResult::Transaction { txn_id } => txn_id,
+            other => panic!("expected a transaction, got {other:?}"),
+        };
+        local(
+            &primary.router,
+            PartitionCommand::Transactional {
+                txn_id: dropped,
+                inner: Box::new(PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "_id": "clark", "ename": "CLARK" }],
+                }),
+            },
+        )
+        .await;
+        local(
+            &primary.router,
+            PartitionCommand::AbortTransaction {
+                collection: "db.emp".into(),
+                txn_id: dropped,
+            },
+        )
+        .await;
+        assert!(
+            oplog_bodies(primary).iter().all(|command| {
+                !command.contains_key("beginTransaction")
+                    && !command.contains_key("abort")
+                    && !command.contains_key("txnId")
+            }),
+            "begin, abort, and staged statements stay off the oplog"
+        );
+
+        let (reply, index) = crate::network::propose_commit(
+            &doc! {
+                "commit": 1i32,
+                "collection": "emp",
+                "txnId": kept as i64,
+                "$db": "db",
+            },
+            &primary.router,
+            &primary.replica,
+        )
+        .await;
+        assert_eq!(reply.get_f64("ok").expect("ok"), 1.0, "{reply:?}");
+        for node in &nodes {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                node.replica.wait_applied(index),
+            )
+            .await
+            .expect("applied");
+            assert_eq!(names(&node.router).await, vec!["KING".to_string()]);
+        }
+        let bodies = oplog_bodies(primary);
+        assert!(bodies
+            .iter()
+            .any(|command| command.contains_key("applyTransaction")));
+        assert!(bodies.iter().all(|command| {
+            !command.contains_key("beginTransaction")
+                && !command.contains_key("abort")
+                && !command.contains_key("txnId")
+                && command
+                    .get_array("ops")
+                    .map(|ops| !format!("{ops:?}").contains("CLARK"))
+                    .unwrap_or(true)
+        }));
         for node in &nodes {
             node.replica.shutdown().await;
         }
