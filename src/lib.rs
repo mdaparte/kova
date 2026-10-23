@@ -62,7 +62,7 @@ pub async fn serve() {
     logger::LOGGER.info(format!(
         "Kova engine starting (port {}, log level {}, data_dir {}, wal_fsync={}, warn_on_non_mongo_queries={})",
         config.port,
-        config.log_level().as_str(),
+        config.log_level(),
         config.storage.data_dir,
         config.storage.wal_fsync,
         config.warn_on_non_mongo_queries

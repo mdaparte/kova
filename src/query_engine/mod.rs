@@ -40,6 +40,7 @@ pub fn register_collection(
 }
 
 /// Executes a SQL query against one collection.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn execute_sql(
     documents: Arc<Vec<Document>>,
     table_name: &str,
@@ -76,6 +77,7 @@ pub async fn execute_sql_query(
 ///
 /// Queries that name a table must pass that table in `tables`; a bare
 /// `SELECT 1` passes an empty slice.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn parse_sql(sql: &str, tables: &[(&str, Arc<Vec<Document>>)]) -> DFResult<String> {
     let session = session_with(tables)?;
     let df = session.sql(sql).await?;

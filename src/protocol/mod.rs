@@ -34,6 +34,7 @@ pub const MAX_MESSAGE_SIZE: usize = 48_000_000;
 /// A decoded OP_MSG payload: the command document a client sent us.
 #[derive(Debug, Clone)]
 pub struct OpMsg {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub flag_bits: u32,
     pub command: Document,
 }

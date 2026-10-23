@@ -42,6 +42,7 @@ pub struct Timing {
     pub election_max_ms: u64,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl Timing {
     pub fn production() -> Self {
         Self {
@@ -148,6 +149,7 @@ pub fn not_primary() -> Document {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl Replica {
     pub async fn start(spec: NodeSpec, listener: TcpListener) -> Result<Self, String> {
         let me = spec
@@ -937,7 +939,6 @@ mod tests {
         replica: Replica,
         router: PartitionRouter,
         calls: Arc<AtomicU64>,
-        installs: Arc<AtomicU64>,
     }
 
     async fn bind_members(flags: &[(u64, bool)]) -> (Vec<TcpListener>, BTreeMap<u64, Member>) {
@@ -984,7 +985,6 @@ mod tests {
                 replica,
                 router,
                 calls,
-                installs,
             });
         }
         nodes[0].replica.form().await.expect("form");

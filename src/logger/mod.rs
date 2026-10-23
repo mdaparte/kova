@@ -61,6 +61,12 @@ impl Level {
     }
 }
 
+impl std::fmt::Display for Level {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// A single log record.
 #[derive(Debug, Clone)]
 pub struct LogRecord {
@@ -69,6 +75,7 @@ pub struct LogRecord {
     /// The message text.
     pub message: String,
     /// Structured key-value payloads.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fields: Vec<(String, String)>,
     /// Wall-clock time of the record, milliseconds since the UNIX epoch.
     pub timestamp: u128,
@@ -86,6 +93,7 @@ impl LogRecord {
     }
 
     /// Adds a structured field to the record.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.fields.push((key.into(), value.into()));
         self
@@ -260,11 +268,13 @@ impl Logger {
 /// The buffer is bounded: when it is full the oldest record is dropped.
 /// A `Mutex` provides interior mutability so `LogSink::emit` can take
 /// `&self` while still appending to the queue.
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct CaptureSink {
     records: Mutex<VecDeque<LogRecord>>,
     max_records: usize,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl CaptureSink {
     /// Creates a new capture sink with the given capacity.
     pub fn new(max_records: usize) -> Self {

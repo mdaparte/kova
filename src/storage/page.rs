@@ -19,6 +19,7 @@ pub const PAGE_HEADER_LEN: usize = 32;
 const FLAG_ENCRYPTED: u8 = 1;
 
 /// Smallest page size whose envelope can hold a zstd frame.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const MIN_PAGE_SIZE: usize = 128;
 
 /// One page.

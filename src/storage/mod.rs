@@ -3212,11 +3212,6 @@ impl PartitionRouter {
         }
     }
 
-    /// Root directory that holds `partition-*` and `view-routes`.
-    pub fn data_dir(&self) -> &std::path::Path {
-        &self.inner.data_dir
-    }
-
     /// Checkpoints every partition and packs the page files.
     pub async fn snapshot_pages(&self) -> Result<Vec<u8>, String> {
         for receiver in self.broadcast(PartitionCommand::Checkpoint) {
@@ -3275,18 +3270,6 @@ impl PartitionRouter {
     fn partition_index(&self, collection: &str) -> usize {
         let hash = fnv1a(collection.as_bytes());
         (hash % self.inner.senders.len() as u64) as usize
-    }
-
-    /// Waits for every worker thread to finish (used in tests/shutdown).
-    ///
-    /// No-op while other clones of this router still exist, because the
-    /// shared `Arc` keeps the workers alive.
-    pub fn join(&self) {
-        if let Ok(mut handles) = self.inner.handles.lock() {
-            for handle in handles.drain(..) {
-                let _ = handle.join();
-            }
-        }
     }
 }
 

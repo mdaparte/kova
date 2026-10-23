@@ -54,6 +54,7 @@ pub mod wire {
         /// The requestId of this message.
         pub request_id: i32,
         /// The requestId this message responds to.
+        #[cfg_attr(not(test), allow(dead_code))]
         pub response_to: i32,
         /// The operation code.
         pub op_code: i32,
@@ -137,6 +138,7 @@ impl ConnTable {
     }
 
     /// A table with its own cap. `idle_ms` of 0 disables idle close.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn limited(max_connections: usize, idle_ms: u64) -> Arc<Self> {
         Arc::new(Self::new(max_connections, idle_ms))
     }
@@ -201,10 +203,12 @@ impl ConnTable {
         Some(deadline.saturating_duration_since(std::time::Instant::now()))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn len(&self) -> usize {
         self.slots.lock().expect("connections").len()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn only_peer(&self) -> Option<std::net::SocketAddr> {
         let slots = self.slots.lock().expect("connections");
         if slots.len() != 1 {
@@ -213,6 +217,7 @@ impl ConnTable {
         slots.values().next().map(|slot| slot.peer)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn only_id(&self) -> Option<u64> {
         let slots = self.slots.lock().expect("connections");
         if slots.len() != 1 {
@@ -329,7 +334,6 @@ async fn run_listener(
 }
 
 struct Session {
-    user: String,
     actions: Vec<String>,
 }
 
@@ -372,6 +376,7 @@ pub async fn start_server(
 /// Each iteration reads the 16-byte header, then the remaining
 /// `messageLength - 16` bytes, decodes the OP_MSG body, executes the
 /// command through the router and writes the reply.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn handle_client(
     socket: &mut TcpStream,
     router: &PartitionRouter,
@@ -802,8 +807,8 @@ fn bind_session(
                 .iter()
                 .filter_map(|value| value.as_str().map(str::to_string))
                 .collect();
-            table.set_user(conn_id, user.clone());
-            *session = Some(Session { user, actions });
+            table.set_user(conn_id, user);
+            *session = Some(Session { actions });
         }
     }
     if let Ok(user) = reply.get_str("kovaDisabledUser").map(str::to_string) {
@@ -1197,9 +1202,7 @@ fn sql_simple_filter(sql: &str) -> Option<bson::Document> {
         ("$gte", rest)
     } else if let Some(rest) = rest.strip_prefix("<=") {
         ("$lte", rest)
-    } else if let Some(rest) = rest.strip_prefix("<>") {
-        return None;
-    } else if let Some(rest) = rest.strip_prefix("!=") {
+    } else if rest.starts_with("<>") || rest.starts_with("!=") {
         return None;
     } else if let Some(rest) = rest.strip_prefix('>') {
         ("$gt", rest)

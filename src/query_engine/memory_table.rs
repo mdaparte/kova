@@ -29,6 +29,7 @@ use datafusion::error::Result as DFResult;
 #[derive(Debug)]
 pub struct MemoryTable {
     /// Collection name (for logging and debugging).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub name: String,
     /// The documents in this collection (read-only snapshot).
     pub documents: Arc<Vec<Document>>,
