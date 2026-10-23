@@ -25,6 +25,7 @@ mod engine;
 mod heap;
 mod mvcc;
 mod page;
+mod snapshot;
 mod transaction;
 mod wal;
 
@@ -76,6 +77,8 @@ pub struct PartitionWorker {
     indexes: IndexManager,
     /// `data/` root. View route files and the search directories live here.
     data_dir: std::path::PathBuf,
+    /// Config used to reopen the engine after a snapshot install.
+    storage: StorageConfig,
     /// Disk Tantivy indexes for views with `kova.inverted`.
     inverted: std::collections::HashMap<String, crate::search::DiskIndex>,
 }
@@ -104,29 +107,10 @@ impl PartitionWorker {
             transactions: TransactionManager::new(),
             indexes: IndexManager::new(),
             data_dir,
+            storage,
             inverted: std::collections::HashMap::new(),
         };
-        worker.open_existing_indexes();
-        // Replay before building the search index so tokenization sees
-        // the pages after the WAL tail, and each document is indexed once.
-        for record in pending {
-            let result = record
-                .op
-                .into_commands()
-                .into_iter()
-                .map(|command| worker.apply_recorded(command, false))
-                .find(|result| matches!(result, PartitionResult::Error { .. }))
-                .unwrap_or(PartitionResult::Created);
-            if let PartitionResult::Error { message } = result {
-                LOGGER.warn(format!(
-                    "partition {} skipped WAL lsn {} during recovery: {}",
-                    id, record.lsn, message
-                ));
-            }
-        }
-        worker.build_missing_indexes();
-        worker.publish_routes();
-        if let Err(err) = worker.reindex_all() {
+        if let Err(err) = worker.recover(pending) {
             abort_storage(id, err);
         }
         LOGGER.info(format!(
@@ -136,6 +120,30 @@ impl PartitionWorker {
             worker.engine.last_lsn()
         ));
         worker
+    }
+
+    /// Rebuilds indexes and the search index from the pages on disk.
+    fn recover(&mut self, pending: Vec<wal::WalRecord>) -> Result<(), String> {
+        self.open_existing_indexes();
+        for record in pending {
+            let lsn = record.lsn;
+            let result = record
+                .op
+                .into_commands()
+                .into_iter()
+                .map(|command| self.apply_recorded(command, false))
+                .find(|result| matches!(result, PartitionResult::Error { .. }))
+                .unwrap_or(PartitionResult::Created);
+            if let PartitionResult::Error { message } = result {
+                LOGGER.warn(format!(
+                    "partition {} skipped WAL lsn {} during recovery: {}",
+                    self.id, lsn, message
+                ));
+            }
+        }
+        self.build_missing_indexes();
+        self.publish_routes();
+        self.reindex_all()
     }
 
     /// Builds the search index entry for one document and adds it.
@@ -204,6 +212,15 @@ impl PartitionWorker {
         }
         if let PartitionCommand::ApplyTransaction { txn_id, ops, .. } = command {
             return self.apply_replicated_commit(txn_id, ops);
+        }
+        if let PartitionCommand::Checkpoint = command {
+            return match self.write_checkpoint() {
+                Ok(()) => PartitionResult::Created,
+                Err(message) => PartitionResult::Error { message },
+            };
+        }
+        if let PartitionCommand::InstallSnapshot { bytes } = command {
+            return self.install_snapshot(&bytes);
         }
         // An insert without `_id` gets one before the WAL record is
         // written. Replay then sees the same id and does not store a
@@ -888,6 +905,8 @@ impl PartitionWorker {
             | PartitionCommand::CommitTransaction { .. }
             | PartitionCommand::CommitPreview { .. }
             | PartitionCommand::ApplyTransaction { .. }
+            | PartitionCommand::Checkpoint
+            | PartitionCommand::InstallSnapshot { .. }
             | PartitionCommand::AbortTransaction { .. }
             | PartitionCommand::Transactional { .. } => PartitionResult::Error {
                 message: "transaction command reached the page apply path".into(),
@@ -1199,6 +1218,67 @@ impl PartitionWorker {
             self.id, txn_id
         ));
         PartitionResult::Transaction { txn_id }
+    }
+
+    /// Closes the page files, installs a snapshot, and reloads.
+    fn install_snapshot(&mut self, bytes: &[u8]) -> PartitionResult {
+        if let Err(message) = snapshot::check(bytes) {
+            return PartitionResult::Error { message };
+        }
+        self.inverted.clear();
+        self.index = SearchIndex::new();
+        self.indexes = IndexManager::new();
+        self.versions = VersionStore::new();
+        self.transactions = TransactionManager::new();
+        let dummy_root = self.release_engine();
+        if let Err(message) = snapshot::install_partition(&self.data_dir, self.id, bytes) {
+            return PartitionResult::Error { message };
+        }
+        let real = match StorageEngine::open(self.id, &self.storage) {
+            Ok(engine) => engine,
+            Err(message) => return PartitionResult::Error { message },
+        };
+        let dummy = std::mem::replace(&mut self.engine, real);
+        drop(dummy);
+        let _ = std::fs::remove_dir_all(dummy_root);
+        let pending = match self.engine.load() {
+            Ok(recovery) => recovery.pending,
+            Err(message) => return PartitionResult::Error { message },
+        };
+        match self.recover(pending) {
+            Ok(()) => {
+                LOGGER.info(format!(
+                    "partition {} installed a snapshot, {} collection(s)",
+                    self.id,
+                    self.engine.collection_count()
+                ));
+                PartitionResult::Created
+            }
+            Err(message) => PartitionResult::Error { message },
+        }
+    }
+
+    /// Drops the open WAL and page handles so the replacement pages can be read.
+    ///
+    /// The returned directory holds the stand-in engine and can be removed
+    /// after that engine is dropped.
+    fn release_engine(&mut self) -> std::path::PathBuf {
+        let dummy_root = std::env::temp_dir().join(format!(
+            "kova-release-{}-{}-{}",
+            std::process::id(),
+            self.id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut config = self.storage.clone();
+        config.data_dir = dummy_root.to_string_lossy().into_owned();
+        let dummy = StorageEngine::open(self.id, &config).unwrap_or_else(|err| {
+            abort_storage(self.id, err);
+        });
+        drop(std::mem::replace(&mut self.engine, dummy));
+        dummy_root
     }
 
     fn in_transaction(&mut self, txn_id: u64, command: PartitionCommand) -> PartitionResult {
@@ -3130,6 +3210,37 @@ impl PartitionRouter {
                 None
             }
         }
+    }
+
+    /// Root directory that holds `partition-*` and `view-routes`.
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.inner.data_dir
+    }
+
+    /// Checkpoints every partition and packs the page files.
+    pub async fn snapshot_pages(&self) -> Result<Vec<u8>, String> {
+        for receiver in self.broadcast(PartitionCommand::Checkpoint) {
+            match receiver.await {
+                Ok(PartitionResult::Error { message }) => return Err(message),
+                Ok(_) => {}
+                Err(_) => return Err("partition worker dropped the checkpoint".into()),
+            }
+        }
+        snapshot::pack_tree(&self.inner.data_dir)
+    }
+
+    /// Installs a page snapshot on every partition.
+    pub async fn install_pages(&self, bytes: &[u8]) -> Result<(), String> {
+        for receiver in self.broadcast(PartitionCommand::InstallSnapshot {
+            bytes: bytes.to_vec(),
+        }) {
+            match receiver.await {
+                Ok(PartitionResult::Error { message }) => return Err(message),
+                Ok(_) => {}
+                Err(_) => return Err("partition worker dropped the snapshot".into()),
+            }
+        }
+        Ok(())
     }
 
     /// Sends a command to **every** partition and returns one reply

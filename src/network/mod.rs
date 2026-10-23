@@ -648,6 +648,14 @@ impl crate::replication::CommandApplier for StorageApplier {
         let reply = execute_command(&command, &self.router, local).await;
         bson::to_vec(&reply).unwrap_or_default()
     }
+
+    async fn snapshot(&self) -> Result<Vec<u8>, String> {
+        self.router.snapshot_pages().await
+    }
+
+    async fn install(&self, bytes: &[u8]) -> Result<(), String> {
+        self.router.install_pages(bytes).await
+    }
 }
 
 /// Auto-commit mutations travel through Raft. Reads stay on this node.

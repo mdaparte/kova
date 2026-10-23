@@ -189,7 +189,8 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   `applyTransaction` entry. Followers apply it as one WAL record.
   `begin`, staged statements, and `abort` stay on the primary. ✅ Complete.
 - **Phase 19 — Snapshot shipping:** a follower outside the retained oplog
-  installs a snapshot of the pages and replays from that index. ⚪ Planned.
+  installs a snapshot of the pages and replays from that index. An arbiter
+  does not install document pages. ✅ Complete.
 - **Phase 20 — ODBC connector:** an ODBC client runs the same SQL as
   `db.runCommand({ sql })`. The driver shape is still open. ⚪ Planned.
 - **Phase 21 — `kovadump`:** backup and restore. Restore reads a Kova dump,

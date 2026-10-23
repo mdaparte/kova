@@ -48,4 +48,10 @@ openraft::declare_raft_types!(
 #[async_trait::async_trait]
 pub trait CommandApplier: Send + Sync + 'static {
     async fn apply(&self, body: &[u8]) -> Vec<u8>;
+
+    /// Page files at the last applied oplog index.
+    async fn snapshot(&self) -> Result<Vec<u8>, String>;
+
+    /// Replaces local pages with a snapshot from the primary.
+    async fn install(&self, bytes: &[u8]) -> Result<(), String>;
 }

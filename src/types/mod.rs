@@ -254,6 +254,10 @@ pub enum PartitionCommand {
         txn_id: u64,
         ops: Vec<Document>,
     },
+    /// Flushes dirty pages so a snapshot can copy them.
+    Checkpoint,
+    /// Replaces this partition's pages with a shipped snapshot.
+    InstallSnapshot { bytes: Vec<u8> },
     /// Discards the transaction's writes.
     AbortTransaction { collection: String, txn_id: u64 },
     /// Sets or replaces a collection's document validator.
@@ -400,7 +404,9 @@ impl PartitionCommand {
             | PartitionCommand::CollMod { collection, .. } => collection,
             PartitionCommand::CreateView { source, .. } => source,
             PartitionCommand::Transactional { inner, .. } => inner.collection(),
-            PartitionCommand::CreateUser { .. }
+            PartitionCommand::Checkpoint
+            | PartitionCommand::InstallSnapshot { .. }
+            | PartitionCommand::CreateUser { .. }
             | PartitionCommand::UpdateUser { .. }
             | PartitionCommand::GrantRoles { .. }
             | PartitionCommand::CreateRole { .. }

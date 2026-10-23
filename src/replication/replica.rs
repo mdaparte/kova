@@ -382,6 +382,42 @@ impl Replica {
             Err(err) => (doc! { "ok": 0.0, "errmsg": err.to_string() }, 0),
         }
     }
+
+    /// Builds a snapshot of the pages and records the oplog index it covers.
+    pub async fn trigger_snapshot(&self) -> Result<(), String> {
+        self.raft
+            .trigger()
+            .snapshot()
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    /// Drops log entries up to `upto`, inclusive. A follower behind that
+    /// index catches up from the snapshot.
+    pub async fn purge_log(&self, upto: u64) -> Result<(), String> {
+        self.raft
+            .trigger()
+            .purge_log(upto)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn snapshot_index(&self) -> Option<u64> {
+        self.raft.metrics().borrow().snapshot.map(|id| id.index)
+    }
+
+    pub fn purged_index(&self) -> Option<u64> {
+        self.raft.metrics().borrow().purged.map(|id| id.index)
+    }
+
+    /// Replicates to a new member. `blocking` waits until it has caught up.
+    pub async fn add_learner(&self, id: u64, member: Member, blocking: bool) -> Result<(), String> {
+        self.raft
+            .add_learner(id, member, blocking)
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
 }
 
 impl Drop for Replica {
@@ -401,7 +437,7 @@ fn raft_config(set_name: &str, timing: Timing) -> Result<Arc<openraft::Config>, 
         heartbeat_interval: timing.heartbeat_ms,
         election_timeout_min: timing.election_min_ms,
         election_timeout_max: timing.election_max_ms,
-        snapshot_policy: openraft::SnapshotPolicy::Never,
+        snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(64),
         ..openraft::Config::default()
     };
     config
@@ -698,10 +734,18 @@ impl StateMachine {
 struct BuiltSnapshot {
     meta: SnapshotMeta<u64, Member>,
     bytes: Vec<u8>,
+    error: Option<String>,
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for BuiltSnapshot {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<u64>> {
+        if let Some(message) = &self.error {
+            let io_err = std::io::Error::other(message.clone());
+            return Err(StorageError::from(openraft::StorageIOError::read_snapshot(
+                Some(self.meta.signature()),
+                openraft::AnyError::new(&io_err),
+            )));
+        }
         Ok(Snapshot {
             meta: self.meta.clone(),
             snapshot: Box::new(Cursor::new(self.bytes.clone())),
@@ -745,18 +789,38 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        let meta = self.snapshot_meta.clone().unwrap_or(SnapshotMeta {
+        let built = if self.arbiter {
+            Ok(Vec::new())
+        } else {
+            self.applier.snapshot().await
+        };
+        let (bytes, error) = match built {
+            Ok(bytes) => (bytes, None),
+            Err(message) => (Vec::new(), Some(message)),
+        };
+        let snapshot_id = self
+            .last_applied
+            .map(|id| format!("{}-{}", id.leader_id.term, id.index))
+            .unwrap_or_else(|| "0".into());
+        let meta = SnapshotMeta {
             last_log_id: self.last_applied,
             last_membership: self.membership.clone(),
-            snapshot_id: self
-                .last_applied
-                .map(|id| id.index.to_string())
-                .unwrap_or_else(|| "0".into()),
-        });
-        BuiltSnapshot {
-            meta,
-            bytes: self.snapshot.clone(),
+            snapshot_id,
+        };
+        self.snapshot = if self.arbiter {
+            Vec::new()
+        } else {
+            bytes.clone()
+        };
+        self.snapshot_meta = Some(meta.clone());
+        if let Err(err) = self.persist() {
+            return BuiltSnapshot {
+                meta,
+                bytes,
+                error: Some(err.to_string()),
+            };
         }
+        BuiltSnapshot { meta, bytes, error }
     }
 
     async fn begin_receiving_snapshot(
@@ -771,6 +835,12 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         mut snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<u64>> {
         let mut bytes = Vec::new();
+        std::io::Seek::seek(&mut snapshot, std::io::SeekFrom::Start(0)).map_err(|err| {
+            StorageError::from(openraft::StorageIOError::read_snapshot(
+                None,
+                openraft::AnyError::new(&err),
+            ))
+        })?;
         std::io::Read::read_to_end(&mut snapshot, &mut bytes).map_err(|err| {
             StorageError::from(openraft::StorageIOError::read_snapshot(
                 None,
@@ -778,7 +848,20 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
             ))
         })?;
         self.snapshot_meta = Some(meta.clone());
-        self.snapshot = bytes;
+        self.snapshot = if self.arbiter {
+            Vec::new()
+        } else {
+            if let Err(err) = self.applier.install(&bytes).await {
+                let io_err = std::io::Error::other(err);
+                return Err(StorageError::from(
+                    openraft::StorageIOError::write_snapshot(
+                        Some(meta.signature()),
+                        openraft::AnyError::new(&io_err),
+                    ),
+                ));
+            }
+            bytes
+        };
         self.last_applied = meta.last_log_id;
         self.membership = meta.last_membership.clone();
         self.persist()
@@ -822,6 +905,7 @@ mod tests {
     struct Apply {
         router: PartitionRouter,
         calls: Arc<AtomicU64>,
+        installs: Arc<AtomicU64>,
     }
 
     #[async_trait::async_trait]
@@ -838,12 +922,22 @@ mod tests {
                 .expect("reply");
             bson::to_vec(&protocol::reply_document(&result)).unwrap_or_default()
         }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, String> {
+            self.router.snapshot_pages().await
+        }
+
+        async fn install(&self, bytes: &[u8]) -> Result<(), String> {
+            self.installs.fetch_add(1, Ordering::Relaxed);
+            self.router.install_pages(bytes).await
+        }
     }
 
     struct Node {
         replica: Replica,
         router: PartitionRouter,
         calls: Arc<AtomicU64>,
+        installs: Arc<AtomicU64>,
     }
 
     async fn bind_members(flags: &[(u64, bool)]) -> (Vec<TcpListener>, BTreeMap<u64, Member>) {
@@ -872,6 +966,7 @@ mod tests {
             let storage = StorageConfig::ephemeral();
             let router = PartitionRouter::with_storage(1, storage.clone());
             let calls = Arc::new(AtomicU64::new(0));
+            let installs = Arc::new(AtomicU64::new(0));
             let spec = NodeSpec {
                 id: *id,
                 set_name: "kova".into(),
@@ -881,6 +976,7 @@ mod tests {
                 applier: Arc::new(Apply {
                     router: router.clone(),
                     calls: calls.clone(),
+                    installs: installs.clone(),
                 }),
             };
             let replica = Replica::start(spec, listener).await.expect("start");
@@ -888,6 +984,7 @@ mod tests {
                 replica,
                 router,
                 calls,
+                installs,
             });
         }
         nodes[0].replica.form().await.expect("form");
@@ -1228,6 +1325,130 @@ mod tests {
                     .map(|ops| !format!("{ops:?}").contains("CLARK"))
                     .unwrap_or(true)
         }));
+        for node in &nodes {
+            node.replica.shutdown().await;
+        }
+    }
+
+    async fn wait_until(mut probe: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !probe() {
+            if tokio::time::Instant::now() > deadline {
+                panic!("timed out");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_empty_follower_catches_up_from_a_snapshot() {
+        let nodes = start_set(&[(1, false), (2, false), (3, false)]).await;
+        let leader = leader_id(&nodes).await;
+        let primary = nodes
+            .iter()
+            .find(|node| node.replica.id == leader)
+            .expect("primary");
+        let index = insert(primary, "KING").await;
+        for node in &nodes {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                node.replica.wait_applied(index),
+            )
+            .await
+            .expect("applied");
+        }
+        primary.replica.trigger_snapshot().await.expect("snapshot");
+        wait_until(|| primary.replica.snapshot_index().is_some()).await;
+        let covered = primary.replica.snapshot_index().expect("snapshot index");
+        primary.replica.purge_log(covered).await.expect("purge");
+        wait_until(|| primary.replica.purged_index().unwrap_or(0) >= covered).await;
+        let scott = insert(primary, "SCOTT").await;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let storage = StorageConfig::ephemeral();
+        let router = PartitionRouter::with_storage(1, storage.clone());
+        let installs = Arc::new(AtomicU64::new(0));
+        let member = Member {
+            addr,
+            client: "127.0.0.1:27099".into(),
+            arbiter: false,
+        };
+        let mut members = BTreeMap::new();
+        members.insert(4, member.clone());
+        let replica = Replica::start(
+            NodeSpec {
+                id: 4,
+                set_name: "kova".into(),
+                members,
+                data_dir: std::path::PathBuf::from(&storage.data_dir).join("raft-4"),
+                timing: Timing::test(),
+                applier: Arc::new(Apply {
+                    router: router.clone(),
+                    calls: Arc::new(AtomicU64::new(0)),
+                    installs: installs.clone(),
+                }),
+            },
+            listener,
+        )
+        .await
+        .expect("learner");
+        primary
+            .replica
+            .add_learner(4, member, true)
+            .await
+            .expect("catch up");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            replica.wait_applied(scott),
+        )
+        .await
+        .expect("learner applied");
+        assert!(installs.load(Ordering::Relaxed) >= 1);
+        assert_eq!(
+            names(&router).await,
+            vec!["KING".to_string(), "SCOTT".to_string()]
+        );
+
+        let arbiter_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let arbiter_addr = arbiter_listener.local_addr().expect("addr").to_string();
+        let arbiter_storage = StorageConfig::ephemeral();
+        let arbiter_router = PartitionRouter::with_storage(1, arbiter_storage.clone());
+        let arbiter_installs = Arc::new(AtomicU64::new(0));
+        let arbiter_member = Member {
+            addr: arbiter_addr,
+            client: "127.0.0.1:27098".into(),
+            arbiter: true,
+        };
+        let mut arbiter_members = BTreeMap::new();
+        arbiter_members.insert(5, arbiter_member.clone());
+        let arbiter = Replica::start(
+            NodeSpec {
+                id: 5,
+                set_name: "kova".into(),
+                members: arbiter_members,
+                data_dir: std::path::PathBuf::from(&arbiter_storage.data_dir).join("raft-5"),
+                timing: Timing::test(),
+                applier: Arc::new(Apply {
+                    router: arbiter_router.clone(),
+                    calls: Arc::new(AtomicU64::new(0)),
+                    installs: arbiter_installs.clone(),
+                }),
+            },
+            arbiter_listener,
+        )
+        .await
+        .expect("arbiter");
+        primary
+            .replica
+            .add_learner(5, arbiter_member, true)
+            .await
+            .expect("arbiter catch up");
+        assert_eq!(arbiter_installs.load(Ordering::Relaxed), 0);
+        assert!(names(&arbiter_router).await.is_empty());
+
+        replica.shutdown().await;
+        arbiter.shutdown().await;
         for node in &nodes {
             node.replica.shutdown().await;
         }

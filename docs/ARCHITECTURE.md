@@ -233,8 +233,10 @@ An arbiter is a learner: it stores the oplog, applies no documents, and
 does not vote. `begin`, staged statements, and `abort` stay on the
 primary. `commit` proposes one `applyTransaction` entry carrying the
 writes. Followers apply that entry as one WAL record and do not open a
-transaction. Sharding is not implemented. Snapshot shipping is off, so a
-follower catches up from the log.
+transaction. Sharding is not implemented. A snapshot of the page files
+goes out every 64 log entries. A follower whose log no longer overlaps
+installs that snapshot and then applies the later oplog entries. An
+arbiter does not install document pages.
 
 ## 5. Data Flow
 

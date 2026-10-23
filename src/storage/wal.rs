@@ -272,6 +272,8 @@ impl WalOp {
             | PartitionCommand::CommitTransaction { .. }
             | PartitionCommand::CommitPreview { .. }
             | PartitionCommand::ApplyTransaction { .. }
+            | PartitionCommand::Checkpoint
+            | PartitionCommand::InstallSnapshot { .. }
             | PartitionCommand::AbortTransaction { .. }
             | PartitionCommand::Explain { .. }
             | PartitionCommand::Transactional { .. }

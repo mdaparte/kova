@@ -32,7 +32,7 @@ replication, and multi-model indexing.
 | 16 | Views (`viewOn` + pipeline, optional disk Tantivy) | ✅ Complete |
 | 17 | Map projection (`mapReduce`, no `out`) | ✅ Complete |
 | 18 | Transactions in the oplog | ✅ Complete |
-| 19 | Snapshot shipping | ⚪ Planned |
+| 19 | Snapshot shipping | ✅ Complete |
 | 20 | ODBC connector | ⚪ Planned |
 | 21 | `kovadump` backup and restore | ⚪ Planned |
 | 22 | Sharding | ⚪ Planned |
@@ -498,7 +498,7 @@ Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. 
 - `find` on `local.oplog.rs` returns entries after `ts` (`$gt` / `$gte`). `ts` is the log index.
 - Inserts without `_id` receive one before the command is logged, so every replica stores the same id.
 - `beginTransaction`, each staged statement, and `abort` stay on the primary. `commit` proposes one oplog entry, `applyTransaction`, that carries the writes. Followers apply that entry as one WAL record and do not open a transaction.
-- Snapshot shipping is off (`SnapshotPolicy::Never`). A follower that falls outside the retained log cannot catch up from a document snapshot.
+- Snapshot shipping is on. After 64 log entries the primary builds a snapshot of the page files. A follower whose log no longer overlaps installs that snapshot and applies only the later oplog entries. An arbiter stores the oplog and does not install document pages.
 
 ### 11.2 Replica Sets
 
@@ -721,21 +721,20 @@ A commit's writes used to live only in the primary's worker. `beginTransaction`,
 - [x] Leave `beginTransaction`, staged statements, and `abort` off the oplog.
 - [x] Test: three voters commit a transaction on the primary, and a secondary `find` returns those documents. An abort leaves the secondary unchanged.
 
-## Phase 19 — Snapshot shipping ⚪ Planned
+## Phase 19 — Snapshot shipping ✅
 
-A follower that falls behind the retained oplog has nothing to copy. `SnapshotPolicy::Never` stays until this phase. The primary then sends a snapshot of the pages, and the follower replays the oplog from the index that snapshot covers.
+A follower that falls behind the retained oplog installs a snapshot of the pages, then applies the oplog from the index that snapshot covers. The primary builds that snapshot every 64 log entries, and when a snapshot is requested. With no `[replication]` section the process does not build or ship one.
 
-- The snapshot is the page files and the catalog, at one applied oplog index.
+- The snapshot is the page files, the catalog, and the view routes, at one applied oplog index. The WAL is not in it.
 - A follower with an empty data directory installs that snapshot, then applies only the oplog entries after it.
 - An arbiter stores the oplog and does not install document pages.
-- The single-node process, with no `[replication]` section, does not build or ship a snapshot.
 
 ### Phase 19 — Sub-tasks
 
-- [ ] Build a snapshot of the pages on the primary and record the oplog index it covers.
-- [ ] Install that snapshot on a follower and replay the oplog after that index.
-- [ ] Leave an arbiter without document pages.
-- [ ] Test: a follower with an empty data directory catches up and a `find` returns the primary's documents.
+- [x] Build a snapshot of the pages on the primary and record the oplog index it covers.
+- [x] Install that snapshot on a follower and replay the oplog after that index.
+- [x] Leave an arbiter without document pages.
+- [x] Test: a follower with an empty data directory catches up and a `find` returns the primary's documents.
 
 ## Phase 20 — ODBC connector ⚪ Planned
 
@@ -804,7 +803,6 @@ A replica set is still a full copy of every document on each voter. This phase s
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| A follower outside the retained log cannot catch up | 19 | Snapshot shipping is off (`SnapshotPolicy::Never`). |
 | No ODBC client | 20 | SQL is the MongoDB command `sql`. The driver shape is still open. |
 | No backup binary | 21 | `kovadump` restores a Kova dump, `pg_dump`, `mongodump`, or `mysqldump`. |
 | Sharding is not implemented | 22 | Routing scheme is chosen when the phase starts. |
@@ -865,6 +863,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–18 are complete. Still open: snapshot shipping (Phase 19),
-the ODBC connector (Phase 20), `kovadump` (Phase 21), and sharding
-(Phase 22).*
+*Phases 1–19 are complete. Still open: the ODBC connector (Phase 20),
+`kovadump` (Phase 21), and sharding (Phase 22).*
