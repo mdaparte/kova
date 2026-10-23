@@ -32,6 +32,10 @@ replication, and multi-model indexing.
 | 16 | Views (`viewOn` + pipeline, optional disk Tantivy) | ✅ Complete |
 | 17 | Map projection (`mapReduce`, no `out`) | ✅ Complete |
 | 18 | Transactions in the oplog | ✅ Complete |
+| 19 | Snapshot shipping | ⚪ Planned |
+| 20 | ODBC connector | ⚪ Planned |
+| 21 | `kovadump` backup and restore | ⚪ Planned |
+| 22 | Sharding | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -717,6 +721,65 @@ A commit's writes used to live only in the primary's worker. `beginTransaction`,
 - [x] Leave `beginTransaction`, staged statements, and `abort` off the oplog.
 - [x] Test: three voters commit a transaction on the primary, and a secondary `find` returns those documents. An abort leaves the secondary unchanged.
 
+## Phase 19 — Snapshot shipping ⚪ Planned
+
+A follower that falls behind the retained oplog has nothing to copy. `SnapshotPolicy::Never` stays until this phase. The primary then sends a snapshot of the pages, and the follower replays the oplog from the index that snapshot covers.
+
+- The snapshot is the page files and the catalog, at one applied oplog index.
+- A follower with an empty data directory installs that snapshot, then applies only the oplog entries after it.
+- An arbiter stores the oplog and does not install document pages.
+- The single-node process, with no `[replication]` section, does not build or ship a snapshot.
+
+### Phase 19 — Sub-tasks
+
+- [ ] Build a snapshot of the pages on the primary and record the oplog index it covers.
+- [ ] Install that snapshot on a follower and replay the oplog after that index.
+- [ ] Leave an arbiter without document pages.
+- [ ] Test: a follower with an empty data directory catches up and a `find` returns the primary's documents.
+
+## Phase 20 — ODBC connector ⚪ Planned
+
+SQL already runs inside the server: `db.runCommand({ sql: "..." })` on the MongoDB wire, executed by DataFusion. This phase adds an ODBC connector so a client that speaks ODBC can send that same SQL.
+
+The connector is a separate driver. It accepts an SQL string from the ODBC client and runs it through the existing DataFusion path. It does not add a second SQL engine. The shape of the driver (which driver manager, which platforms, how a DSN names the Kova host) is still open and will be fixed when this phase starts.
+
+### Phase 20 — Sub-tasks
+
+- [ ] Accept an SQL string over ODBC and run it through the DataFusion path.
+- [ ] Return the rows to the ODBC client.
+- [ ] Fix the driver manager, the platforms, and the DSN when the phase starts.
+- [ ] Test: an ODBC client runs a `SELECT` and gets the same rows as `db.runCommand({ sql })`.
+
+## Phase 21 — `kovadump` backup and restore ⚪ Planned
+
+`kovadump` is a second binary. It backs up a running Kova and restores into one. Backup and restore talk to the server over the MongoDB port. Restore writes through the normal insert path, so the WAL, the indexes, and replication see ordinary writes.
+
+Backup writes a Kova dump. Restore reads one of these four:
+
+- A Kova dump, the file `kovadump` itself wrote.
+- A PostgreSQL dump (`pg_dump` plain SQL). One table becomes one collection.
+- A MongoDB dump (`mongodump`: BSON files and their metadata, or a `mongodump` archive).
+- A MySQL dump (`mysqldump` SQL). One table becomes one collection.
+
+Other container formats (PostgreSQL custom archives, MySQL binary logs) wait until they are named. The exact dialect of each foreign dump is pinned when this phase starts.
+
+### Phase 21 — Sub-tasks
+
+- [ ] `kovadump` backup writes a Kova dump of a database on a running server.
+- [ ] Restore of that dump recreates the collections.
+- [ ] Restore a `pg_dump` plain-SQL file, a `mysqldump` SQL file, and a `mongodump` directory or archive.
+- [ ] Test: each of the four inputs restores, and a `find` returns the loaded documents.
+
+## Phase 22 — Sharding ⚪ Planned
+
+A replica set is still a full copy of every document on each voter. This phase splits documents across shards. The routing scheme (consistent hashing or a key range) and the shard router are chosen when the phase starts. A shard can itself be a replica set.
+
+### Phase 22 — Sub-tasks
+
+- [ ] Choose the routing scheme and the place the router runs.
+- [ ] Send a command to the shard that owns the document.
+- [ ] Test: two shards hold different documents of one collection, and a `find` on the router returns both.
+
 ## Architecture Principles
 
 1. **Hybrid memory+disk**: documents live in pages. RAM holds the buffer
@@ -741,8 +804,10 @@ A commit's writes used to live only in the primary's worker. `beginTransaction`,
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| A follower outside the retained log cannot catch up | — | Snapshot shipping is off (`SnapshotPolicy::Never`). |
-| Sharding is not implemented | — | Left as a later extension. |
+| A follower outside the retained log cannot catch up | 19 | Snapshot shipping is off (`SnapshotPolicy::Never`). |
+| No ODBC client | 20 | SQL is the MongoDB command `sql`. The driver shape is still open. |
+| No backup binary | 21 | `kovadump` restores a Kova dump, `pg_dump`, `mongodump`, or `mysqldump`. |
+| Sharding is not implemented | 22 | Routing scheme is chosen when the phase starts. |
 
 ## Architecture Diagram (updated)
 
@@ -800,5 +865,6 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–18 are complete. Still open, without a phase number: snapshot
-shipping, and sharding.*
+*Phases 1–18 are complete. Still open: snapshot shipping (Phase 19),
+the ODBC connector (Phase 20), `kovadump` (Phase 21), and sharding
+(Phase 22).*

@@ -188,6 +188,14 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 18 — Transactions in the oplog:** `commit` proposes one
   `applyTransaction` entry. Followers apply it as one WAL record.
   `begin`, staged statements, and `abort` stay on the primary. ✅ Complete.
+- **Phase 19 — Snapshot shipping:** a follower outside the retained oplog
+  installs a snapshot of the pages and replays from that index. ⚪ Planned.
+- **Phase 20 — ODBC connector:** an ODBC client runs the same SQL as
+  `db.runCommand({ sql })`. The driver shape is still open. ⚪ Planned.
+- **Phase 21 — `kovadump`:** backup and restore. Restore reads a Kova dump,
+  `pg_dump` plain SQL, `mongodump`, or `mysqldump` SQL. ⚪ Planned.
+- **Phase 22 — Sharding:** documents split across shards. The routing
+  scheme is chosen when the phase starts. ⚪ Planned.
 
 ---
 

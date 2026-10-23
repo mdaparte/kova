@@ -301,6 +301,10 @@ about and ignored.
 | 16 | Lucene-like views and facet queries |
 | 17 | Map projection: `mapReduce` returns `{ key, value }`. No `out` collection |
 | 18 | Transactions in the oplog: a commit is one `applyTransaction` entry |
+| 19 | Snapshot shipping: a lagged follower installs pages and replays the oplog |
+| 20 | ODBC connector for the existing DataFusion SQL path |
+| 21 | `kovadump`: backup, and restore from Kova, PostgreSQL, MongoDB, and MySQL dumps |
+| 22 | Sharding: routing scheme chosen when the phase starts |
 
 ---
 
