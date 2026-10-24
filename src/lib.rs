@@ -4,6 +4,7 @@
 //! crate built as `libkova.so`; its entry points live in [`odbc`].
 
 mod config;
+pub mod dump;
 mod index;
 mod logger;
 mod metrics;

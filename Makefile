@@ -4,8 +4,11 @@
 #   make release      optimized build
 #   make test         full test suite
 #   make test-sql     query engine tests, output visible
-#   make run-debug    server with debug logs
+#   make run-debug    database engine with debug logs
+#   make run-dump     kovadump (ARGS="backup --db db db.kdmp")
 #   make seed         load Oracle sample into database `db`
+#   make dump         backup database `db` to db.kdmp
+#   make restore      restore db.kdmp into database `db`
 #
 # Config overrides (optional, only exported when set on the make command line):
 #   make run KOVA_PORT=27018 KOVA_LOG_LEVEL=debug
@@ -27,7 +30,7 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug seed indexes server-status views security demos doc clean
+.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore doc clean
 
 help:
 	@printf '%s\n' \
@@ -42,22 +45,29 @@ help:
 		'  fmt-check    cargo fmt --check' \
 		'  clippy       cargo clippy --all-targets -- -D warnings' \
 		'  lint         fmt-check + clippy' \
-		'  run          cargo run' \
-		'  run-release  cargo run --release' \
-		'  run-debug    cargo run with KOVA_LOG_LEVEL=debug' \
+		'  run          database engine (kova)' \
+		'  run-release  database engine, release build' \
+		'  run-debug    database engine with KOVA_LOG_LEVEL=debug' \
+		'  run-dump     kovadump; ARGS="backup --db db db.kdmp"' \
+		'  run-dump-debug  kovadump with KOVA_LOG_LEVEL=debug' \
 		'  seed         Oracle sample, emp indexes, and views into database db' \
 		'  indexes      index tour over the seeded emp collection' \
 		'  server-status  serverStatus counters' \
 		'  views        checks the views seed left on emp' \
 		'  security     users, roles, and authenticate' \
 		'  demos        server-status, views, then security' \
+		'  dump         backup database db to db.kdmp' \
+		'  restore      restore DUMP into database db (default db.kdmp)' \
 		'  doc          cargo doc --no-deps --open' \
 		'  clean        cargo clean' \
 		'' \
-		'The mongosh targets talk to a server that is already running.' \
+		'The mongosh and kovadump targets talk to a server that is already running.' \
 		'  make seed                 localhost:27018' \
 		'  make views                localhost:27018' \
-		'  make demos KOVA_PORT=27018'
+		'  make demos KOVA_PORT=27018' \
+		'  make dump                 database db -> db.kdmp' \
+		'  make restore DUMP=pg.sql  database db, port 27018' \
+		'  make dump KOVA_DB=shop KOVA_PORT=27019 DUMP=shop.kdmp'
 
 build:
 	$(CARGO) build
@@ -90,13 +100,19 @@ clippy:
 lint: fmt-check clippy
 
 run:
-	$(CARGO) run
+	$(CARGO) run --bin kova
 
 run-release:
-	$(CARGO) run --release
+	$(CARGO) run --release --bin kova
 
 run-debug:
-	KOVA_LOG_LEVEL=debug $(CARGO) run
+	KOVA_LOG_LEVEL=debug $(CARGO) run --bin kova
+
+run-dump:
+	$(CARGO) run --bin kovadump -- $(if $(ARGS),$(ARGS),--help)
+
+run-dump-debug:
+	KOVA_LOG_LEVEL=debug $(CARGO) run --bin kovadump -- $(if $(ARGS),$(ARGS),--help)
 
 # Reloads the Oracle Scott sample into database `db`, then creates the
 # five emp indexes and the well_paid / emp_search views. Drops that
@@ -127,6 +143,24 @@ security:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/security.js
 
 demos: server-status views security
+
+# Backup and restore talk to a server that is already listening.
+# Database defaults to db, port to 27018, file to db.kdmp.
+#   make dump
+#   make restore
+#   make restore DUMP=pg.sql KOVA_DB=shop KOVA_PORT=27019
+#   make restore YES=1
+#   make restore YES=1 TABLES="proposta_venda venda"
+KOVA_DB ?= db
+DUMP ?= db.kdmp
+YES ?=
+TABLES ?=
+
+dump:
+	$(CARGO) run --quiet --bin kovadump -- backup --host 127.0.0.1 --port $(if $(KOVA_PORT),$(KOVA_PORT),27018) --db $(KOVA_DB) $(DUMP)
+
+restore:
+	$(CARGO) run --quiet --bin kovadump -- restore --host 127.0.0.1 --port $(if $(KOVA_PORT),$(KOVA_PORT),27018) --db $(KOVA_DB) $(if $(YES),--yes,) $(foreach table,$(TABLES),--table $(table)) $(DUMP)
 
 doc:
 	$(CARGO) doc --no-deps --open

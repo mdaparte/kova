@@ -196,10 +196,14 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 21 — ODBC catalog for GUI clients:** `SQLTables`, `SQLColumns`,
   and `SQLGetInfo` match the layout a database IDE reads by column position.
   LibreOffice Base lists the collections and opens the SQL window. ⚪ Planned.
-- **Phase 22 — `kovadump`:** backup and restore. Restore reads a Kova dump,
-  `pg_dump` plain SQL, `mongodump`, or `mysqldump` SQL. ⚪ Planned.
+- **Phase 22 — `kovadump`:** backup and restore over the MongoDB port.
+  Restore reads a Kova dump, `pg_dump` plain SQL, `mongodump`, or
+  `mysqldump` SQL, and writes through `insert`. ✅ Complete.
 - **Phase 23 — Sharding:** documents split across shards. The routing
   scheme is chosen when the phase starts. ⚪ Planned.
+- **Phase 24 — Physical catalog (`admin`):** database `admin` holds
+  databases, collections, fields, and indexes. Startup reads those rows
+  instead of scanning every document. ⚪ Planned.
 
 ---
 

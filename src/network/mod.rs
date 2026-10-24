@@ -348,6 +348,19 @@ struct Session {
 /// The default port is `27018`, so a local mongod can keep `27017`.
 /// It can be changed in `kova.toml` or overridden with the `KOVA_PORT`
 /// environment variable (environment wins over file).
+/// Accepts clients on a listener the caller already bound.
+///
+/// `kovadump` tests use this so they can talk to a server without
+/// taking the port in `kova.toml`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn serve_bound(
+    listener: TcpListener,
+    router: PartitionRouter,
+) -> std::io::Result<()> {
+    let table = ConnTable::limited(128, 0);
+    run_listener(listener, router, None, table).await
+}
+
 pub async fn start_server(
     router: PartitionRouter,
     replica: Option<Arc<crate::replication::Replica>>,

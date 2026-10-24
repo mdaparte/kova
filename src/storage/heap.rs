@@ -31,6 +31,9 @@ struct CollectionState {
     /// transactions existed.
     validator: Option<Document>,
     doc_count: u64,
+    /// `_id` values already stored. Insert checks this before writing,
+    /// so a duplicate is refused without rereading every page.
+    ids: HashSet<String>,
 }
 
 struct UserRecord {
@@ -70,6 +73,7 @@ impl CollectionState {
             indexes: Vec::new(),
             validator: None,
             doc_count: 0,
+            ids: HashSet::new(),
         }
     }
 }
@@ -193,6 +197,23 @@ impl Heap {
             self.live.insert(CATALOG_PAGE);
         }
         self.next_page_id = self.next_page_id.max(max_id.saturating_add(1)).max(2);
+        self.collect_ids(pool)?;
+        Ok(())
+    }
+
+    /// One pass over the pages so later inserts can see an existing `_id`
+    /// without walking the collection again.
+    fn collect_ids(&mut self, pool: &mut BufferPool) -> Result<(), String> {
+        let names: Vec<String> = self.collections.keys().cloned().collect();
+        for name in names {
+            let mut ids = HashSet::new();
+            self.for_each_in(pool, &name, &mut |doc| {
+                ids.insert(document_id_string(doc));
+            })?;
+            if let Some(state) = self.collections.get_mut(&name) {
+                state.ids = ids;
+            }
+        }
         Ok(())
     }
 
@@ -621,7 +642,7 @@ impl Heap {
         let mut stored = Vec::new();
         for document in documents {
             let id = document_id_string(&document);
-            if self.contains_id(pool, collection, &id)? {
+            if self.contains_id(collection, &id) {
                 continue;
             }
             self.place(pool, collection, &document)?;
@@ -692,6 +713,9 @@ impl Heap {
         collection: &str,
         id: &str,
     ) -> Result<Option<Document>, String> {
+        if !self.contains_id(collection, id) {
+            return Ok(None);
+        }
         let mut found = None;
         self.for_each_in(pool, collection, &mut |doc| {
             if found.is_none() && document_id_string(doc) == id {
@@ -866,6 +890,11 @@ impl Heap {
                 }
             }
         }
+        if let Some(state) = self.collections.get_mut(collection) {
+            for doc in &removed {
+                state.ids.remove(&document_id_string(doc));
+            }
+        }
         Ok(removed)
     }
 
@@ -931,51 +960,50 @@ impl Heap {
         Ok(Some((count, size)))
     }
 
-    fn contains_id(
-        &mut self,
-        pool: &mut BufferPool,
-        collection: &str,
-        id: &str,
-    ) -> Result<bool, String> {
-        let mut found = false;
-        self.for_each_in(pool, collection, &mut |doc| {
-            if document_id_string(doc) == id {
-                found = true;
-            }
-        })?;
-        Ok(found)
+    fn contains_id(&self, collection: &str, id: &str) -> bool {
+        self.collections
+            .get(collection)
+            .is_some_and(|state| state.ids.contains(id))
     }
 
+    fn note_stored(&mut self, collection: &str, document: &Document) {
+        let state = self.collections.get_mut(collection).unwrap();
+        state.doc_count += 1;
+        state.ids.insert(document_id_string(document));
+    }
+
+    /// Appends to the last normal page. When that page is full, the
+    /// document starts a new page. Earlier pages stay as they are.
     fn place(
         &mut self,
         pool: &mut BufferPool,
         collection: &str,
         document: &Document,
     ) -> Result<(), String> {
-        let pages = self.collections[collection].pages.clone();
-        let heads = self.collections[collection].overflow_heads.clone();
-        for page_id in pages {
-            if heads.contains(&page_id) {
-                continue;
-            }
+        let tail = self.collections[collection]
+            .pages
+            .iter()
+            .rev()
+            .copied()
+            .find(|page_id| !self.collections[collection].overflow_heads.contains(page_id));
+        if let Some(page_id) = tail {
             let mut docs = self.read_docs(pool, page_id)?;
             docs.push(document.clone());
             if encode_docs(collection, &docs, self.capacity()).is_ok() {
                 self.write_normal(pool, collection, page_id, &docs)?;
-                self.collections.get_mut(collection).unwrap().doc_count += 1;
+                self.note_stored(collection, document);
                 return Ok(());
             }
         }
         if encode_docs(collection, std::slice::from_ref(document), self.capacity()).is_ok() {
             let payload = encode_docs(collection, std::slice::from_ref(document), self.capacity())?;
             let id = self.alloc(pool, payload)?;
-            let state = self.collections.get_mut(collection).unwrap();
-            state.pages.push(id);
-            state.doc_count += 1;
+            self.collections.get_mut(collection).unwrap().pages.push(id);
+            self.note_stored(collection, document);
             return Ok(());
         }
         self.attach_overflow(pool, collection, document)?;
-        self.collections.get_mut(collection).unwrap().doc_count += 1;
+        self.note_stored(collection, document);
         Ok(())
     }
 

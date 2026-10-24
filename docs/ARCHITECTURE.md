@@ -311,6 +311,7 @@ about and ignored.
 | 21 | ODBC catalog for GUI clients: `SQLTables`, `SQLColumns`, `SQLGetInfo` |
 | 22 | `kovadump`: backup, and restore from Kova, PostgreSQL, MongoDB, and MySQL dumps |
 | 23 | Sharding: routing scheme chosen when the phase starts |
+| 24 | Physical catalog: database `admin` holds databases, collections, fields, and indexes. Startup reads those rows |
 
 ---
 

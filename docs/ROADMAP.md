@@ -35,8 +35,9 @@ replication, and multi-model indexing.
 | 19 | Snapshot shipping | ✅ Complete |
 | 20 | ODBC connector | ✅ Complete |
 | 21 | ODBC catalog for GUI clients | ⚪ Planned |
-| 22 | `kovadump` backup and restore | ⚪ Planned |
+| 22 | `kovadump` backup and restore | ✅ Complete |
 | 23 | Sharding | ⚪ Planned |
+| 24 | Physical catalog (`admin`) | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -765,25 +766,34 @@ Windows ODBC, `?` parameter binding, and DBeaver stay out. DBeaver Community has
 - [ ] `SQLGetInfo` answers the info types a GUI asks, including quoted identifier case (93). An unknown info type returns a zero or an empty string. It does not return `HYC00`.
 - [ ] Test: LibreOffice Base on DSN `Kova` lists the collections of `db` and **Ferramentas → SQL** opens. `isql` `help` and `help emp` still return their rows.
 
-## Phase 22 — `kovadump` backup and restore ⚪ Planned
+## Phase 22 — `kovadump` backup and restore ✅
 
-`kovadump` is a second binary. It backs up a running Kova and restores into one. Backup and restore talk to the server over the MongoDB port. Restore writes through the normal insert path, so the WAL, the indexes, and replication see ordinary writes.
+`kovadump` is a second binary, `target/debug/kovadump`. It backs up a running Kova and restores into one. Backup and restore talk to the server over the MongoDB port. Restore writes through `insert` (and `create` / `createIndexes` / `create` of a view), so the WAL, the indexes, and replication see ordinary writes.
 
-Backup writes a Kova dump. Restore reads one of these four:
+```text
+kovadump backup  --db shop shop.kdmp
+kovadump restore --db shop shop.kdmp
+```
 
-- A Kova dump, the file `kovadump` itself wrote.
-- A PostgreSQL dump (`pg_dump` plain SQL). One table becomes one collection.
-- A MongoDB dump (`mongodump`: BSON files and their metadata, or a `mongodump` archive).
-- A MySQL dump (`mysqldump` SQL). One table becomes one collection.
+`--host` defaults to `127.0.0.1` and `--port` to `27018`. `--user` and `--password` are both set, or both omitted. Omit them while security is off.
 
-Other container formats (PostgreSQL custom archives, MySQL binary logs) wait until they are named. The exact dialect of each foreign dump is pinned when this phase starts.
+Backup writes a Kova dump of one database: collections (documents and indexes, except the generated `_id_` index) and views. Restore drops a view that reads a collection being replaced, then drops and recreates each collection in the dump, then recreates the dumped views. A collection not named in the dump is left in place.
+
+The four inputs restore accepts:
+
+- **Kova dump 1.** Magic `KOVADMP1`, then BSON documents whose `kind` is `collection`, `document`, `index`, or `view`.
+- **`pg_dump` plain SQL** (not the custom archive). `CREATE TABLE`, text-format `COPY ... FROM stdin` ended by `\.`, and `INSERT INTO ... VALUES`. The schema is dropped (`public.emp` becomes `emp`). COPY values use the column type. `SET`, `ALTER`, `CREATE INDEX`, and dollar-quoted function bodies are skipped. Binary `COPY` is refused.
+- **`mysqldump` SQL.** Backtick identifiers, `CREATE TABLE`, and extended `INSERT` with backslash string escapes. `LOCK TABLES` is skipped.
+- **`mongodump` directory or archive.** A directory is `<db>/<collection>.bson` plus optional `<collection>.metadata.json`. A dump root uses the subdirectory named by `--db`, or the only database subdirectory. An archive is format `0.1`: magic `0x8199e26d`, a prelude block, then namespace blocks ended by `0xffffffff`. The CRC is not checked. `timeseries` is refused. Names starting with `system.` are skipped.
+
+PostgreSQL custom archives and MySQL binary logs stay out.
 
 ### Phase 22 — Sub-tasks
 
-- [ ] `kovadump` backup writes a Kova dump of a database on a running server.
-- [ ] Restore of that dump recreates the collections.
-- [ ] Restore a `pg_dump` plain-SQL file, a `mysqldump` SQL file, and a `mongodump` directory or archive.
-- [ ] Test: each of the four inputs restores, and a `find` returns the loaded documents.
+- [x] `kovadump` backup writes a Kova dump of a database on a running server.
+- [x] Restore of that dump recreates the collections.
+- [x] Restore a `pg_dump` plain-SQL file, a `mysqldump` SQL file, and a `mongodump` directory or archive.
+- [x] Test: each of the four inputs restores, and a `find` returns the loaded documents.
 
 ## Phase 23 — Sharding ⚪ Planned
 
@@ -794,6 +804,30 @@ A replica set is still a full copy of every document on each voter. This phase s
 - [ ] Choose the routing scheme and the place the router runs.
 - [ ] Send a command to the shard that owns the document.
 - [ ] Test: two shards hold different documents of one collection, and a `find` on the router returns both.
+
+## Phase 24 — Physical catalog (`admin`) ⚪ Planned
+
+A fresh `mongod` has a database named `admin`. Kova has no such database. Collection names are found by scanning page files. The search index, the secondary indexes, and the in-memory `_id` set are rebuilt by walking every document at startup (`reindex_all` in `src/storage/mod.rs`). The catalog page records the applied LSN, index specs, users, and views. It is not a list of databases, collections, and fields.
+
+This phase adds database `admin` with the instance. It holds catalog collections, not a second copy of the documents:
+
+- `admin.databases`
+- `admin.collections`
+- `admin.fields` — field name and type
+- `admin.indexes`
+
+Users, roles, and views move into `admin` as well, so startup reads one catalog. `listDatabases` returns `admin` before any user database exists.
+
+A create of a database, collection, or index, and the first time a field appears, updates these collections through the same WAL as the write. Startup reads those rows. It does not scan every page file to learn which collections exist, and it does not walk every document to rebuild the search index, the secondary indexes, or the `_id` set. A later `find` still reads the document from its page.
+
+### Phase 24 — Sub-tasks
+
+- [ ] A fresh process has database `admin`. `listDatabases` returns it with no user data.
+- [ ] `admin.databases`, `admin.collections`, `admin.fields`, and `admin.indexes` store the catalog. A field row is the name and the type.
+- [ ] Creating a database, collection, index, or a new field updates that catalog in the same WAL record as the write.
+- [ ] Users, roles, and views are read from `admin`.
+- [ ] Startup reads the catalog. It does not discover collections by scanning page files, and it does not walk every document to rebuild the search index, the secondary indexes, or the `_id` set.
+- [ ] Test: restart a process whose documents do not fit in the buffer pool. Startup does not scan those documents. `listDatabases`, `listCollections`, and the field list match the process that shut down. `find` still returns a document from its page.
 
 ## Architecture Principles
 
@@ -820,8 +854,8 @@ A replica set is still a full copy of every document on each voter. This phase s
 | Gap | Phase | Notes |
 |-----|-------|-------|
 | GUI ODBC clients get an empty table list | 21 | LibreOffice Base reads `SQLTables` by position and drops the list when `SQLGetInfo` fails. |
-| No backup binary | 22 | `kovadump` restores a Kova dump, `pg_dump`, `mongodump`, or `mysqldump`. |
 | Sharding is not implemented | 23 | Routing scheme is chosen when the phase starts. |
+| Startup walks every document to rebuild indexes | 24 | `admin` holds databases, collections, fields, and indexes. Startup reads those rows. |
 
 ## Architecture Diagram (updated)
 
@@ -879,5 +913,6 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–20 are complete. Still open: ODBC catalog for GUI clients
-(Phase 21), `kovadump` (Phase 22), and sharding (Phase 23).*
+*Phases 1–20 and 22 are complete. Still open: ODBC catalog for GUI
+clients (Phase 21), sharding (Phase 23), and the physical `admin`
+catalog (Phase 24).*
