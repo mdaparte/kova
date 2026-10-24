@@ -1128,6 +1128,7 @@ async fn execute_command(
 ///
 /// `FROM`, `JOIN`, `DESCRIBE`, and `SHOW COLUMNS` all contribute. See
 /// [`sql_table_names`] when the statement names more than one.
+#[cfg(test)]
 fn sql_table_name(sql: &str) -> Option<String> {
     sql_table_names(sql).into_iter().next()
 }

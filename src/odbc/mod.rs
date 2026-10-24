@@ -59,9 +59,11 @@ const SQL_VARCHAR: i16 = 12;
 const SQL_BIGINT: i16 = -5;
 const SQL_DOUBLE: i16 = 8;
 const SQL_BIT: i16 = -7;
+const SQL_TYPE_TIMESTAMP: i16 = 93;
 
 const SQL_C_CHAR: i16 = 1;
 const SQL_C_LONG: i16 = 4;
+const SQL_C_SHORT: i16 = 5;
 const SQL_C_SBIGINT: i16 = -5;
 const SQL_C_DOUBLE: i16 = 8;
 const SQL_C_BIT: i16 = -7;
@@ -78,9 +80,20 @@ const SQL_DESC_NAME: u16 = 1011;
 const SQL_DRIVER_NAME: u16 = 6;
 const SQL_DRIVER_VER: u16 = 7;
 const SQL_ODBC_VER: u16 = 10;
+const SQL_DATA_SOURCE_NAME: u16 = 2;
+const SQL_SEARCH_PATTERN_ESCAPE: u16 = 14;
+const SQL_DATABASE_NAME: u16 = 16;
 const SQL_DBMS_NAME: u16 = 17;
 const SQL_DBMS_VER: u16 = 18;
 const SQL_IDENTIFIER_QUOTE_CHAR: u16 = 29;
+const SQL_IDENTIFIER_CASE: u16 = 28;
+const SQL_QUOTED_IDENTIFIER_CASE: u16 = 93;
+const SQL_FILE_USAGE: u16 = 84;
+const SQL_SCROLL_OPTIONS: u16 = 44;
+const SQL_ACCESSIBLE_TABLES: u16 = 19;
+const SQL_COLUMN_ALIAS: u16 = 87;
+const SQL_IC_SENSITIVE: u32 = 3;
+const SQL_SO_FORWARD_ONLY: u32 = 1;
 const SQL_DRIVER_ODBC_VER: u16 = 77;
 
 const SQL_DIAG_NUMBER: i16 = 2;
@@ -724,11 +737,37 @@ fn odbc_like(pattern: &[u8], value: &[u8]) -> bool {
 
 fn type_selected(filter: Option<&str>, kind: &str) -> bool {
     match filter {
-        None | Some("") => true,
-        Some(filter) => filter
-            .split(',')
-            .any(|part| part.trim().eq_ignore_ascii_case(kind)),
+        None | Some("") | Some("%") => true,
+        Some(filter) => filter.split(',').any(|part| {
+            let part = part.trim().trim_matches('\'');
+            part == "%" || part.eq_ignore_ascii_case(kind)
+        }),
     }
+}
+
+/// `SQLTables(NULL, NULL, NULL, "%")` asks for the type names only.
+/// LibreOffice fills the table-type filter from column 4 of that result.
+fn table_type_probe(table: &Option<String>, kind: &Option<String>) -> bool {
+    table.as_deref().unwrap_or("").is_empty() && kind.as_deref() == Some("%")
+}
+
+/// Column order is the ODBC `SQLTables` result: catalog, schema, name,
+/// type, remarks. LibreOffice reads the name from column 3 and the type
+/// from column 4, by position.
+fn table_catalog_row(name: Option<&str>, kind: Option<&str>) -> Vec<Cell> {
+    vec![
+        Cell::Null,
+        Cell::Null,
+        match name {
+            Some(name) => Cell::Text(name.to_string()),
+            None => Cell::Null,
+        },
+        match kind {
+            Some(kind) => Cell::Text(kind.to_string()),
+            None => Cell::Null,
+        },
+        Cell::Null,
+    ]
 }
 
 fn odbc_table_type(mongo_type: &str) -> &'static str {
@@ -972,6 +1011,21 @@ fn set_result(stmt_id: u64, columns: Vec<Column>, rows: Vec<Vec<Cell>>) -> i16 {
 }
 
 fn tables_id(stmt_id: u64, table: Option<String>, kind: Option<String>) -> i16 {
+    let headers = [
+        "TABLE_CAT",
+        "TABLE_SCHEM",
+        "TABLE_NAME",
+        "TABLE_TYPE",
+        "REMARKS",
+    ];
+    if table_type_probe(&table, &kind) {
+        let rows = ["TABLE", "VIEW"]
+            .into_iter()
+            .map(|kind_name| table_catalog_row(None, Some(kind_name)))
+            .collect();
+        let (columns, rows) = text_result(&headers, rows);
+        return set_result(stmt_id, columns, rows);
+    }
     let listed = match catalog_round_trip(stmt_id, bson::doc! { "listCollections": 1 }) {
         Ok(listed) => listed,
         Err(rc) => return rc,
@@ -988,13 +1042,10 @@ fn tables_id(stmt_id: u64, table: Option<String>, kind: Option<String>) -> i16 {
             if !odbc_matches(table.as_deref(), name) || !type_selected(kind.as_deref(), kind_name) {
                 return None;
             }
-            Some(vec![
-                Cell::Text(name.to_string()),
-                Cell::Text(kind_name.to_string()),
-            ])
+            Some(table_catalog_row(Some(name), Some(kind_name)))
         })
         .collect();
-    let (columns, rows) = text_result(&["TABLE_NAME", "TABLE_TYPE"], rows);
+    let (columns, rows) = text_result(&headers, rows);
     set_result(stmt_id, columns, rows)
 }
 
@@ -1045,19 +1096,70 @@ fn columns_id(stmt_id: u64, table: Option<String>, column: Option<String>) -> i1
             }
         }
         for (position, (field, type_name)) in fields.into_iter().enumerate() {
+            let data_type = odbc_sql_type(type_name);
             rows.push(vec![
+                Cell::Null,
+                Cell::Null,
                 Cell::Text(name.clone()),
                 Cell::Text(field),
+                Cell::Int(i64::from(data_type)),
                 Cell::Text(type_name.to_string()),
-                Cell::Text((position + 1).to_string()),
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Int(i64::from(SQL_NULLABLE)),
+                Cell::Null,
+                Cell::Null,
+                Cell::Int(i64::from(data_type)),
+                Cell::Null,
+                Cell::Null,
+                Cell::Int(position as i64 + 1),
+                Cell::Text("YES".to_string()),
             ]);
         }
     }
-    let (columns, rows) = text_result(
-        &["TABLE_NAME", "COLUMN_NAME", "TYPE_NAME", "ORDINAL_POSITION"],
+    let (mut columns, rows) = text_result(
+        &[
+            "TABLE_CAT",
+            "TABLE_SCHEM",
+            "TABLE_NAME",
+            "COLUMN_NAME",
+            "DATA_TYPE",
+            "TYPE_NAME",
+            "COLUMN_SIZE",
+            "BUFFER_LENGTH",
+            "DECIMAL_DIGITS",
+            "NUM_PREC_RADIX",
+            "NULLABLE",
+            "REMARKS",
+            "COLUMN_DEF",
+            "SQL_DATA_TYPE",
+            "SQL_DATETIME_SUB",
+            "CHAR_OCTET_LENGTH",
+            "ORDINAL_POSITION",
+            "IS_NULLABLE",
+        ],
         rows,
     );
+    for index in [4, 10, 13, 16] {
+        if let Some(column) = columns.get_mut(index) {
+            column.kind = SQL_INTEGER;
+            column.size = 10;
+        }
+    }
     set_result(stmt_id, columns, rows)
+}
+
+fn odbc_sql_type(type_name: &str) -> i16 {
+    match type_name {
+        "INTEGER" => SQL_INTEGER,
+        "BIGINT" => SQL_BIGINT,
+        "DOUBLE" => SQL_DOUBLE,
+        "BIT" => SQL_BIT,
+        "TIMESTAMP" => SQL_TYPE_TIMESTAMP,
+        _ => SQL_VARCHAR,
+    }
 }
 
 fn fetch_id(stmt_id: u64) -> i16 {
@@ -1187,6 +1289,20 @@ unsafe fn write_bound(cell: &Cell, binding: &Binding) -> Result<Written, (&'stat
                 Ok(Written::Ok)
             }
         }
+        SQL_C_SHORT => {
+            let value = cell_i64(cell)?;
+            let value = i16::try_from(value).map_err(|_| {
+                (
+                    "22003",
+                    "numeric value is out of range for a 16-bit integer".to_string(),
+                )
+            })?;
+            (target as *mut i16).write(value);
+            if !indicator.is_null() {
+                *indicator = 2;
+            }
+            Ok(Written::Ok)
+        }
         SQL_C_LONG => {
             let value = cell_i64(cell)?;
             let value = i32::try_from(value).map_err(|_| {
@@ -1276,14 +1392,26 @@ fn cell_bit(cell: &Cell) -> Result<bool, (&'static str, String)> {
     }
 }
 
-fn info_text(info_type: u16) -> Option<&'static str> {
+enum InfoValue {
+    Text(&'static str),
+    Owned(String),
+    Number(u32),
+}
+
+fn info_value(info_type: u16, database: &str) -> InfoValue {
     match info_type {
-        SQL_DRIVER_NAME => Some("libkova.so"),
-        SQL_DRIVER_VER | SQL_DBMS_VER => Some("00.01.0000"),
-        SQL_ODBC_VER | SQL_DRIVER_ODBC_VER => Some("03.00"),
-        SQL_DBMS_NAME => Some("Kova"),
-        SQL_IDENTIFIER_QUOTE_CHAR => Some("\""),
-        _ => None,
+        SQL_DRIVER_NAME => InfoValue::Text("libkova.so"),
+        SQL_DRIVER_VER | SQL_DBMS_VER => InfoValue::Text("00.01.0000"),
+        SQL_ODBC_VER | SQL_DRIVER_ODBC_VER => InfoValue::Text("03.00"),
+        SQL_DBMS_NAME => InfoValue::Text("Kova"),
+        SQL_IDENTIFIER_QUOTE_CHAR => InfoValue::Text("\""),
+        SQL_SEARCH_PATTERN_ESCAPE => InfoValue::Text("\\"),
+        SQL_DATA_SOURCE_NAME | SQL_DATABASE_NAME => InfoValue::Owned(database.to_string()),
+        SQL_ACCESSIBLE_TABLES | SQL_COLUMN_ALIAS => InfoValue::Text("Y"),
+        SQL_IDENTIFIER_CASE | SQL_QUOTED_IDENTIFIER_CASE => InfoValue::Number(SQL_IC_SENSITIVE),
+        SQL_SCROLL_OPTIONS => InfoValue::Number(SQL_SO_FORWARD_ONLY),
+        SQL_FILE_USAGE => InfoValue::Number(0),
+        _ => InfoValue::Number(0),
     }
 }
 
@@ -2669,17 +2797,61 @@ unsafe fn info(
     let Some(conn) = reg.conns.get_mut(&id) else {
         return SQL_INVALID_HANDLE;
     };
-    let Some(text) = info_text(info_type) else {
-        conn.diag = Diag::new("HYC00", format!("info type {info_type} is not supported"));
-        return SQL_ERROR;
-    };
+    let database = conn.database.clone();
     conn.diag = Diag::clear();
     drop(reg);
-    if wide {
-        write_wide(value as *mut u16, buffer_max, text, length)
-    } else {
-        write_text(value as *mut u8, buffer_max, text, length)
+    // A short buffer is an integer (`SQLUSMALLINT` is 2 bytes,
+    // `SQLUINTEGER` is 4). A long buffer is a string. Returning an
+    // error here makes LibreOffice drop the table list and refuse SQL.
+    match info_value(info_type, &database) {
+        InfoValue::Text(text) => write_info_text(value, buffer_max, text, length, wide),
+        InfoValue::Owned(text) => write_info_text(value, buffer_max, &text, length, wide),
+        InfoValue::Number(_) if buffer_max > 8 => {
+            write_info_text(value, buffer_max, "", length, wide)
+        }
+        InfoValue::Number(number) => write_info_number(value, buffer_max, number, length),
     }
+}
+
+unsafe fn write_info_text(
+    value: *mut std::ffi::c_void,
+    buffer_max: i16,
+    text: &str,
+    length: *mut i16,
+    wide: bool,
+) -> i16 {
+    if wide {
+        write_wide(value.cast(), buffer_max, text, length)
+    } else {
+        write_text(value.cast(), buffer_max, text, length)
+    }
+}
+
+unsafe fn write_info_number(
+    value: *mut std::ffi::c_void,
+    buffer_max: i16,
+    number: u32,
+    length: *mut i16,
+) -> i16 {
+    if value.is_null() {
+        return SQL_SUCCESS;
+    }
+    let width = if buffer_max >= 8 {
+        value.cast::<u64>().write(u64::from(number));
+        8
+    } else if buffer_max >= 4 {
+        value.cast::<u32>().write(number);
+        4
+    } else if buffer_max >= 2 {
+        value.cast::<u16>().write(number as u16);
+        2
+    } else {
+        0
+    };
+    if !length.is_null() {
+        *length = width;
+    }
+    SQL_SUCCESS
 }
 
 /// There is nothing to commit: each statement already ran on its own.
@@ -2756,10 +2928,27 @@ mod tests {
         assert!(odbc_matches(Some("%"), "dept"));
         assert!(!odbc_matches(Some("emp"), "dept"));
         assert!(type_selected(None, "TABLE"));
+        assert!(type_selected(Some("%"), "TABLE"));
         assert!(type_selected(Some("TABLE,VIEW"), "VIEW"));
         assert!(!type_selected(Some("VIEW"), "TABLE"));
+        assert!(table_type_probe(&None, &Some("%".to_string())));
+        assert!(!table_type_probe(
+            &Some("%".to_string()),
+            &Some("%".to_string())
+        ));
+        let row = table_catalog_row(Some("emp"), Some("TABLE"));
+        assert!(matches!(row[2], Cell::Text(ref name) if name == "emp"));
+        assert!(matches!(row[3], Cell::Text(ref kind) if kind == "TABLE"));
         assert_eq!(odbc_table_type("view"), "VIEW");
         assert_eq!(odbc_table_type("collection"), "TABLE");
+        assert!(matches!(
+            info_value(SQL_QUOTED_IDENTIFIER_CASE, "db"),
+            InfoValue::Number(SQL_IC_SENSITIVE)
+        ));
+        assert!(matches!(
+            info_value(SQL_DBMS_NAME, "db"),
+            InfoValue::Text("Kova")
+        ));
     }
 
     #[test]
