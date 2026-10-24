@@ -13,11 +13,13 @@
 //!
 //! Each worker owns a [`engine::StorageEngine`]. Mutations are appended
 //! to the WAL before a page is dirtied. A checkpoint flushes those
-//! pages and records the LSN. Startup opens the pages and replays the
-//! WAL tail.
+//! pages and records the LSN. Startup reads the `admin` catalog and
+//! replays the WAL tail. A directory written before that catalog still
+//! opens by scanning pages once.
 
 mod aggregate;
 mod buffer_pool;
+mod catalog;
 mod crc;
 mod crypto;
 mod disk;
@@ -28,6 +30,11 @@ mod page;
 mod snapshot;
 mod transaction;
 mod wal;
+
+/// Whether `name` is one of the physical `admin` catalog collections.
+pub fn is_catalog(name: &str) -> bool {
+    catalog::is_catalog(name)
+}
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -46,6 +53,41 @@ use self::engine::StorageEngine;
 use self::mvcc::{validate_document, VersionStore};
 use self::transaction::{TransactionManager, View, Write};
 use self::wal::WalOp;
+
+/// Applies find's sort, skip, limit, and projection to documents that
+/// were already read. Catalog finds use this after every partition has
+/// contributed, so a page is a slice of the merged list.
+pub fn shape_cursor(
+    documents: Vec<Document>,
+    projection: Option<&Document>,
+    sort: Option<&Document>,
+    skip: u64,
+    limit: Option<u64>,
+) -> Result<Vec<Document>, String> {
+    aggregate::apply_view(documents, projection, sort, skip, limit)
+}
+
+/// Runs an aggregation pipeline over documents already in memory.
+///
+/// `$lookup` and `$out` are refused: a catalog pipeline is a count or
+/// a projection of the merged catalog, not a write.
+pub fn run_pipeline(input: Vec<Document>, pipeline: &[Document]) -> PartitionResult {
+    if let Err(message) = aggregate::validate_pipeline(pipeline) {
+        return PartitionResult::Error { message };
+    }
+    match aggregate::run(input, pipeline, &mut |_| {
+        Ok(aggregate::Foreign::Remote)
+    }) {
+        Ok(aggregate::Output::Docs(documents)) => PartitionResult::Found { documents },
+        Ok(aggregate::Output::Remote { namespace }) => PartitionResult::Error {
+            message: format!("lookup of '{namespace}' is not available on a catalog collection"),
+        },
+        Ok(aggregate::Output::Out { .. }) => PartitionResult::Error {
+            message: "$out is not available on a catalog collection".into(),
+        },
+        Err(message) => PartitionResult::Error { message },
+    }
+}
 
 /// A single-threaded storage worker.
 ///
@@ -97,10 +139,20 @@ impl PartitionWorker {
         let recovery = engine.load().unwrap_or_else(|err| abort_storage(id, err));
         let pending = recovery.pending;
         let data_dir = std::path::PathBuf::from(&storage.data_dir);
+        let text_dir = engine.root().join("text");
+        let index = match SearchIndex::open(&text_dir) {
+            Ok(index) => index,
+            Err(message) => {
+                LOGGER.warn(format!(
+                    "partition {id} search index will stay in memory: {message}"
+                ));
+                SearchIndex::new()
+            }
+        };
         let mut worker = Self {
             id,
             receiver,
-            index: SearchIndex::new(),
+            index,
             engine,
             partition_count,
             versions: VersionStore::new(),
@@ -125,13 +177,33 @@ impl PartitionWorker {
     /// Rebuilds indexes and the search index from the pages on disk.
     fn recover(&mut self, pending: Vec<wal::WalRecord>) -> Result<(), String> {
         self.open_existing_indexes();
+        let mut loaded = self.engine.catalog_is_warm() && self.restore_indexes();
+        if loaded && !self.index.is_durable() {
+            loaded = false;
+        }
+        if !loaded {
+            if let Err(message) = self.index.reset() {
+                LOGGER.warn(format!(
+                    "partition {} search reset failed: {message}",
+                    self.id
+                ));
+                self.index = SearchIndex::new();
+            }
+        } else {
+            for name in pending_collections(&pending) {
+                if let Err(message) = self.engine.refresh_ids(&name) {
+                    return Err(message);
+                }
+            }
+        }
         for record in pending {
             let lsn = record.lsn;
+            let touch_index = loaded;
             let result = record
                 .op
                 .into_commands()
                 .into_iter()
-                .map(|command| self.apply_recorded(command, false))
+                .map(|command| self.apply_and_publish(command, touch_index))
                 .find(|result| matches!(result, PartitionResult::Error { .. }))
                 .unwrap_or(PartitionResult::Created);
             if let PartitionResult::Error { message } = result {
@@ -143,7 +215,62 @@ impl PartitionWorker {
         }
         self.build_missing_indexes();
         self.publish_routes();
-        self.reindex_all()
+        let rebuilt = self.engine.reconcile_fields()?;
+        if rebuilt > 0 {
+            LOGGER.info(format!(
+                "partition {} rebuilt field catalog for {rebuilt} collection(s)",
+                self.id
+            ));
+        }
+        if loaded {
+            #[cfg(test)]
+            let _ = std::fs::write(
+                self.engine.root().join("startup-reads.txt"),
+                self.engine.user_page_reads().to_string(),
+            );
+            return Ok(());
+        }
+        let rebuilt = self.reindex_all();
+        #[cfg(test)]
+        let _ = std::fs::write(
+            self.engine.root().join("startup-reads.txt"),
+            self.engine.user_page_reads().to_string(),
+        );
+        rebuilt
+    }
+
+    fn restore_indexes(&mut self) -> bool {
+        let path = self.engine.root().join("indexes.bin");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        };
+        match IndexManager::from_bytes(&bytes) {
+            Ok((lsn, manager)) if lsn == self.engine.applied_lsn() => {
+                self.indexes = manager;
+                true
+            }
+            Ok((lsn, _)) => {
+                LOGGER.info(format!(
+                    "partition {} index snapshot lsn {lsn} does not match catalog {}",
+                    self.id,
+                    self.engine.applied_lsn()
+                ));
+                false
+            }
+            Err(message) => {
+                LOGGER.warn(format!(
+                    "partition {} index snapshot was not loaded: {message}",
+                    self.id
+                ));
+                false
+            }
+        }
+    }
+
+    fn persist_indexes(&self) -> Result<(), String> {
+        let bytes = self.indexes.to_bytes(self.engine.applied_lsn())?;
+        disk::atomic_write(&self.engine.root().join("indexes.bin"), &bytes)
     }
 
     /// Builds the search index entry for one document and adds it.
@@ -263,7 +390,7 @@ impl PartitionWorker {
         };
         let lsn = self.engine.last_lsn();
 
-        let result = self.apply_recorded(command, true);
+        let result = self.apply_and_publish(command, true);
         if appended && !matches!(result, PartitionResult::Error { .. }) {
             self.observe_committed(&images, lsn);
             self.sync_indexes(&images);
@@ -459,8 +586,23 @@ impl PartitionWorker {
             PartitionCommand::DropDatabase { database } => {
                 // One database's collections hash across partitions:
                 // this worker drops only the namespaces it owns, plus
-                // their search index entries. Bare namespaces belong
-                // to the "test" database by convention.
+                // their search index entries. Views of that database go
+                // first, so `admin.views` and `admin.databases` lose the
+                // name in the same command. Bare namespaces belong to
+                // the "test" database by convention.
+                let view_names: Vec<String> = self
+                    .engine
+                    .heap
+                    .views()
+                    .iter()
+                    .filter(|view| namespace_in_database(&view.name, &database))
+                    .map(|view| view.name.clone())
+                    .collect();
+                for name in view_names {
+                    if let PartitionResult::Error { message } = self.remove_view(&name) {
+                        return PartitionResult::Error { message };
+                    }
+                }
                 let doomed = match self.engine.drop_database(&database) {
                     Ok(doomed) => doomed,
                     Err(message) => return PartitionResult::Error { message },
@@ -1126,7 +1268,7 @@ impl PartitionWorker {
         self.engine.append(&WalOp::Transaction { ops })?;
         let lsn = self.engine.last_lsn();
         for write in writes {
-            let result = self.apply_recorded(command_for(write), true);
+            let result = self.apply_and_publish(command_for(write), true);
             if let PartitionResult::Error { message } = result {
                 return Err(message);
             }
@@ -1197,7 +1339,7 @@ impl PartitionWorker {
         }
         let lsn = self.engine.last_lsn();
         for command in commands {
-            let result = self.apply_recorded(command, true);
+            let result = self.apply_and_publish(command, true);
             if let PartitionResult::Error { message } = result {
                 return PartitionResult::Error { message };
             }
@@ -1768,7 +1910,23 @@ impl PartitionWorker {
 
     /// Flushes dirty pages and truncates the WAL they cover.
     fn write_checkpoint(&mut self) -> Result<(), String> {
-        self.engine.checkpoint_pages()
+        self.engine.checkpoint_pages()?;
+        self.persist_indexes()?;
+        self.index.commit()
+    }
+
+    /// Applies `command`. Catalog collections are rejected here; the
+    /// `admin` pages are written at checkpoint from the memory updated
+    /// by the command.
+    fn apply_and_publish(
+        &mut self,
+        command: PartitionCommand,
+        touch_index: bool,
+    ) -> PartitionResult {
+        if let Err(message) = refuse_catalog_write(&command) {
+            return PartitionResult::Error { message };
+        }
+        self.apply_recorded(command, touch_index)
     }
 
     /// Rejects a unique violation before the WAL is appended.
@@ -3291,6 +3449,63 @@ impl Drop for RouterInner {
     }
 }
 
+fn namespace_in_database(name: &str, database: &str) -> bool {
+    if database == "test" && !name.contains('.') {
+        return true;
+    }
+    name.starts_with(&format!("{database}."))
+}
+
+fn refuse_catalog_write(command: &PartitionCommand) -> Result<(), String> {
+    match command {
+        PartitionCommand::DropDatabase { database } if database == "admin" => {
+            Err("cannot drop the admin database".into())
+        }
+        PartitionCommand::Insert { collection, .. }
+        | PartitionCommand::Update { collection, .. }
+        | PartitionCommand::Delete { collection, .. }
+        | PartitionCommand::Drop { collection }
+        | PartitionCommand::CreateCollection { collection }
+        | PartitionCommand::CreateIndexes { collection, .. }
+        | PartitionCommand::DropIndexes { collection, .. }
+        | PartitionCommand::CollMod { collection, .. }
+            if catalog::is_catalog(collection) =>
+        {
+            Err(format!("{collection} is a catalog collection"))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn pending_collections(pending: &[wal::WalRecord]) -> Vec<String> {
+    let mut names = Vec::new();
+    for record in pending {
+        collect_op_collections(&record.op, &mut names);
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn collect_op_collections(op: &wal::WalOp, names: &mut Vec<String>) {
+    match op {
+        wal::WalOp::Insert { collection, .. }
+        | wal::WalOp::Update { collection, .. }
+        | wal::WalOp::Delete { collection, .. }
+        | wal::WalOp::Drop { collection }
+        | wal::WalOp::CreateCollection { collection }
+        | wal::WalOp::CreateIndexes { collection, .. }
+        | wal::WalOp::DropIndexes { collection, .. }
+        | wal::WalOp::CollMod { collection, .. } => names.push(collection.clone()),
+        wal::WalOp::DropDatabase { .. } | wal::WalOp::Auth { .. } => {}
+        wal::WalOp::Transaction { ops } => {
+            for op in ops {
+                collect_op_collections(op, names);
+            }
+        }
+    }
+}
+
 fn view_route_path(data_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let safe = name.replace(['/', '\\'], "_");
     data_dir.join("view-routes").join(safe)
@@ -4199,6 +4414,17 @@ mod tests {
                 .expect("worker replied");
         }
 
+        router
+            .dispatch(PartitionCommand::CreateView {
+                name: "shop.orders_view".into(),
+                source: "shop.orders".into(),
+                pipeline: vec![],
+                kova: doc! {},
+            })
+            .expect("worker reachable")
+            .await
+            .expect("worker replied");
+
         // Broadcast: one database's collections hash across workers.
         for rx in router.broadcast(PartitionCommand::DropDatabase {
             database: "shop".into(),
@@ -4210,6 +4436,45 @@ mod tests {
                 other => panic!("expected DroppedDatabase, got {:?}", other),
             }
         }
+
+        let mut databases = Vec::new();
+        let mut fields = Vec::new();
+        let mut views = Vec::new();
+        for rx in router.broadcast(PartitionCommand::find("admin.databases", doc! {})) {
+            if let PartitionResult::Found { documents } = rx.await.expect("databases") {
+                databases.extend(documents);
+            }
+        }
+        for rx in router.broadcast(PartitionCommand::find("admin.fields", doc! {})) {
+            if let PartitionResult::Found { documents } = rx.await.expect("fields") {
+                fields.extend(documents);
+            }
+        }
+        for rx in router.broadcast(PartitionCommand::find("admin.views", doc! {})) {
+            if let PartitionResult::Found { documents } = rx.await.expect("views") {
+                views.extend(documents);
+            }
+        }
+        let database_names: Vec<_> = databases
+            .iter()
+            .filter_map(|document| document.get_str("name").ok())
+            .collect();
+        assert!(
+            !database_names.iter().any(|name| *name == "shop"),
+            "dropped database still in admin.databases: {database_names:?}"
+        );
+        assert!(
+            database_names.iter().any(|name| *name == "inventory"),
+            "{database_names:?}"
+        );
+        assert!(
+            !fields.iter().any(|document| document.get_str("database").ok() == Some("shop")),
+            "dropped fields still in admin.fields: {fields:?}"
+        );
+        assert!(
+            !views.iter().any(|document| document.get_str("_id").ok() == Some("shop.orders_view")),
+            "dropped view still in admin.views: {views:?}"
+        );
 
         // shop.orders is gone (data and search index), inventory intact.
         let rx = router
@@ -6325,6 +6590,113 @@ mod tests {
             PartitionResult::Plan { stage, .. } => assert_eq!(stage, "COLLSCAN"),
             other => panic!("expected a collection scan after the drop, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_admin_catalog_is_queried_without_reading_user_pages() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, true);
+        {
+            let router = PartitionRouter::with_storage(1, config.clone());
+            dispatch(
+                &router,
+                PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "_id": 1i32, "ename": "SMITH", "sal": 800i32 }],
+                },
+            )
+            .await;
+            dispatch(
+                &router,
+                PartitionCommand::CreateIndexes {
+                    collection: "db.emp".into(),
+                    indexes: vec![doc! { "name": "sal_1", "key": { "sal": 1i32 } }],
+                },
+            )
+            .await;
+        }
+
+        let router = PartitionRouter::with_storage(1, config);
+        let mut names = Vec::new();
+        for rx in router.broadcast(PartitionCommand::ListDatabases { filter: doc! {} }) {
+            if let PartitionResult::ListedDatabases { databases } =
+                rx.await.expect("worker replied")
+            {
+                names.extend(
+                    databases
+                        .into_iter()
+                        .filter_map(|database| database.get_str("name").ok().map(str::to_string)),
+                );
+            }
+        }
+        names.sort();
+        names.dedup();
+        assert!(names.iter().any(|name| name == "admin"), "{names:?}");
+        assert!(names.iter().any(|name| name == "db"), "{names:?}");
+
+        let reads = std::fs::read_to_string(dir.join("partition-0").join("startup-reads.txt"))
+            .expect("startup counter");
+        assert_eq!(reads.trim(), "0", "startup read user pages: {reads}");
+
+        match dispatch(
+            &router,
+            PartitionCommand::find("admin.fields", doc! { "collection": "emp" }),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                let mut fields: Vec<_> = documents
+                    .iter()
+                    .map(|document| {
+                        format!(
+                            "{}:{}",
+                            document.get_str("field").unwrap_or(""),
+                            document.get_str("type").unwrap_or("")
+                        )
+                    })
+                    .collect();
+                fields.sort();
+                assert!(fields.iter().any(|field| field == "ename:string"), "{fields:?}");
+                assert!(fields.iter().any(|field| field == "sal:int"), "{fields:?}");
+                assert!(
+                    documents.iter().any(|document| {
+                        document.get_str("_id").ok() == Some("db.emp.ename")
+                    }),
+                    "{documents:?}"
+                );
+            }
+            other => panic!("expected fields, got {other:?}"),
+        }
+
+        match dispatch(
+            &router,
+            PartitionCommand::find("db.emp", doc! { "ename": "SMITH" }),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0].get_i32("sal").unwrap(), 800);
+            }
+            other => panic!("expected SMITH, got {other:?}"),
+        }
+
+        match dispatch(
+            &router,
+            PartitionCommand::Explain {
+                collection: "db.emp".into(),
+                filter: doc! { "sal": { "$gt": 100i32 } },
+            },
+        )
+        .await
+        {
+            PartitionResult::Plan { stage, index_name } => {
+                assert_eq!(stage, "IXSCAN");
+                assert_eq!(index_name.as_deref(), Some("sal_1"));
+            }
+            other => panic!("expected the restored index, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

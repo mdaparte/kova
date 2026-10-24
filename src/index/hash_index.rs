@@ -18,6 +18,19 @@ impl HashIndex {
         }
     }
 
+    pub(crate) fn pairs(&self) -> Vec<(String, Vec<String>)> {
+        self.buckets
+            .iter()
+            .map(|(key, ids)| (key.clone(), ids.clone()))
+            .collect()
+    }
+
+    pub(crate) fn from_pairs(pairs: Vec<(String, Vec<String>)>) -> Self {
+        Self {
+            buckets: pairs.into_iter().collect(),
+        }
+    }
+
     pub fn insert(&mut self, key: String, id: &str, unique: bool) -> Result<(), String> {
         let ids = self.buckets.entry(key).or_default();
         if ids.iter().any(|existing| existing == id) {

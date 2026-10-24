@@ -203,7 +203,7 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   scheme is chosen when the phase starts. ⚪ Planned.
 - **Phase 24 — Physical catalog (`admin`):** database `admin` holds
   databases, collections, fields, and indexes. Startup reads those rows
-  instead of scanning every document. ⚪ Planned.
+  instead of scanning every document. ✅ Complete.
 
 ---
 

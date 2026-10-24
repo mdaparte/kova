@@ -995,6 +995,23 @@ async fn execute_command(
             let listed = list_databases(&bson::doc! { "listDatabases": 1 }, router).await;
             return databases_as_sql(listed);
         }
+        if let Some(table_name) = catalog_table_name(sql_text) {
+            if let Some(reply) =
+                describe_from_catalog(router, command.get_str("$db").unwrap_or(""), &table_name)
+                    .await
+            {
+                return reply;
+            }
+        }
+        if let Some(kind) = information_schema_kind(sql_text) {
+            return information_schema_from_catalog(
+                router,
+                command.get_str("$db").unwrap_or(""),
+                kind,
+                sql_text,
+            )
+            .await;
+        }
         if let Some(table_name) = show_index_table(sql_text) {
             let db = command.get_str("$db").unwrap_or("");
             let collection = if db.is_empty() {
@@ -1113,8 +1130,27 @@ async fn execute_command(
         Ok(PartitionCommand::ListDatabases { .. }) => list_databases(command, router).await,
         Ok(PartitionCommand::DropDatabase { .. }) => drop_database(command, router).await,
         Ok(PartitionCommand::DatabaseStats { .. }) => database_stats(command, router).await,
+        Ok(aggregate)
+            if aggregate_command(&aggregate)
+                && aggregate_namespace(&aggregate)
+                    .is_some_and(|name| crate::storage::is_catalog(&name)) =>
+        {
+            execute_catalog_aggregate(router, aggregate).await
+        }
         Ok(aggregate) if aggregate_command(&aggregate) => {
             execute_aggregate(router, aggregate).await
+        }
+        Ok(partition_command)
+            if crate::storage::is_catalog(partition_command.collection())
+                && matches!(
+                    partition_command,
+                    PartitionCommand::Find { .. } | PartitionCommand::Count { .. }
+                ) =>
+        {
+            match broadcast_catalog(router, partition_command).await {
+                Ok(result) => cursor_ns(command, protocol::reply_document(&result)),
+                Err(message) => bson::doc! { "ok": 0.0, "errmsg": message },
+            }
         }
         Ok(partition_command) => match router.dispatch(partition_command) {
             Some(rx) => match rx.await {
@@ -2115,6 +2151,184 @@ fn tables_as_sql(listed: bson::Document) -> bson::Document {
     }
 }
 
+/// `DESCRIBE` and `SHOW COLUMNS` read `admin.fields` for the collection.
+///
+/// `None` means the catalog has no field rows yet, so the caller infers
+/// the columns from the documents.
+async fn describe_from_catalog(
+    router: &PartitionRouter,
+    db: &str,
+    table: &str,
+) -> Option<bson::Document> {
+    let mut filter = bson::doc! { "collection": table };
+    if !db.is_empty() {
+        filter.insert("database", db);
+    }
+    let documents = catalog_rows(router, "admin.fields", filter).await.ok()?;
+    if documents.is_empty() {
+        return None;
+    }
+    let rows = documents
+        .into_iter()
+        .filter_map(|document| {
+            let column = document.get_str("field").ok()?.to_string();
+            let data_type = document.get_str("type").unwrap_or("string").to_string();
+            Some(bson::doc! {
+                "column_name": column,
+                "data_type": data_type,
+                "is_nullable": "YES",
+            })
+        })
+        .collect();
+    Some(sql_rows(rows))
+}
+
+fn information_schema_kind(sql: &str) -> Option<&'static str> {
+    if !sql_table_names(sql).is_empty() {
+        return None;
+    }
+    let lower = sql.to_ascii_lowercase();
+    if lower.contains("information_schema.columns") {
+        Some("columns")
+    } else if lower.contains("information_schema.tables") {
+        Some("tables")
+    } else if lower.contains("information_schema.schemata") {
+        Some("schemata")
+    } else {
+        None
+    }
+}
+
+/// `information_schema` is answered from the `admin` catalog, not from
+/// the tables registered for this one statement.
+async fn information_schema_from_catalog(
+    router: &PartitionRouter,
+    db: &str,
+    kind: &str,
+    sql: &str,
+) -> bson::Document {
+    let rows = match kind {
+        "schemata" => match catalog_rows(router, "admin.databases", bson::doc! {}).await {
+            Ok(documents) => documents
+                .into_iter()
+                .filter_map(|document| {
+                    let name = document.get_str("name").ok()?.to_string();
+                    Some(bson::doc! { "schema_name": name })
+                })
+                .collect(),
+            Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+        },
+        "tables" => {
+            let mut filter = bson::doc! {};
+            if !db.is_empty() {
+                filter.insert("database", db);
+            }
+            let mut rows = match catalog_rows(router, "admin.collections", filter.clone()).await {
+                Ok(documents) => documents
+                    .into_iter()
+                    .filter_map(|document| {
+                        Some(bson::doc! {
+                            "table_schema": document.get_str("database").ok()?,
+                            "table_name": document.get_str("name").ok()?,
+                            "table_type": "BASE TABLE",
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+            };
+            match catalog_rows(router, "admin.views", bson::doc! {}).await {
+                Ok(documents) => {
+                    for document in documents {
+                        let Some(ns) = document.get_str("_id").ok() else {
+                            continue;
+                        };
+                        let (schema, name) = ns.split_once('.').unwrap_or(("test", ns));
+                        if !db.is_empty() && schema != db {
+                            continue;
+                        }
+                        rows.push(bson::doc! {
+                            "table_schema": schema,
+                            "table_name": name,
+                            "table_type": "VIEW",
+                        });
+                    }
+                }
+                Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+            }
+            rows
+        }
+        _ => {
+            let mut filter = bson::doc! {};
+            if !db.is_empty() {
+                filter.insert("database", db);
+            }
+            match catalog_rows(router, "admin.fields", filter).await {
+                Ok(documents) => documents
+                    .into_iter()
+                    .filter_map(|document| {
+                        Some(bson::doc! {
+                            "table_schema": document.get_str("database").ok()?,
+                            "table_name": document.get_str("collection").ok()?,
+                            "column_name": document.get_str("field").ok()?,
+                            "data_type": document.get_str("type").unwrap_or("string"),
+                        })
+                    })
+                    .collect(),
+                Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+            }
+        }
+    };
+    let (needle, alias) = match kind {
+        "tables" => ("information_schema.tables", "catalog_tables"),
+        "columns" => ("information_schema.columns", "catalog_columns"),
+        _ => ("information_schema.schemata", "catalog_schemata"),
+    };
+    let sql = replace_ci(sql, needle, alias);
+    match query_engine::execute_sql_query(&sql, &[(alias, std::sync::Arc::new(rows))]).await {
+        Ok(result) => result,
+        Err(err) => bson::doc! { "ok": 0.0, "errmsg": err.to_string() },
+    }
+}
+
+fn replace_ci(sql: &str, needle: &str, replacement: &str) -> String {
+    let lower = sql.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    match lower.find(&needle) {
+        Some(at) => {
+            let mut rewritten = String::new();
+            rewritten.push_str(&sql[..at]);
+            rewritten.push_str(replacement);
+            rewritten.push_str(&sql[at + needle.len()..]);
+            rewritten
+        }
+        None => sql.to_string(),
+    }
+}
+
+async fn catalog_rows(
+    router: &PartitionRouter,
+    collection: &str,
+    filter: bson::Document,
+) -> Result<Vec<bson::Document>, String> {
+    match broadcast_catalog(router, PartitionCommand::find(collection, filter)).await {
+        Ok(PartitionResult::Found { documents }) => Ok(documents),
+        Ok(PartitionResult::Error { message }) => Err(message),
+        Ok(_) => Err("unexpected partition result".into()),
+        Err(message) => Err(message),
+    }
+}
+
+fn sql_rows(rows: Vec<bson::Document>) -> bson::Document {
+    bson::doc! {
+        "ok": 1.0,
+        "cursor": {
+            "id": 0i64,
+            "ns": "sql.query",
+            "firstBatch": rows,
+        },
+    }
+}
+
 /// Loads all documents from an in-memory collection by dispatching a find
 /// to its partition.
 ///
@@ -2128,6 +2342,17 @@ async fn load_collection_documents(
     use crate::types::PartitionCommand;
 
     let find_cmd = PartitionCommand::find(table_name, filter.clone());
+    // `admin.fields` and the other catalog collections are one row set
+    // spread over every partition. A SQL read has to merge them, the
+    // same way a find does.
+    if crate::storage::is_catalog(table_name) {
+        return match broadcast_catalog(router, find_cmd).await {
+            Ok(PartitionResult::Found { documents }) => Ok(Arc::new(documents)),
+            Ok(PartitionResult::Error { message }) => Err(message),
+            Ok(_) => Err("unexpected partition result".into()),
+            Err(message) => Err(message),
+        };
+    }
 
     match router.dispatch(find_cmd) {
         Some(rx) => match rx.await {
@@ -2532,11 +2757,117 @@ async fn list_indexes(router: &PartitionRouter, collection: &str) -> bson::Docum
     }
 }
 
+/// Reads a catalog collection from every partition and merges the rows.
+///
+/// Each partition reports the databases and collections it stores, so
+/// the same database row arrives more than once. The merged find keeps
+/// one document per `_id`.
+async fn broadcast_catalog(
+    router: &PartitionRouter,
+    command: PartitionCommand,
+) -> Result<PartitionResult, String> {
+    let (command, projection, sort, skip, limit, counting) = match command {
+        PartitionCommand::Find {
+            collection,
+            filter,
+            projection,
+            sort,
+            skip,
+            limit,
+        } => (
+            PartitionCommand::Find {
+                collection,
+                filter,
+                projection: None,
+                sort: None,
+                skip: 0,
+                limit: None,
+            },
+            projection,
+            sort,
+            skip,
+            limit,
+            false,
+        ),
+        PartitionCommand::Count { collection, filter } => (
+            PartitionCommand::find(collection, filter),
+            None,
+            None,
+            0,
+            None,
+            true,
+        ),
+        other => (other, None, None, 0, None, false),
+    };
+    let mut documents = Vec::new();
+    for rx in router.broadcast(command) {
+        match rx.await {
+            Ok(PartitionResult::Found {
+                documents: mut found,
+            }) => documents.append(&mut found),
+            Ok(PartitionResult::Error { message }) => return Err(message),
+            Ok(_) | Err(_) => return Err("partition worker returned no catalog rows".into()),
+        }
+    }
+    documents.sort_by(|left, right| catalog_row_id(left).cmp(&catalog_row_id(right)));
+    documents.dedup_by(|left, right| catalog_row_id(left) == catalog_row_id(right));
+    if counting {
+        return Ok(PartitionResult::Counted {
+            count: documents.len() as u64,
+        });
+    }
+    let documents = crate::storage::shape_cursor(documents, projection.as_ref(), sort.as_ref(), skip, limit)?;
+    Ok(PartitionResult::Found { documents })
+}
+
+/// Runs a catalog aggregation on the merged rows.
+///
+/// `countDocuments` is an aggregate. Sending it to the one partition
+/// that owns `admin.fields` counts only the fields stored there.
+async fn execute_catalog_aggregate(
+    router: &PartitionRouter,
+    command: PartitionCommand,
+) -> bson::Document {
+    let Some(namespace) = aggregate_namespace(&command) else {
+        return bson::doc! {
+            "ok": 0.0,
+            "errmsg": "expected an aggregate command",
+        };
+    };
+    let pipeline = match &command {
+        PartitionCommand::Aggregate { pipeline, .. } => pipeline.clone(),
+        PartitionCommand::Transactional { inner, .. } => match inner.as_ref() {
+            PartitionCommand::Aggregate { pipeline, .. } => pipeline.clone(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    let documents = match broadcast_catalog(router, PartitionCommand::find(&namespace, bson::doc! {})).await {
+        Ok(PartitionResult::Found { documents }) => documents,
+        Ok(other) => {
+            return protocol::reply_document(&PartitionResult::Error {
+                message: format!("catalog aggregate expected documents, got {other:?}"),
+            });
+        }
+        Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+    };
+    let result = crate::storage::run_pipeline(documents, &pipeline);
+    cursor_batch(&namespace, match result {
+        PartitionResult::Found { documents } => documents,
+        other => return protocol::reply_document(&other),
+    })
+}
+
+fn catalog_row_id(document: &bson::Document) -> String {
+    match document.get("_id") {
+        Some(bson::Bson::String(value)) => value.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
 /// Broadcasts `listCollections` to every partition and merges the
 /// collection descriptions into a single cursor reply.
-///
-/// The reply namespace follows MongoDB's own format,
-/// `<db>.$cmd.listCollections`.
 async fn list_collections(command: &bson::Document, router: &PartitionRouter) -> bson::Document {
     let partition_command = match protocol::command_from_document(command) {
         Ok(partition_command) => partition_command,
@@ -2565,6 +2896,7 @@ async fn list_collections(command: &bson::Document, router: &PartitionRouter) ->
             .unwrap_or("")
             .cmp(b.get_str("name").unwrap_or(""))
     });
+    collections.dedup_by(|left, right| left.get_str("name").ok() == right.get_str("name").ok());
 
     let db = command.get_str("$db").unwrap_or("admin");
     bson::doc! {
@@ -3736,6 +4068,168 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sql_reads_the_catalog_and_drop_removes_it() {
+        let router = PartitionRouter::new(4);
+        let local = "127.0.0.1:1".parse().expect("addr");
+        for (db, collection) in [("t", "c"), ("t", "d"), ("novo_banco", "item")] {
+            let inserted = execute_command(
+                &bson::doc! {
+                    "insert": collection,
+                    "$db": db,
+                    "documents": [ { "p": 1i32 } ],
+                },
+                &router,
+                local,
+            )
+            .await;
+            assert_eq!(inserted.get_f64("ok"), Ok(1.0), "{inserted:?}");
+        }
+
+        let described = execute_command(
+            &bson::doc! { "sql": "DESCRIBE c", "$db": "t" },
+            &router,
+            local,
+        )
+        .await;
+        let columns = sql_batch(&described);
+        assert!(
+            columns.iter().any(|row| row.get_str("column_name").ok() == Some("p")),
+            "{columns:?}"
+        );
+
+        let listed = execute_command(
+            &bson::doc! { "sql": "SELECT table_name FROM information_schema.tables", "$db": "t" },
+            &router,
+            local,
+        )
+        .await;
+        let tables = sql_batch(&listed);
+        let table_names: Vec<_> = tables
+            .iter()
+            .filter_map(|row| row.get_str("table_name").ok())
+            .collect();
+        assert!(table_names.contains(&"c") && table_names.contains(&"d"), "{table_names:?}");
+        assert!(!table_names.contains(&"item"), "{table_names:?}");
+
+        let fields = execute_command(
+            &bson::doc! { "sql": "SELECT database, collection, field FROM fields", "$db": "admin" },
+            &router,
+            local,
+        )
+        .await;
+        let field_rows = sql_batch(&fields);
+        assert!(
+            field_rows.iter().any(|row| row.get_str("collection").ok() == Some("c")),
+            "{field_rows:?}"
+        );
+        assert!(
+            field_rows.iter().any(|row| row.get_str("collection").ok() == Some("d")),
+            "{field_rows:?}"
+        );
+
+        let dropped = execute_command(
+            &bson::doc! { "dropDatabase": "novo_banco", "$db": "admin" },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(dropped.get_f64("ok"), Ok(1.0), "{dropped:?}");
+        assert_eq!(dropped.get_str("dropped"), Ok("novo_banco"));
+
+        let databases = execute_command(
+            &bson::doc! { "find": "databases", "filter": {}, "$db": "admin" },
+            &router,
+            local,
+        )
+        .await;
+        let database_rows = sql_batch(&databases);
+        let names: Vec<_> = database_rows
+            .iter()
+            .filter_map(|row| row.get_str("name").ok())
+            .collect();
+        assert!(!names.contains(&"novo_banco"), "{names:?}");
+        assert!(names.contains(&"t"), "{names:?}");
+    }
+
+    fn sql_batch(reply: &bson::Document) -> Vec<bson::Document> {
+        reply
+            .get_document("cursor")
+            .and_then(|cursor| cursor.get_array("firstBatch"))
+            .map(|batch| {
+                batch
+                    .iter()
+                    .filter_map(|value| value.as_document().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn test_catalog_page_is_a_slice_of_the_merged_fields() {
+        let router = PartitionRouter::new(4);
+        let local = "127.0.0.1:1".parse().expect("addr");
+        // `t.c` and `t.d` hash to different partitions. Each document
+        // contributes three field rows (`_id`, `p`, `q`).
+        for collection in ["c", "d"] {
+            let inserted = execute_command(
+                &bson::doc! {
+                    "insert": collection,
+                    "$db": "t",
+                    "documents": [ { "p": 1i32, "q": 2i32 } ],
+                },
+                &router,
+                local,
+            )
+            .await;
+            assert_eq!(inserted.get_f64("ok"), Ok(1.0), "{inserted:?}");
+        }
+
+        let page = execute_command(
+            &bson::doc! {
+                "find": "fields",
+                "$db": "admin",
+                "skip": 2i32,
+                "limit": 2i32,
+            },
+            &router,
+            local,
+        )
+        .await;
+        let batch = page
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("batch");
+        let ids: Vec<_> = batch
+            .iter()
+            .filter_map(|value| value.as_document()?.get_str("_id").ok())
+            .collect();
+        assert_eq!(ids, vec!["t.c.q", "t.d._id"], "{ids:?}");
+
+        let counted = execute_command(
+            &bson::doc! {
+                "aggregate": "fields",
+                "$db": "admin",
+                "pipeline": [ { "$count": "n" } ],
+                "cursor": {},
+            },
+            &router,
+            local,
+        )
+        .await;
+        let n = counted
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("batch")[0]
+            .as_document()
+            .expect("row")
+            .get_i32("n")
+            .expect("n");
+        assert_eq!(n, 6, "{counted:?}");
+    }
+
+    #[tokio::test]
     async fn test_list_databases_merges_partitions_and_filters() {
         let router = PartitionRouter::new(4);
 
@@ -3756,6 +4250,30 @@ mod tests {
             .expect("worker reachable")
             .await
             .expect("worker replied");
+
+        let listed = broadcast_catalog(
+            &router,
+            PartitionCommand::find("admin.databases", bson::doc! {}),
+        )
+        .await
+        .expect("catalog");
+        let PartitionResult::Found { documents } = listed else {
+            panic!("expected databases, got {listed:?}");
+        };
+        let names: Vec<_> = documents
+            .iter()
+            .filter_map(|document| document.get_str("name").ok().map(str::to_string))
+            .collect();
+        let unique = {
+            let mut copy = names.clone();
+            copy.sort();
+            copy.dedup();
+            copy
+        };
+        assert_eq!(names.len(), unique.len(), "duplicated databases: {names:?}");
+        assert!(names.iter().any(|name| name == "admin"), "{names:?}");
+        assert!(names.iter().any(|name| name == "shop"), "{names:?}");
+        assert!(names.iter().any(|name| name == "empty"), "{names:?}");
 
         let command = bson::doc! { "listDatabases": 1 };
         let reply = list_databases(&command, &router).await;

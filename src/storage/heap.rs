@@ -34,6 +34,9 @@ struct CollectionState {
     /// `_id` values already stored. Insert checks this before writing,
     /// so a duplicate is refused without rereading every page.
     ids: HashSet<String>,
+    /// Top-level field name and BSON type. A later value of another
+    /// type becomes `"mixed"`.
+    fields: Vec<(String, String)>,
 }
 
 struct UserRecord {
@@ -74,6 +77,7 @@ impl CollectionState {
             validator: None,
             doc_count: 0,
             ids: HashSet::new(),
+            fields: Vec::new(),
         }
     }
 }
@@ -89,6 +93,11 @@ pub struct Heap {
     users: Vec<UserRecord>,
     roles: Vec<RoleRecord>,
     views: Vec<ViewSpec>,
+    /// Set when startup read a version-2 catalog instead of scanning
+    /// document pages.
+    catalog_warm: bool,
+    /// User-document pages read while discovering or walking a collection.
+    user_page_reads: u64,
 }
 
 impl Heap {
@@ -104,6 +113,40 @@ impl Heap {
             users: Vec::new(),
             roles: Vec::new(),
             views: Vec::new(),
+            catalog_warm: false,
+            user_page_reads: 0,
+        }
+    }
+
+    pub fn catalog_is_warm(&self) -> bool {
+        self.catalog_warm
+    }
+
+    pub fn user_page_reads(&self) -> u64 {
+        self.user_page_reads
+    }
+
+    pub fn field_types(&self, collection: &str) -> Vec<(String, String)> {
+        self.collections
+            .get(collection)
+            .map(|state| state.fields.clone())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub fn clear_fields(&mut self, collection: &str) {
+        if let Some(state) = self.collections.get_mut(collection) {
+            state.fields.clear();
+        }
+    }
+
+    /// Makes the seven `admin` collections exist in memory so
+    /// `listDatabases` can return `admin` before any user write.
+    pub fn ensure_catalog(&mut self) {
+        for name in crate::storage::catalog::NAMES {
+            self.collections
+                .entry(name.to_string())
+                .or_insert_with(CollectionState::empty);
         }
     }
 
@@ -229,6 +272,9 @@ impl Heap {
         }
         let flags = u16::from_le_bytes(payload[6..8].try_into().unwrap());
         let name = collection_name(payload)?;
+        if !crate::storage::catalog::is_catalog(&name) {
+            self.user_page_reads += 1;
+        }
         self.live.insert(id);
         if flags & FLAG_CONTINUATION != 0 {
             self.collections
@@ -589,8 +635,50 @@ impl Heap {
             .count()
     }
 
-    pub fn persist_catalog(&mut self, pool: &mut BufferPool) -> Result<(), String> {
-        let payload = self.encode_catalog()?;
+    /// Rewrites the `admin` collections from the in-memory catalog.
+    ///
+    /// User page lists are copied before the rewrite, so replacing the
+    /// catalog pages does not change where user documents live.
+    pub fn publish(&mut self, pool: &mut BufferPool, disk: &PageStore) -> Result<(), String> {
+        self.ensure_catalog();
+        let databases = self.database_docs();
+        let collections = self.collection_docs();
+        let fields = self.field_docs();
+        let indexes = self.index_docs();
+        let users = self.user_docs();
+        let roles = self.role_docs();
+        let views = self.view_docs();
+        self.rewrite(pool, disk, crate::storage::catalog::DATABASES, databases)?;
+        self.rewrite(pool, disk, crate::storage::catalog::COLLECTIONS, collections)?;
+        self.rewrite(pool, disk, crate::storage::catalog::FIELDS, fields)?;
+        self.rewrite(pool, disk, crate::storage::catalog::INDEXES, indexes)?;
+        self.rewrite(pool, disk, crate::storage::catalog::USERS, users)?;
+        self.rewrite(pool, disk, crate::storage::catalog::ROLES, roles)?;
+        self.rewrite(pool, disk, crate::storage::catalog::VIEWS, views)?;
+        Ok(())
+    }
+
+    /// Writes the version-2 root. It lists the catalog pages only.
+    pub fn write_root(&mut self, pool: &mut BufferPool) -> Result<(), String> {
+        let mut catalog_pages = Document::new();
+        for name in crate::storage::catalog::NAMES {
+            let Some(state) = self.collections.get(name) else {
+                continue;
+            };
+            let mut ids = state.pages.clone();
+            ids.extend(&state.continuations);
+            catalog_pages.insert(name, crate::storage::catalog::u64s(&ids));
+        }
+        let body = doc! {
+            "version": 2i32,
+            "applied_lsn": self.applied_lsn as i64,
+            "next_page_id": self.next_page_id as i64,
+            "catalog_pages": catalog_pages,
+        };
+        let bson = bson::to_vec(&body).map_err(|err| format!("catalog encode: {err}"))?;
+        let mut payload = Vec::with_capacity(4 + bson.len());
+        payload.extend_from_slice(&CATA_MAGIC.to_le_bytes());
+        payload.extend_from_slice(&bson);
         if payload.len() > self.capacity() {
             return Err(format!(
                 "catalog is {} bytes and does not fit in a {} byte page",
@@ -603,33 +691,376 @@ impl Heap {
         Ok(())
     }
 
-    fn encode_catalog(&self) -> Result<Vec<u8>, String> {
-        let mut names: Vec<&String> = self.collections.keys().collect();
-        names.sort();
-        let mut cols = Document::new();
-        for name in names {
-            let state = &self.collections[name];
-            let mut spec = doc! {
-                "indexes": Bson::Array(state.indexes.iter().cloned().map(Bson::Document).collect()),
-            };
-            if let Some(validator) = &state.validator {
-                spec.insert("validator", validator.clone());
-            }
-            cols.insert(name, spec);
+    /// Loads a version-2 catalog. `Ok(false)` means the root is an older
+    /// catalog and the caller should scan pages.
+    pub fn try_load_catalog(
+        &mut self,
+        pool: &mut BufferPool,
+        page_one: bool,
+    ) -> Result<bool, String> {
+        if !page_one {
+            return Ok(false);
         }
-        let body = doc! {
-            "applied_lsn": self.applied_lsn as i64,
-            "next_page_id": self.next_page_id as i64,
-            "collections": cols,
-            "users": Bson::Array(self.users.iter().map(user_to_bson).collect()),
-            "roles": Bson::Array(self.roles.iter().map(role_to_bson).collect()),
-            "views": Bson::Array(self.views.iter().map(view_to_bson).collect()),
+        let page = pool.fetch(CATALOG_PAGE)?;
+        let payload = page.payload.clone();
+        pool.unpin(CATALOG_PAGE)?;
+        let body = catalog_body(&payload)?;
+        if body.get_i32("version").unwrap_or(1) < 2 {
+            return Ok(false);
+        }
+        if let Ok(lsn) = body.get_i64("applied_lsn") {
+            self.applied_lsn = self.applied_lsn.max(lsn as u64);
+        }
+        if let Ok(next) = body.get_i64("next_page_id") {
+            self.next_page_id = self.next_page_id.max(next as u64);
+        }
+        self.live.insert(CATALOG_PAGE);
+        let empty_pages = Document::new();
+        let pages = body.get_document("catalog_pages").unwrap_or(&empty_pages);
+        for name in crate::storage::catalog::NAMES {
+            let ids = pages
+                .get_array(name)
+                .ok()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_i64().map(|id| id as u64))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for id in ids {
+                let page = pool.fetch(id)?;
+                let payload = page.payload.clone();
+                pool.unpin(id)?;
+                self.note_page(id, &payload)?;
+                self.next_page_id = self.next_page_id.max(id.saturating_add(1));
+            }
+        }
+        let collection_docs = self.read_catalog(pool, crate::storage::catalog::COLLECTIONS)?;
+        for document in &collection_docs {
+            self.install_user(document);
+        }
+        let field_docs = self.read_catalog(pool, crate::storage::catalog::FIELDS)?;
+        for document in &field_docs {
+            let Some(namespace) = document.get_str("ns").ok() else {
+                continue;
+            };
+            let Some(field) = document.get_str("field").ok() else {
+                continue;
+            };
+            let Some(type_name) = document.get_str("type").ok() else {
+                continue;
+            };
+            if let Some(state) = self.collections.get_mut(namespace) {
+                state.fields.push((field.to_string(), type_name.to_string()));
+            }
+        }
+        let index_docs = self.read_catalog(pool, crate::storage::catalog::INDEXES)?;
+        for document in &index_docs {
+            let Some(namespace) = document.get_str("ns").ok() else {
+                continue;
+            };
+            let Some(spec) = document.get_document("spec").ok() else {
+                continue;
+            };
+            if let Some(state) = self.collections.get_mut(namespace) {
+                state.indexes.push(spec.clone());
+            }
+        }
+        self.users = self
+            .read_catalog(pool, crate::storage::catalog::USERS)?
+            .iter()
+            .filter_map(|document| user_from_bson(&Bson::Document(document.clone())))
+            .collect();
+        self.roles = self
+            .read_catalog(pool, crate::storage::catalog::ROLES)?
+            .iter()
+            .filter_map(|document| role_from_bson(&Bson::Document(document.clone())))
+            .collect();
+        self.views = self
+            .read_catalog(pool, crate::storage::catalog::VIEWS)?
+            .iter()
+            .filter_map(|document| view_from_bson(&Bson::Document(document.clone())))
+            .collect();
+        self.catalog_warm = true;
+        Ok(true)
+    }
+
+    /// Fills field rows for collections that have documents and an empty
+    /// field list. A catalog written before fields existed, or a checkpoint
+    /// that stored none, is completed from the pages. Collections that
+    /// already have a field list are left as they are.
+    pub fn reconcile_fields(&mut self, pool: &mut BufferPool) -> Result<usize, String> {
+        let names = self.names();
+        let mut rebuilt = 0usize;
+        for name in names {
+            if crate::storage::catalog::is_catalog(&name) {
+                continue;
+            }
+            let stale = self.collections.get(&name).is_some_and(|state| {
+                state.fields.is_empty() && (state.doc_count > 0 || !state.pages.is_empty())
+            });
+            if !stale {
+                continue;
+            }
+            let mut folded: HashMap<String, String> = HashMap::new();
+            self.for_each_in(pool, &name, &mut |document| {
+                for (key, value) in document {
+                    let type_name = crate::storage::catalog::type_name(value);
+                    let update = match folded.get(key.as_str()) {
+                        Some(existing) if existing != type_name && existing != "mixed" => {
+                            Some("mixed".to_string())
+                        }
+                        None => Some(type_name.to_string()),
+                        _ => None,
+                    };
+                    if let Some(type_name) = update {
+                        folded.insert(key.clone(), type_name);
+                    }
+                }
+            })?;
+            if let Some(state) = self.collections.get_mut(&name) {
+                let mut fields: Vec<_> = folded.into_iter().collect();
+                fields.sort();
+                state.fields = fields;
+            }
+            rebuilt += 1;
+        }
+        Ok(rebuilt)
+    }
+
+    /// Fills the id set from the pages the catalog already names.
+    pub fn refresh_ids(&mut self, pool: &mut BufferPool, collection: &str) -> Result<(), String> {
+        if !self.contains(collection) || crate::storage::catalog::is_catalog(collection) {
+            return Ok(());
+        }
+        let mut ids = HashSet::new();
+        self.for_each_in(pool, collection, &mut |document| {
+            ids.insert(document_id_string(document));
+        })?;
+        if let Some(state) = self.collections.get_mut(collection) {
+            state.ids = ids;
+        }
+        Ok(())
+    }
+
+    fn read_catalog(&mut self, pool: &mut BufferPool, name: &str) -> Result<Vec<Document>, String> {
+        let mut documents = Vec::new();
+        self.for_each_in(pool, name, &mut |document| {
+            documents.push(document.clone());
+        })?;
+        Ok(documents)
+    }
+
+    fn install_user(&mut self, document: &Document) {
+        let Some(namespace) = document.get_str("_id").ok() else {
+            return;
         };
-        let bson = bson::to_vec(&body).map_err(|err| format!("catalog encode: {err}"))?;
-        let mut payload = Vec::with_capacity(4 + bson.len());
-        payload.extend_from_slice(&CATA_MAGIC.to_le_bytes());
-        payload.extend_from_slice(&bson);
-        Ok(payload)
+        if crate::storage::catalog::is_catalog(namespace) {
+            return;
+        }
+        let pages = crate::storage::catalog::read_u64s(document, "pages");
+        let continuations = crate::storage::catalog::read_u64s(document, "continuations");
+        let overflow = crate::storage::catalog::read_u64s(document, "overflow");
+        for id in pages.iter().chain(continuations.iter()) {
+            self.live.insert(*id);
+            self.next_page_id = self.next_page_id.max(id.saturating_add(1));
+        }
+        let mut state = CollectionState::empty();
+        state.pages = pages;
+        state.continuations = continuations;
+        state.overflow_heads = overflow.into_iter().collect();
+        state.doc_count = document.get_i64("doc_count").unwrap_or(0) as u64;
+        state.ids = crate::storage::catalog::read_strings(document, "ids")
+            .into_iter()
+            .collect();
+        if let Ok(validator) = document.get_document("validator") {
+            state.validator = Some(validator.clone());
+        }
+        self.collections.insert(namespace.to_string(), state);
+    }
+
+    fn rewrite(
+        &mut self,
+        pool: &mut BufferPool,
+        disk: &PageStore,
+        name: &str,
+        documents: Vec<Document>,
+    ) -> Result<(), String> {
+        if let Some(state) = self.collections.remove(name) {
+            for id in state.pages.into_iter().chain(state.continuations) {
+                pool.discard(id);
+                disk.remove(id)?;
+                self.live.remove(&id);
+            }
+        }
+        self.collections
+            .insert(name.to_string(), CollectionState::empty());
+        for document in documents {
+            self.place(pool, name, &document)?;
+        }
+        Ok(())
+    }
+
+    fn catalog_documents(&self, name: &str) -> Vec<Document> {
+        match name {
+            crate::storage::catalog::DATABASES => self.database_docs(),
+            crate::storage::catalog::COLLECTIONS => self.collection_docs(),
+            crate::storage::catalog::FIELDS => self.field_docs(),
+            crate::storage::catalog::INDEXES => self.index_docs(),
+            crate::storage::catalog::USERS => self.user_docs(),
+            crate::storage::catalog::ROLES => self.role_docs(),
+            crate::storage::catalog::VIEWS => self.view_docs(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn database_docs(&self) -> Vec<Document> {
+        let mut names = std::collections::BTreeSet::new();
+        names.insert("admin".to_string());
+        for key in self.collections.keys() {
+            if crate::storage::catalog::is_catalog(key) {
+                continue;
+            }
+            names.insert(crate::storage::catalog::database_of(key).to_string());
+        }
+        for view in &self.views {
+            names.insert(crate::storage::catalog::database_of(&view.name).to_string());
+        }
+        names
+            .into_iter()
+            .map(|name| doc! { "_id": name.clone(), "name": name })
+            .collect()
+    }
+
+    fn collection_docs(&self) -> Vec<Document> {
+        let mut names: Vec<&String> = self
+            .collections
+            .keys()
+            .filter(|name| !crate::storage::catalog::is_catalog(name))
+            .collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|namespace| {
+                let state = &self.collections[namespace];
+                let database = crate::storage::catalog::database_of(namespace);
+                let name = crate::storage::catalog::bare_name(namespace);
+                let mut ids: Vec<&String> = state.ids.iter().collect();
+                ids.sort();
+                let mut document = doc! {
+                    "_id": namespace.clone(),
+                    "database": database,
+                    "name": name,
+                    "doc_count": state.doc_count as i64,
+                    "pages": crate::storage::catalog::u64s(&state.pages),
+                    "overflow": crate::storage::catalog::u64s(
+                        &state.overflow_heads.iter().copied().collect::<Vec<_>>(),
+                    ),
+                    "continuations": crate::storage::catalog::u64s(&state.continuations),
+                    "ids": ids.into_iter().cloned().collect::<Vec<_>>(),
+                };
+                if let Some(validator) = &state.validator {
+                    document.insert("validator", validator.clone());
+                }
+                document
+            })
+            .collect()
+    }
+
+    fn field_docs(&self) -> Vec<Document> {
+        let mut names: Vec<&String> = self
+            .collections
+            .keys()
+            .filter(|name| !crate::storage::catalog::is_catalog(name))
+            .collect();
+        names.sort();
+        let mut documents = Vec::new();
+        for namespace in names {
+            let state = &self.collections[namespace];
+            let mut fields = state.fields.clone();
+            fields.sort();
+            for (field, type_name) in fields {
+                documents.push(doc! {
+                    "_id": format!("{namespace}.{field}"),
+                    "ns": namespace.clone(),
+                    "database": crate::storage::catalog::database_of(namespace),
+                    "collection": crate::storage::catalog::bare_name(namespace),
+                    "field": field,
+                    "type": type_name,
+                });
+            }
+        }
+        documents
+    }
+
+    fn index_docs(&self) -> Vec<Document> {
+        let mut names: Vec<&String> = self
+            .collections
+            .keys()
+            .filter(|name| !crate::storage::catalog::is_catalog(name))
+            .collect();
+        names.sort();
+        let mut documents = Vec::new();
+        for namespace in names {
+            for spec in &self.collections[namespace].indexes {
+                let name = spec.get_str("name").unwrap_or("index");
+                documents.push(doc! {
+                    "_id": format!("{namespace}.{name}"),
+                    "ns": namespace.clone(),
+                    "database": crate::storage::catalog::database_of(namespace),
+                    "collection": crate::storage::catalog::bare_name(namespace),
+                    "name": name,
+                    "spec": spec.clone(),
+                });
+            }
+        }
+        documents
+    }
+
+    fn user_docs(&self) -> Vec<Document> {
+        self.users
+            .iter()
+            .map(|user| {
+                let mut document = doc! { "_id": user.name.clone() };
+                if let Bson::Document(body) = user_to_bson(user) {
+                    for (key, value) in body {
+                        document.insert(key, value);
+                    }
+                }
+                document
+            })
+            .collect()
+    }
+
+    fn role_docs(&self) -> Vec<Document> {
+        self.roles
+            .iter()
+            .map(|role| {
+                let mut document = doc! { "_id": role.name.clone() };
+                if let Bson::Document(body) = role_to_bson(role) {
+                    for (key, value) in body {
+                        document.insert(key, value);
+                    }
+                }
+                document
+            })
+            .collect()
+    }
+
+    fn view_docs(&self) -> Vec<Document> {
+        self.views
+            .iter()
+            .map(|view| {
+                let mut document = doc! { "_id": view.name.clone() };
+                if let Bson::Document(body) = view_to_bson(view) {
+                    for (key, value) in body {
+                        document.insert(key, value);
+                    }
+                }
+                document
+            })
+            .collect()
     }
 
     pub fn insert(
@@ -657,6 +1088,13 @@ impl Heap {
         collection: &str,
         filter: &Document,
     ) -> Result<Vec<Document>, String> {
+        if crate::storage::catalog::is_catalog(collection) {
+            return Ok(self
+                .catalog_documents(collection)
+                .into_iter()
+                .filter(|document| document_matches(document, filter))
+                .collect());
+        }
         let mut matches = Vec::new();
         self.for_each_in(pool, collection, &mut |doc| {
             if document_matches(doc, filter) {
@@ -672,6 +1110,13 @@ impl Heap {
         collection: &str,
         filter: &Document,
     ) -> Result<u64, String> {
+        if crate::storage::catalog::is_catalog(collection) {
+            return Ok(self
+                .catalog_documents(collection)
+                .iter()
+                .filter(|document| document_matches(document, filter))
+                .count() as u64);
+        }
         let mut count = 0u64;
         self.for_each_in(pool, collection, &mut |doc| {
             if document_matches(doc, filter) {
@@ -743,6 +1188,9 @@ impl Heap {
                 .map(|state| state.overflow_heads.clone())
                 .unwrap_or_default();
             for page_id in pages {
+                if !crate::storage::catalog::is_catalog(&name) {
+                    self.user_page_reads += 1;
+                }
                 if heads.contains(&page_id) {
                     let doc = self.read_overflow(pool, page_id)?;
                     visit(&name, &doc);
@@ -777,6 +1225,9 @@ impl Heap {
             .map(|state| state.overflow_heads.clone())
             .unwrap_or_default();
         for page_id in pages {
+            if !crate::storage::catalog::is_catalog(collection) {
+                self.user_page_reads += 1;
+            }
             if heads.contains(&page_id) {
                 let doc = self.read_overflow(pool, page_id)?;
                 visit(&doc);
@@ -835,6 +1286,11 @@ impl Heap {
             }
             if changed {
                 self.write_docs(pool, collection, page_id, docs)?;
+            }
+        }
+        if let Some(state) = self.collections.get_mut(collection) {
+            for document in &updated {
+                record_fields(state, document);
             }
         }
         Ok((matched, updated))
@@ -970,6 +1426,7 @@ impl Heap {
         let state = self.collections.get_mut(collection).unwrap();
         state.doc_count += 1;
         state.ids.insert(document_id_string(document));
+        record_fields(state, document);
     }
 
     /// Appends to the last normal page. When that page is full, the
@@ -1498,6 +1955,19 @@ fn string_list(doc: &Document, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn record_fields(state: &mut CollectionState, document: &Document) {
+    for (key, value) in document {
+        let type_name = crate::storage::catalog::type_name(value);
+        if let Some((_, existing)) = state.fields.iter_mut().find(|(name, _)| name == key) {
+            if existing != type_name && existing != "mixed" {
+                *existing = "mixed".to_string();
+            }
+        } else {
+            state.fields.push((key.clone(), type_name.to_string()));
+        }
+    }
 }
 
 fn catalog_body(payload: &[u8]) -> Result<Document, String> {

@@ -106,7 +106,13 @@ impl StorageEngine {
         let manifest = self.read_manifest()?;
         self.wal.set_next_lsn(manifest.next_lsn);
         let ids = self.disk.list_ids()?;
-        self.heap.discover(&mut self.pool, &ids)?;
+        let warm = self
+            .heap
+            .try_load_catalog(&mut self.pool, ids.contains(&1))?;
+        if !warm {
+            self.heap.discover(&mut self.pool, &ids)?;
+        }
+        self.heap.ensure_catalog();
         self.heap.advance_next_page_id(manifest.next_page_id);
 
         let records = self.wal.replay()?;
@@ -156,7 +162,8 @@ impl StorageEngine {
     pub fn checkpoint_pages(&mut self) -> Result<(), String> {
         let lsn = self.wal.last_lsn();
         self.heap.set_applied_lsn(lsn);
-        self.heap.persist_catalog(&mut self.pool)?;
+        self.heap.publish(&mut self.pool, &self.disk)?;
+        self.heap.write_root(&mut self.pool)?;
         self.pool.flush()?;
         let stats = self.pool.stats();
         LOGGER.debug(format!(
@@ -321,6 +328,39 @@ impl StorageEngine {
             .drop_database(&mut self.pool, &self.disk, database)
     }
 
+    pub fn publish_catalog(&mut self) -> Result<(), String> {
+        self.heap.publish(&mut self.pool, &self.disk)
+    }
+
+    pub fn catalog_is_warm(&self) -> bool {
+        self.heap.catalog_is_warm()
+    }
+
+    pub fn user_page_reads(&self) -> u64 {
+        self.heap.user_page_reads()
+    }
+
+    pub fn applied_lsn(&self) -> u64 {
+        self.heap.applied_lsn()
+    }
+
+    pub fn field_types(&self, collection: &str) -> Vec<(String, String)> {
+        self.heap.field_types(collection)
+    }
+
+    pub fn reconcile_fields(&mut self) -> Result<usize, String> {
+        self.heap.reconcile_fields(&mut self.pool)
+    }
+
+    #[cfg(test)]
+    pub fn clear_fields(&mut self, collection: &str) {
+        self.heap.clear_fields(collection);
+    }
+
+    pub fn refresh_ids(&mut self, collection: &str) -> Result<(), String> {
+        self.heap.refresh_ids(&mut self.pool, collection)
+    }
+
     pub fn bson_size(&mut self, collection: &str) -> Result<Option<(u64, u64)>, String> {
         self.heap.bson_size(&mut self.pool, collection)
     }
@@ -442,6 +482,87 @@ mod tests {
         let path = std::env::temp_dir().join(format!("kova-engine-{}-{}", std::process::id(), n));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn test_catalog_restart_does_not_read_user_pages() {
+        let dir = scratch();
+        let config = config(&dir);
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let documents: Vec<_> = (0..6)
+            .map(|n| doc! { "_id": n, "name": format!("row-{n}"), "pad": "p".repeat(400) })
+            .collect();
+        engine.insert_documents("db.t", documents).unwrap();
+        engine.checkpoint_pages().unwrap();
+        drop(engine);
+
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        assert!(engine.catalog_is_warm());
+        assert_eq!(engine.user_page_reads(), 0);
+        assert!(engine.names().iter().any(|name| name == "db.t"));
+        assert!(engine.names().iter().any(|name| name == "admin.fields"));
+        let fields = engine.field_types("db.t");
+        assert!(
+            fields.iter().any(|(name, kind)| name == "name" && kind == "string"),
+            "{fields:?}"
+        );
+        assert!(
+            fields.iter().any(|(name, kind)| name == "_id" && kind == "int"),
+            "{fields:?}"
+        );
+        let found = engine
+            .find_documents("db.t", &doc! { "name": "row-5" })
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].get_str("name").unwrap(), "row-5");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_empty_field_catalog_is_rebuilt_from_the_documents() {
+        let dir = scratch();
+        let config = config(&dir);
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        engine
+            .insert_documents(
+                "db.emp",
+                vec![doc! { "_id": 1i32, "ename": "SMITH", "sal": 800i32 }],
+            )
+            .unwrap();
+        engine.clear_fields("db.emp");
+        engine.checkpoint_pages().unwrap();
+        drop(engine);
+
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        assert!(engine.field_types("db.emp").is_empty());
+        let rebuilt = engine.reconcile_fields().unwrap();
+        assert_eq!(rebuilt, 1);
+        let fields = engine.field_types("db.emp");
+        assert!(
+            fields.iter().any(|(name, kind)| name == "ename" && kind == "string"),
+            "{fields:?}"
+        );
+        assert!(
+            fields.iter().any(|(name, kind)| name == "sal" && kind == "int"),
+            "{fields:?}"
+        );
+        engine.checkpoint_pages().unwrap();
+        drop(engine);
+
+        let mut engine = StorageEngine::open(0, &config).unwrap();
+        engine.load().unwrap();
+        let reads = engine.user_page_reads();
+        assert_eq!(engine.reconcile_fields().unwrap(), 0);
+        assert_eq!(engine.user_page_reads(), reads);
+        assert!(engine
+            .field_types("db.emp")
+            .iter()
+            .any(|(name, _)| name == "ename"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

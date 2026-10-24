@@ -169,8 +169,10 @@ Rust concurrency, memory management, and storage engine design.
   Finds, updates, and SQL walk pages; they do not keep the collection.
 - **Durability on disk:** mutations go to the WAL before a page is dirtied.
   A checkpoint flushes dirty pages, records the LSN, and truncates that WAL.
-- **Startup:** discover the page files, overlay the catalog, and replay the
-  WAL tail onto the pages. The search index is rebuilt by scanning pages.
+- **Startup:** read the `admin` catalog (databases, collections, fields,
+  indexes, users, views) and replay the WAL tail. The search index opens
+  from `text/`. Secondary indexes open from `indexes.bin`. A directory
+  written before that catalog is scanned once.
 
 #### 4.3.5 MVCC + Transactions (Phase 9)
 
@@ -196,10 +198,11 @@ Rust concurrency, memory management, and storage engine design.
 ### 4.4 Indexing Subsystem (Phase 10)
 
 Document pages stay the database. Each secondary index is an in-memory
-B-tree or hash, rebuilt at startup by scanning pages through the buffer
-pool. The catalog page stores the index spec. Entries point at the
-document id. The fetch reads pages and keeps the ids the index named,
-because an update can move a document between pages.
+B-tree or hash. A checkpoint writes the entries to `indexes.bin`. Startup
+opens that file when its LSN matches the catalog. A missing snapshot is
+rebuilt by scanning pages. Entries point at the document id. The fetch
+reads pages and keeps the ids the index named, because an update can move
+a document between pages.
 
 - **B-Tree:** an equality prefix and one range on the next field. Keys
   are ascending. `10` and `10.0` share a key.

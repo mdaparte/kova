@@ -37,7 +37,7 @@ replication, and multi-model indexing.
 | 21 | ODBC catalog for GUI clients | ⚪ Planned |
 | 22 | `kovadump` backup and restore | ✅ Complete |
 | 23 | Sharding | ⚪ Planned |
-| 24 | Physical catalog (`admin`) | ⚪ Planned |
+| 24 | Physical catalog (`admin`) | ✅ Complete |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -805,29 +805,28 @@ A replica set is still a full copy of every document on each voter. This phase s
 - [ ] Send a command to the shard that owns the document.
 - [ ] Test: two shards hold different documents of one collection, and a `find` on the router returns both.
 
-## Phase 24 — Physical catalog (`admin`) ⚪ Planned
+## Phase 24 — Physical catalog (`admin`) ✅ Complete
 
-A fresh `mongod` has a database named `admin`. Kova has no such database. Collection names are found by scanning page files. The search index, the secondary indexes, and the in-memory `_id` set are rebuilt by walking every document at startup (`reindex_all` in `src/storage/mod.rs`). The catalog page records the applied LSN, index specs, users, and views. It is not a list of databases, collections, and fields.
-
-This phase adds database `admin` with the instance. It holds catalog collections, not a second copy of the documents:
+A fresh process has database `admin`. `listDatabases` returns it before any user database exists. The catalog is a set of collections, not a second copy of the documents:
 
 - `admin.databases`
-- `admin.collections`
+- `admin.collections` — page lists, document count, and the `_id` set
 - `admin.fields` — field name and type
 - `admin.indexes`
+- `admin.users`, `admin.roles`, `admin.views`
 
-Users, roles, and views move into `admin` as well, so startup reads one catalog. `listDatabases` returns `admin` before any user database exists.
+Applying a command updates that catalog in memory. The checkpoint writes the rows into `admin` and a version-2 root page, then truncates the WAL. A crash before the checkpoint replays the command. A directory written by an older process is scanned once; the next checkpoint writes the catalog.
 
-A create of a database, collection, or index, and the first time a field appears, updates these collections through the same WAL as the write. Startup reads those rows. It does not scan every page file to learn which collections exist, and it does not walk every document to rebuild the search index, the secondary indexes, or the `_id` set. A later `find` still reads the document from its page.
+Startup that finds the version-2 root reads those rows. It does not scan user pages to learn which collections exist, and it does not walk documents to rebuild the search index, the secondary indexes, or the `_id` set. A collection whose field list is empty is the exception: startup reads that collection and fills `admin.fields`. The search index is the Tantivy directory `text/`. Secondary indexes are `indexes.bin`, stamped with the catalog LSN. A `find` still reads the document from its page. A find on `admin.databases` keeps one row per database.
 
 ### Phase 24 — Sub-tasks
 
-- [ ] A fresh process has database `admin`. `listDatabases` returns it with no user data.
-- [ ] `admin.databases`, `admin.collections`, `admin.fields`, and `admin.indexes` store the catalog. A field row is the name and the type.
-- [ ] Creating a database, collection, index, or a new field updates that catalog in the same WAL record as the write.
-- [ ] Users, roles, and views are read from `admin`.
-- [ ] Startup reads the catalog. It does not discover collections by scanning page files, and it does not walk every document to rebuild the search index, the secondary indexes, or the `_id` set.
-- [ ] Test: restart a process whose documents do not fit in the buffer pool. Startup does not scan those documents. `listDatabases`, `listCollections`, and the field list match the process that shut down. `find` still returns a document from its page.
+- [x] A fresh process has database `admin`. `listDatabases` returns it with no user data.
+- [x] `admin.databases`, `admin.collections`, `admin.fields`, and `admin.indexes` store the catalog. A field row is the name and the type.
+- [x] Creating a database, collection, index, or a new field updates that catalog as the command is applied. The checkpoint writes the rows before it truncates the WAL.
+- [x] Users, roles, and views are read from `admin`.
+- [x] Startup reads the catalog. It does not discover collections by scanning page files, and it does not walk every document to rebuild the search index, the secondary indexes, or the `_id` set.
+- [x] Test: restart a process whose documents do not fit in the buffer pool. Startup does not scan those documents. `listDatabases`, `listCollections`, and the field list match the process that shut down. `find` still returns a document from its page.
 
 ## Architecture Principles
 
@@ -855,7 +854,6 @@ A create of a database, collection, or index, and the first time a field appears
 |-----|-------|-------|
 | GUI ODBC clients get an empty table list | 21 | LibreOffice Base reads `SQLTables` by position and drops the list when `SQLGetInfo` fails. |
 | Sharding is not implemented | 23 | Routing scheme is chosen when the phase starts. |
-| Startup walks every document to rebuild indexes | 24 | `admin` holds databases, collections, fields, and indexes. Startup reads those rows. |
 
 ## Architecture Diagram (updated)
 
@@ -913,6 +911,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–20 and 22 are complete. Still open: ODBC catalog for GUI
-clients (Phase 21), sharding (Phase 23), and the physical `admin`
-catalog (Phase 24).*
+*Phases 1–20, 22, and 24 are complete. Still open: ODBC catalog for GUI
+clients (Phase 21) and sharding (Phase 23).*

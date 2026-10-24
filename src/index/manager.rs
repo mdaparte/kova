@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use bson::{Bson, Document};
+use bson::{doc, Bson, Document};
 
 use super::btree::{ordered_number, BTreeIndex, Component, End};
 use super::hash_index::HashIndex;
@@ -226,6 +226,185 @@ impl IndexManager {
         let position = indexes.iter().position(|index| index.name == "_id_")?;
         Some(indexes.remove(position))
     }
+
+    /// Bytes of every index entry, stamped with the catalog LSN.
+    pub fn to_bytes(&self, lsn: u64) -> Result<Vec<u8>, String> {
+        let mut collections = Document::new();
+        let mut names: Vec<&String> = self.by_collection.keys().collect();
+        names.sort();
+        for name in names {
+            let specs = self.by_collection[name]
+                .iter()
+                .map(spec_to_bson)
+                .collect::<Vec<_>>();
+            collections.insert(name, specs);
+        }
+        let body = doc! {
+            "lsn": lsn as i64,
+            "collections": collections,
+        };
+        bson::to_vec(&body).map_err(|err| format!("index snapshot: {err}"))
+    }
+
+    /// Restores indexes written by [`Self::to_bytes`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<(u64, Self), String> {
+        let body: Document =
+            bson::from_slice(bytes).map_err(|err| format!("index snapshot: {err}"))?;
+        let lsn = body.get_i64("lsn").unwrap_or(0) as u64;
+        let mut manager = Self::new();
+        let Some(collections) = body.get_document("collections").ok() else {
+            return Ok((lsn, manager));
+        };
+        for (name, value) in collections {
+            let Some(specs) = value.as_array() else {
+                continue;
+            };
+            let parsed = specs
+                .iter()
+                .filter_map(|value| value.as_document())
+                .map(spec_from_bson)
+                .collect::<Result<Vec<_>, _>>()?;
+            if !parsed.is_empty() {
+                manager.by_collection.insert(name.clone(), parsed);
+            }
+        }
+        Ok((lsn, manager))
+    }
+}
+
+fn spec_to_bson(spec: &Spec) -> Document {
+    let btree = spec
+        .btree
+        .pairs()
+        .into_iter()
+        .map(|(key, ids)| {
+            doc! {
+                "key": key.iter().map(component_to_bson).collect::<Vec<_>>(),
+                "ids": ids,
+            }
+        })
+        .collect::<Vec<_>>();
+    let hash = spec
+        .hash
+        .pairs()
+        .into_iter()
+        .map(|(key, ids)| doc! { "key": key, "ids": ids })
+        .collect::<Vec<_>>();
+    doc! {
+        "name": spec.name.clone(),
+        "fields": spec.fields.clone(),
+        "kind": match spec.kind {
+            Kind::BTree => "btree",
+            Kind::Hash => "hash",
+        },
+        "unique": spec.unique,
+        "sparse": spec.sparse,
+        "btree": btree,
+        "hash": hash,
+    }
+}
+
+fn spec_from_bson(document: &Document) -> Result<Spec, String> {
+    let name = document
+        .get_str("name")
+        .map_err(|_| "index snapshot entry has no name")?
+        .to_string();
+    let fields = document
+        .get_array("fields")
+        .ok()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let kind = match document.get_str("kind").unwrap_or("btree") {
+        "hash" => Kind::Hash,
+        _ => Kind::BTree,
+    };
+    let btree = document
+        .get_array("btree")
+        .ok()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_document())
+                .map(|row| {
+                    let key = row
+                        .get_array("key")
+                        .ok()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|value| value.as_document().and_then(component_from_bson))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let ids = string_list(row, "ids");
+                    Ok((key, ids))
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let hash = document
+        .get_array("hash")
+        .ok()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_document())
+                .map(|row| {
+                    (
+                        row.get_str("key").unwrap_or("").to_string(),
+                        string_list(row, "ids"),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Spec {
+        name,
+        fields,
+        kind,
+        unique: document.get_bool("unique").unwrap_or(false),
+        sparse: document.get_bool("sparse").unwrap_or(false),
+        btree: BTreeIndex::from_pairs(btree),
+        hash: HashIndex::from_pairs(hash),
+    })
+}
+
+fn component_to_bson(component: &Component) -> Document {
+    match component {
+        Component::Null => doc! { "t": "null" },
+        Component::Number(bits) => doc! { "t": "number", "v": bits.to_string() },
+        Component::Bool(value) => doc! { "t": "bool", "v": *value },
+        Component::String(value) => doc! { "t": "string", "v": value.clone() },
+        Component::Other(value) => doc! { "t": "other", "v": value.clone() },
+    }
+}
+
+fn component_from_bson(document: &Document) -> Option<Component> {
+    Some(match document.get_str("t").ok()? {
+        "null" => Component::Null,
+        "number" => Component::Number(document.get_str("v").ok()?.parse().ok()?),
+        "bool" => Component::Bool(document.get_bool("v").ok()?),
+        "string" => Component::String(document.get_str("v").ok()?.to_string()),
+        "other" => Component::Other(document.get_str("v").ok()?.to_string()),
+        _ => return None,
+    })
+}
+
+fn string_list(document: &Document, key: &str) -> Vec<String> {
+    document
+        .get_array(key)
+        .ok()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn id_spec() -> Spec {

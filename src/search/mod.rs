@@ -17,6 +17,8 @@
 //! `*` or `?` are expanded to anchored regexes (Solr-style wildcards).
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use tantivy::collector::TopDocs;
 use tantivy::query::{
@@ -28,7 +30,8 @@ use tantivy::schema::{
 use tantivy::tokenizer::{
     Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
 };
-use tantivy::{doc, Index, IndexReader, IndexWriter, TantivyDocument, Term};
+use tantivy::directory::MmapDirectory;
+use tantivy::{doc, Index, IndexReader, IndexSettings, IndexWriter, TantivyDocument, Term};
 
 mod disk;
 
@@ -80,6 +83,8 @@ pub struct SearchIndex {
     stopwords: Vec<String>,
     /// Fields already reported as skipped (avoids log spam).
     skipped_fields: HashSet<String>,
+    /// Directory of one subdirectory per field. Absent for a RAM index.
+    root: Option<PathBuf>,
 }
 
 impl SearchIndex {
@@ -98,7 +103,71 @@ impl SearchIndex {
             analyzer: analyzer.to_string(),
             stopwords: stopwords.to_vec(),
             skipped_fields: HashSet::new(),
+            root: None,
         }
+    }
+
+    /// Opens field indexes stored under `root`, or an empty directory.
+    pub fn open(root: &Path) -> Result<Self, String> {
+        fs::create_dir_all(root).map_err(|err| format!("search dir: {err}"))?;
+        let analyzer = CONFIG.search.analyzer.clone();
+        let stopwords = CONFIG.search.stopwords.clone();
+        let mut fields = HashMap::new();
+        for entry in fs::read_dir(root).map_err(|err| format!("search dir: {err}"))? {
+            let entry = entry.map_err(|err| format!("search dir: {err}"))?;
+            if !entry
+                .file_type()
+                .map(|kind| kind.is_dir())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let name_path = entry.path().join("name.txt");
+            let Ok(name) = fs::read_to_string(&name_path) else {
+                continue;
+            };
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            fields.insert(
+                name,
+                TextIndex::open(&entry.path(), &analyzer, &stopwords)?,
+            );
+        }
+        Ok(Self {
+            fields,
+            analyzer,
+            stopwords,
+            skipped_fields: HashSet::new(),
+            root: Some(root.to_path_buf()),
+        })
+    }
+
+    /// Whether new field indexes are written under a directory.
+    pub fn is_durable(&self) -> bool {
+        self.root.is_some()
+    }
+
+    /// Drops the field indexes and, when they live on disk, the directory.
+    pub fn reset(&mut self) -> Result<(), String> {
+        self.fields.clear();
+        self.skipped_fields.clear();
+        if let Some(root) = &self.root {
+            if root.exists() {
+                fs::remove_dir_all(root).map_err(|err| format!("search reset: {err}"))?;
+            }
+            fs::create_dir_all(root).map_err(|err| format!("search dir: {err}"))?;
+        }
+        Ok(())
+    }
+
+    /// Makes indexed documents visible after a restart.
+    pub fn commit(&mut self) -> Result<(), String> {
+        for index in self.fields.values_mut() {
+            index.commit()?;
+        }
+        Ok(())
     }
 
     /// Indexes (or re-indexes) one document's field values.
@@ -126,15 +195,26 @@ impl SearchIndex {
                 continue;
             }
 
-            let index = match self.fields.entry(name.clone()) {
-                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(TextIndex::new(&self.analyzer, &self.stopwords)?)
-                }
-            };
-            index.add(collection, doc_id, text)?;
+            if !self.fields.contains_key(name) {
+                let created = self.open_field(name)?;
+                self.fields.insert(name.clone(), created);
+            }
+            self.fields
+                .get_mut(name)
+                .expect("field index was just inserted")
+                .add(collection, doc_id, text)?;
         }
         Ok(())
+    }
+
+    fn open_field(&self, name: &str) -> Result<TextIndex, String> {
+        let Some(root) = &self.root else {
+            return TextIndex::new(&self.analyzer, &self.stopwords);
+        };
+        let dir = root.join(field_dir(name));
+        fs::create_dir_all(&dir).map_err(|err| format!("search dir: {err}"))?;
+        fs::write(dir.join("name.txt"), name).map_err(|err| format!("search name: {err}"))?;
+        TextIndex::open(&dir, &self.analyzer, &self.stopwords)
     }
 
     /// Removes one document from every field index (best effort).
@@ -264,6 +344,33 @@ impl TextIndex {
         })
     }
 
+    /// Opens the field index in `path`, creating it when the directory is empty.
+    fn open(path: &Path, analyzer: &str, stopwords: &[String]) -> Result<Self, String> {
+        let (index, fields) = open_text_index(path, analyzer, stopwords)?;
+        let writer = index
+            .writer_with_num_threads(1, WRITER_MEMORY_BUDGET)
+            .map_err(|err| format!("failed to create search writer: {}", err))?;
+        let reader = index
+            .reader()
+            .map_err(|err| format!("failed to create search reader: {}", err))?;
+        Ok(Self {
+            index,
+            writer,
+            reader,
+            fields,
+        })
+    }
+
+    fn commit(&mut self) -> Result<(), String> {
+        self.writer
+            .commit()
+            .map_err(|err| format!("search commit failed: {}", err))?;
+        self.reader
+            .reload()
+            .map_err(|err| format!("search reload failed: {}", err))?;
+        Ok(())
+    }
+
     /// Indexes (or re-indexes) one document's text for this field.
     fn add(&mut self, collection: &str, doc_id: &str, text: &str) -> Result<(), String> {
         let document = doc!(
@@ -381,6 +488,62 @@ pub(super) fn build_analyzer(kind: &str, stopwords: &[String]) -> TextAnalyzer {
             .filter(StopWordFilter::remove(stopwords.iter().cloned()))
             .build(),
     }
+}
+
+fn field_dir(name: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn text_schema() -> Schema {
+    let mut builder = Schema::builder();
+    builder.add_text_field("collection", STRING);
+    builder.add_text_field("doc_id", STRING | STORED);
+    builder.add_text_field("unique_key", STRING);
+    let text_options = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer(TOKENIZER_NAME)
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
+    builder.add_text_field("text", text_options);
+    builder.build()
+}
+
+fn open_text_index(
+    path: &Path,
+    analyzer: &str,
+    stopwords: &[String],
+) -> Result<(Index, Fields), String> {
+    let directory = MmapDirectory::open(path).map_err(|err| format!("search mmap: {err}"))?;
+    let index = if Index::exists(&directory).unwrap_or(false) {
+        Index::open(directory).map_err(|err| format!("search open: {err}"))?
+    } else {
+        Index::create(directory, text_schema(), IndexSettings::default())
+            .map_err(|err| format!("search create: {err}"))?
+    };
+    index
+        .tokenizers()
+        .register(TOKENIZER_NAME, build_analyzer(analyzer, stopwords));
+    let schema = index.schema();
+    let fields = Fields {
+        collection: schema
+            .get_field("collection")
+            .map_err(|err| format!("search schema: {err}"))?,
+        doc_id: schema
+            .get_field("doc_id")
+            .map_err(|err| format!("search schema: {err}"))?,
+        unique_key: schema
+            .get_field("unique_key")
+            .map_err(|err| format!("search schema: {err}"))?,
+        text: schema
+            .get_field("text")
+            .map_err(|err| format!("search schema: {err}"))?,
+    };
+    Ok((index, fields))
 }
 
 /// Builds the tantivy-unique key for one document.

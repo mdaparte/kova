@@ -41,6 +41,19 @@ impl BTreeIndex {
         }
     }
 
+    pub(crate) fn pairs(&self) -> Vec<(Vec<Component>, Vec<String>)> {
+        self.entries
+            .iter()
+            .map(|(key, ids)| (key.clone(), ids.clone()))
+            .collect()
+    }
+
+    pub(crate) fn from_pairs(pairs: Vec<(Vec<Component>, Vec<String>)>) -> Self {
+        Self {
+            entries: pairs.into_iter().collect(),
+        }
+    }
+
     /// Inserts `id` under `key`. A unique index rejects a second id.
     pub fn insert(&mut self, key: Vec<Component>, id: &str, unique: bool) -> Result<(), String> {
         let ids = self.entries.entry(key).or_default();

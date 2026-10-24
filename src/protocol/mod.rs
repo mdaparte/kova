@@ -681,16 +681,18 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
     }
 
     // GUI clients drop whole databases from their sidebar.
+    // MongoDB names the database in `$db`. Some shells put the name in
+    // the `dropDatabase` string instead, while the shell is still on
+    // `admin`.
     if command.contains_key("dropDatabase") {
+        let database = match command.get_str("dropDatabase") {
+            Ok(name) if !name.is_empty() => name.to_string(),
+            _ if db.is_empty() => "admin".to_string(),
+            _ => db.to_string(),
+        };
         return bind_txn(
             txn_id,
-            PartitionCommand::DropDatabase {
-                database: if db.is_empty() {
-                    "admin".to_string()
-                } else {
-                    db.to_string()
-                },
-            },
+            PartitionCommand::DropDatabase { database },
         );
     }
 

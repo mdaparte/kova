@@ -995,6 +995,43 @@ fn catalog_round_trip(stmt_id: u64, mut command: Document) -> Result<Document, i
     }
 }
 
+/// Field rows of the connection's database, from `admin.fields`.
+fn catalog_fields(stmt_id: u64) -> Result<Vec<Document>, i16> {
+    let (conn_id, database, request, mut socket) = take_socket(stmt_id)?;
+    let mut filter = Document::new();
+    if !database.is_empty() {
+        filter.insert("database", database);
+    }
+    let command = bson::doc! { "find": "fields", "filter": filter, "$db": "admin" };
+    let exchanged = exchange(&mut socket, request, command);
+    match exchanged {
+        Ok(doc) => {
+            restore_socket(conn_id, socket);
+            if command_ok(&doc) {
+                cursor_documents(&doc).map_err(|message| stmt_error(stmt_id, "HY000", &message))
+            } else {
+                let message = doc
+                    .get_str("errmsg")
+                    .unwrap_or("catalog request failed")
+                    .to_string();
+                Err(stmt_error(stmt_id, "HY000", &message))
+            }
+        }
+        Err(message) => Err(stmt_error(stmt_id, "08S01", &message)),
+    }
+}
+
+fn catalog_odbc_type(type_name: &str) -> &'static str {
+    match type_name {
+        "int" => "INTEGER",
+        "long" => "BIGINT",
+        "double" | "decimal" => "DOUBLE",
+        "bool" => "BIT",
+        "date" | "timestamp" => "TIMESTAMP",
+        _ => "VARCHAR",
+    }
+}
+
 fn set_result(stmt_id: u64, columns: Vec<Column>, rows: Vec<Vec<Cell>>) -> i16 {
     let mut reg = registry();
     let Some(stmt) = reg.stmts.get_mut(&stmt_id) else {
@@ -1070,29 +1107,45 @@ fn columns_id(stmt_id: u64, table: Option<String>, column: Option<String>) -> i1
     } else {
         vec![table]
     };
+    let catalog = match catalog_fields(stmt_id) {
+        Ok(catalog) => catalog,
+        Err(rc) => return rc,
+    };
     let mut rows = Vec::new();
     for name in names {
-        let found = match catalog_round_trip(
-            stmt_id,
-            bson::doc! { "find": &name, "filter": {}, "limit": 32i32 },
-        ) {
-            Ok(found) => found,
-            Err(rc) => return rc,
-        };
-        let documents = match cursor_documents(&found) {
-            Ok(documents) => documents,
-            Err(message) => return stmt_error(stmt_id, "HY000", &message),
-        };
-        let mut fields: Vec<(String, &'static str)> = Vec::new();
-        for document in &documents {
-            for (key, value) in document {
-                if fields.iter().any(|(found, _)| found == key) {
-                    continue;
+        let mut fields: Vec<(String, &'static str)> = catalog
+            .iter()
+            .filter(|document| document.get_str("collection").ok() == Some(name.as_str()))
+            .filter_map(|document| {
+                let field = document.get_str("field").ok()?.to_string();
+                if !odbc_matches(column.as_deref(), &field) {
+                    return None;
                 }
-                if !odbc_matches(column.as_deref(), key) {
-                    continue;
+                Some((field, catalog_odbc_type(document.get_str("type").unwrap_or("string"))))
+            })
+            .collect();
+        if fields.is_empty() {
+            let found = match catalog_round_trip(
+                stmt_id,
+                bson::doc! { "find": &name, "filter": {}, "limit": 32i32 },
+            ) {
+                Ok(found) => found,
+                Err(rc) => return rc,
+            };
+            let documents = match cursor_documents(&found) {
+                Ok(documents) => documents,
+                Err(message) => return stmt_error(stmt_id, "HY000", &message),
+            };
+            for document in &documents {
+                for (key, value) in document {
+                    if fields.iter().any(|(found, _)| found == key) {
+                        continue;
+                    }
+                    if !odbc_matches(column.as_deref(), key) {
+                        continue;
+                    }
+                    fields.push((key.clone(), bson_type_name(value)));
                 }
-                fields.push((key.clone(), bson_type_name(value)));
             }
         }
         for (position, (field, type_name)) in fields.into_iter().enumerate() {
@@ -2080,8 +2133,9 @@ pub unsafe extern "C" fn SQLTables(
     tables_id(id, table, kind)
 }
 
-/// Lists fields of one collection by sampling its documents. `isql` uses
-/// this for `help emp`.
+/// Lists fields of one collection from `admin.fields`. `isql` uses this
+/// for `help emp`. A collection the catalog does not know yet is sampled
+/// from its documents.
 #[no_mangle]
 pub unsafe extern "C" fn SQLColumns(
     handle: *mut std::ffi::c_void,
