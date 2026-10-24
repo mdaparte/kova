@@ -193,9 +193,12 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   does not install document pages. ✅ Complete.
 - **Phase 20 — ODBC connector:** unixODBC on Linux (`libkova.so`) runs the
   same SQL as `db.runCommand({ sql })`. `UID` and `PWD` call `authenticate`. ✅ Complete.
-- **Phase 21 — `kovadump`:** backup and restore. Restore reads a Kova dump,
+- **Phase 21 — ODBC catalog for GUI clients:** `SQLTables`, `SQLColumns`,
+  and `SQLGetInfo` match the layout a database IDE reads by column position.
+  LibreOffice Base lists the collections and opens the SQL window. ⚪ Planned.
+- **Phase 22 — `kovadump`:** backup and restore. Restore reads a Kova dump,
   `pg_dump` plain SQL, `mongodump`, or `mysqldump` SQL. ⚪ Planned.
-- **Phase 22 — Sharding:** documents split across shards. The routing
+- **Phase 23 — Sharding:** documents split across shards. The routing
   scheme is chosen when the phase starts. ⚪ Planned.
 
 ---

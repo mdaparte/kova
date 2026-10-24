@@ -34,8 +34,9 @@ replication, and multi-model indexing.
 | 18 | Transactions in the oplog | ✅ Complete |
 | 19 | Snapshot shipping | ✅ Complete |
 | 20 | ODBC connector | ✅ Complete |
-| 21 | `kovadump` backup and restore | ⚪ Planned |
-| 22 | Sharding | ⚪ Planned |
+| 21 | ODBC catalog for GUI clients | ⚪ Planned |
+| 22 | `kovadump` backup and restore | ⚪ Planned |
+| 23 | Sharding | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -749,7 +750,22 @@ The connection string is `DRIVER=Kova;SERVER=host;PORT=27018;DATABASE=name`. `SE
 - [x] Pin unixODBC on Linux, and the connection string `SERVER`, `PORT`, `DATABASE`, `UID`, `PWD`.
 - [x] Test: an ODBC client runs a `SELECT` and gets the same rows as `db.runCommand({ sql })`. A wrong password is refused and the right one runs the query.
 
-## Phase 21 — `kovadump` backup and restore ⚪ Planned
+## Phase 21 — ODBC catalog for GUI clients ⚪ Planned
+
+Phase 20 answers `SQLExecDirect`. A database IDE also asks for the catalog before it draws the table list, and it reads that result by column position. LibreOffice Base 24.2 (`libodbclo.so`) calls `SQLTables` and `SQLGetInfo` from `getTables`. A `SQLGetInfo` error is caught and replaced with an empty list, which is the blank **Tables** panel and the type filter stuck on None. The SQL window throws the same error: `info type 93 is not supported` at `OTools.cxx:357`. Info type 93 is `SQL_QUOTED_IDENTIFIER_CASE`.
+
+This phase makes those catalog calls match the ODBC layout so the IDE can list collections and open a SQL window. `isql` `help` and `help <table>` keep the rows they already print. The client maps `libkova.so` for the life of the process, so a rebuilt library loads only after that process quits.
+
+Windows ODBC, `?` parameter binding, and DBeaver stay out. DBeaver Community has no ODBC driver. `SQLPrimaryKeys`, `SQLStatistics`, and `SQLGetTypeInfo` wait until a client error names the missing call.
+
+### Phase 21 — Sub-tasks
+
+- [ ] `SQLTables` returns `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`, `TABLE_TYPE`, `REMARKS` in that order. The type probe (`SQLTables` with table type `%`) returns `TABLE` and `VIEW` in column 4 and does not call the server.
+- [ ] `SQLColumns` returns the standard columns so a GUI reads `COLUMN_NAME` and `DATA_TYPE` by position.
+- [ ] `SQLGetInfo` answers the info types a GUI asks, including quoted identifier case (93). An unknown info type returns a zero or an empty string. It does not return `HYC00`.
+- [ ] Test: LibreOffice Base on DSN `Kova` lists the collections of `db` and **Ferramentas → SQL** opens. `isql` `help` and `help emp` still return their rows.
+
+## Phase 22 — `kovadump` backup and restore ⚪ Planned
 
 `kovadump` is a second binary. It backs up a running Kova and restores into one. Backup and restore talk to the server over the MongoDB port. Restore writes through the normal insert path, so the WAL, the indexes, and replication see ordinary writes.
 
@@ -762,18 +778,18 @@ Backup writes a Kova dump. Restore reads one of these four:
 
 Other container formats (PostgreSQL custom archives, MySQL binary logs) wait until they are named. The exact dialect of each foreign dump is pinned when this phase starts.
 
-### Phase 21 — Sub-tasks
+### Phase 22 — Sub-tasks
 
 - [ ] `kovadump` backup writes a Kova dump of a database on a running server.
 - [ ] Restore of that dump recreates the collections.
 - [ ] Restore a `pg_dump` plain-SQL file, a `mysqldump` SQL file, and a `mongodump` directory or archive.
 - [ ] Test: each of the four inputs restores, and a `find` returns the loaded documents.
 
-## Phase 22 — Sharding ⚪ Planned
+## Phase 23 — Sharding ⚪ Planned
 
 A replica set is still a full copy of every document on each voter. This phase splits documents across shards. The routing scheme (consistent hashing or a key range) and the shard router are chosen when the phase starts. A shard can itself be a replica set.
 
-### Phase 22 — Sub-tasks
+### Phase 23 — Sub-tasks
 
 - [ ] Choose the routing scheme and the place the router runs.
 - [ ] Send a command to the shard that owns the document.
@@ -803,8 +819,9 @@ A replica set is still a full copy of every document on each voter. This phase s
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| No backup binary | 21 | `kovadump` restores a Kova dump, `pg_dump`, `mongodump`, or `mysqldump`. |
-| Sharding is not implemented | 22 | Routing scheme is chosen when the phase starts. |
+| GUI ODBC clients get an empty table list | 21 | LibreOffice Base reads `SQLTables` by position and drops the list when `SQLGetInfo` fails. |
+| No backup binary | 22 | `kovadump` restores a Kova dump, `pg_dump`, `mongodump`, or `mysqldump`. |
+| Sharding is not implemented | 23 | Routing scheme is chosen when the phase starts. |
 
 ## Architecture Diagram (updated)
 
@@ -862,5 +879,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–20 are complete. Still open: `kovadump` (Phase 21) and sharding
-(Phase 22).*
+*Phases 1–20 are complete. Still open: ODBC catalog for GUI clients
+(Phase 21), `kovadump` (Phase 22), and sharding (Phase 23).*

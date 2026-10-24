@@ -308,8 +308,9 @@ about and ignored.
 | 18 | Transactions in the oplog: a commit is one `applyTransaction` entry |
 | 19 | Snapshot shipping: a lagged follower installs pages and replays the oplog |
 | 20 | ODBC connector for the existing DataFusion SQL path |
-| 21 | `kovadump`: backup, and restore from Kova, PostgreSQL, MongoDB, and MySQL dumps |
-| 22 | Sharding: routing scheme chosen when the phase starts |
+| 21 | ODBC catalog for GUI clients: `SQLTables`, `SQLColumns`, `SQLGetInfo` |
+| 22 | `kovadump`: backup, and restore from Kova, PostgreSQL, MongoDB, and MySQL dumps |
+| 23 | Sharding: routing scheme chosen when the phase starts |
 
 ---
 
