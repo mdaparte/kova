@@ -25,7 +25,7 @@ use crate::query_engine;
 use std::sync::Arc;
 
 use crate::storage::PartitionRouter;
-use crate::types::{PartitionCommand, PartitionResult};
+use crate::types::{PartitionCommand, PartitionResult, SearchOptions};
 
 pub mod wire {
     //! Fixed offsets of the 16-byte MongoDB Wire Protocol header.
@@ -972,73 +972,105 @@ async fn execute_command(
     // in-memory documents for that collection, and execute the query with
     // DataFusion, returning the result set as a BSON document (or an error).
     if let Ok(sql_text) = command.get_str("sql") {
+        if is_show_tables(sql_text) {
+            let db = command.get_str("$db").unwrap_or("");
+            let listed =
+                list_collections(&bson::doc! { "listCollections": 1, "$db": db }, router).await;
+            return tables_as_sql(listed);
+        }
+        if is_show_databases(sql_text) {
+            let listed = list_databases(&bson::doc! { "listDatabases": 1 }, router).await;
+            return databases_as_sql(listed);
+        }
+        if let Some(table_name) = show_index_table(sql_text) {
+            let db = command.get_str("$db").unwrap_or("");
+            let collection = if db.is_empty() {
+                table_name.clone()
+            } else {
+                format!("{}.{}", db, table_name)
+            };
+            let listed = list_indexes(router, &collection).await;
+            return indexes_as_sql(&table_name, listed);
+        }
+        if let Some(parsed) = sql_text_search(sql_text) {
+            let db = command.get_str("$db").unwrap_or("");
+            return match parsed {
+                Ok(search) => sql_text_query(router, db, search).await,
+                Err(message) => bson::doc! { "ok": 0.0, "errmsg": message },
+            };
+        }
         // A query with no FROM (`SELECT 1 AS n`) has no collection to load.
-        // A query that names one collection loads that snapshot and registers
-        // it under the spelling used in the SQL text. A single comparison in
-        // WHERE is sent as a find, so a secondary index can narrow the pages
-        // before DataFusion applies the same predicate again.
-        let pushed = sql_simple_filter(sql_text);
-        let prepared = match sql_table_name(sql_text) {
-            Some(table_name) => {
-                let db = command.get_str("$db").unwrap_or("");
-                let collection = if db.is_empty() {
-                    table_name.clone()
-                } else {
-                    format!("{}.{}", db, table_name)
-                };
-                let filter = pushed.clone().unwrap_or_default();
-                match load_collection_documents(router, &collection, &filter).await {
-                    Ok(documents) => {
-                        // An empty index answer has no columns. DataFusion
-                        // would then reject the field name, so the full
-                        // collection is loaded and the SQL predicate still
-                        // runs. The planner stage stays the one the index chose.
-                        let documents = if documents.is_empty() && pushed.is_some() {
-                            match load_collection_documents(router, &collection, &bson::doc! {})
-                                .await
-                            {
-                                Ok(documents) => documents,
-                                Err(message) => {
-                                    return bson::doc! { "ok": 0.0, "errmsg": message };
-                                }
+        // FROM and JOIN each name a collection; each snapshot is registered
+        // under the spelling used in the SQL text. A single comparison in
+        // WHERE is sent as a find only when the statement reads one
+        // collection, so a secondary index can narrow those pages before
+        // DataFusion applies the same predicate again.
+        let names = sql_table_names(sql_text);
+        let pushed = if names.len() == 1 {
+            sql_simple_filter(sql_text)
+        } else {
+            None
+        };
+        let mut prepared = Vec::with_capacity(names.len());
+        for table_name in names {
+            let db = command.get_str("$db").unwrap_or("");
+            let collection = if db.is_empty() {
+                table_name.clone()
+            } else {
+                format!("{}.{}", db, table_name)
+            };
+            let filter = pushed.clone().unwrap_or_default();
+            match load_collection_documents(router, &collection, &filter).await {
+                Ok(documents) => {
+                    // An empty index answer has no columns. DataFusion
+                    // would then reject the field name, so the full
+                    // collection is loaded and the SQL predicate still
+                    // runs. The planner stage stays the one the index chose.
+                    let documents = if documents.is_empty() && pushed.is_some() {
+                        match load_collection_documents(router, &collection, &bson::doc! {}).await {
+                            Ok(documents) => documents,
+                            Err(message) => {
+                                return bson::doc! { "ok": 0.0, "errmsg": message };
                             }
-                        } else {
-                            documents
-                        };
-                        Some((table_name, collection, documents))
-                    }
-                    Err(message) => {
-                        return bson::doc! { "ok": 0.0, "errmsg": message };
-                    }
+                        }
+                    } else {
+                        documents
+                    };
+                    prepared.push((table_name, collection, documents));
+                }
+                Err(message) => {
+                    return bson::doc! { "ok": 0.0, "errmsg": message };
                 }
             }
-            None => None,
-        };
-        let tables: Vec<(&str, std::sync::Arc<Vec<bson::Document>>)> = match &prepared {
-            Some((name, _, documents)) => vec![(name.as_str(), std::sync::Arc::clone(documents))],
-            None => Vec::new(),
-        };
-        let mut result = match query_engine::execute_sql_query(sql_text, &tables).await {
-            Ok(result) => result,
-            Err(err) => return bson::doc! { "ok": 0.0, "errmsg": err.to_string() },
-        };
-        if prepared.is_none() {
+        }
+        let tables: Vec<(&str, std::sync::Arc<Vec<bson::Document>>)> = prepared
+            .iter()
+            .map(|(name, _, documents)| (name.as_str(), std::sync::Arc::clone(documents)))
+            .collect();
+        let mut result =
+            match query_engine::execute_sql_query(&sql_for_engine(sql_text), &tables).await {
+                Ok(result) => result,
+                Err(err) => return bson::doc! { "ok": 0.0, "errmsg": err.to_string() },
+            };
+        if prepared.is_empty() {
             crate::metrics::METRICS.query();
         }
-        if let (Some(filter), Some((_, collection, _))) = (pushed, prepared) {
-            if let Some((stage, index_name)) = index_plan(router, &collection, filter).await {
-                let mut plan = bson::doc! { "stage": stage };
-                if let Some(name) = index_name {
-                    plan.insert("indexName", name);
+        if let Some(filter) = pushed {
+            if let [(_, collection, _)] = prepared.as_slice() {
+                if let Some((stage, index_name)) = index_plan(router, collection, filter).await {
+                    let mut plan = bson::doc! { "stage": stage };
+                    if let Some(name) = index_name {
+                        plan.insert("indexName", name);
+                    }
+                    result.insert(
+                        "queryPlanner",
+                        bson::doc! {
+                            "plannerVersion": 1i32,
+                            "namespace": collection.clone(),
+                            "winningPlan": plan,
+                        },
+                    );
                 }
-                result.insert(
-                    "queryPlanner",
-                    bson::doc! {
-                        "plannerVersion": 1i32,
-                        "namespace": collection,
-                        "winningPlan": plan,
-                    },
-                );
             }
         }
         return result;
@@ -1092,37 +1124,980 @@ async fn execute_command(
     }
 }
 
-/// Extracts a table/collection name from a simple SQL FROM clause.
+/// The first collection a statement reads.
 ///
-/// The keyword match is case-insensitive, but the identifier is returned
-/// with its original spelling. MongoDB collection names are case-sensitive,
-/// so uppercasing `users` into `USERS` loads an empty collection: `SELECT *`
-/// comes back with no rows, and `WHERE age > 25` fails with "No field named
-/// age" because the empty snapshot has no columns.
-///
-/// This is intentionally minimal for Phase 5. It does not handle joins,
-/// subqueries, or schema-qualified names.
+/// `FROM`, `JOIN`, `DESCRIBE`, and `SHOW COLUMNS` all contribute. See
+/// [`sql_table_names`] when the statement names more than one.
 fn sql_table_name(sql: &str) -> Option<String> {
-    let bytes = sql.as_bytes();
-    let from_pos = (0..bytes.len().saturating_sub(3)).find(|&index| {
-        let word = &bytes[index..index + 4];
-        word.eq_ignore_ascii_case(b"from")
-            && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric())
-            && (index + 4 >= bytes.len() || !bytes[index + 4].is_ascii_alphanumeric())
-    })?;
+    sql_table_names(sql).into_iter().next()
+}
 
-    let after_from = sql.get(from_pos + 4..)?;
-    let trimmed = after_from.trim_start();
-    let end = trimmed
-        .find(|c: char| c.is_whitespace() || c == '(' || c == ',' || c == ';')
-        .unwrap_or(trimmed.len());
-    let name = trimmed[..end]
-        .trim()
+/// Every stored collection a statement reads, in SQL spelling.
+///
+/// `FROM` and `JOIN` each name a collection, including comma lists
+/// (`FROM emp, dept`) and joins written inside a subquery. `DESCRIBE`
+/// and `SHOW COLUMNS` name one. `information_schema` is DataFusion's
+/// catalog and is not stored. `EXTRACT(x FROM y)` is not a table
+/// reference. The keyword match is case-insensitive; the identifier
+/// keeps its original spelling.
+fn sql_table_names(sql: &str) -> Vec<String> {
+    if let Some(name) = catalog_table_name(sql) {
+        return vec![name];
+    }
+    relation_names(sql)
+}
+
+fn is_information_schema(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "information_schema" || name.starts_with("information_schema.")
+}
+
+fn catalog_table_name(sql: &str) -> Option<String> {
+    let text = sql.trim().trim_end_matches(';').trim();
+    let mut words = text.split_whitespace();
+    let first = words.next()?;
+    if first.eq_ignore_ascii_case("describe") || first.eq_ignore_ascii_case("desc") {
+        return bare_table(words.next()?);
+    }
+    if first.eq_ignore_ascii_case("show") {
+        let second = words.next()?;
+        if second.eq_ignore_ascii_case("columns") || second.eq_ignore_ascii_case("fields") {
+            let keyword = words.next()?;
+            if keyword.eq_ignore_ascii_case("from") || keyword.eq_ignore_ascii_case("in") {
+                return bare_table(words.next()?);
+            }
+        }
+    }
+    None
+}
+
+fn bare_table(token: &str) -> Option<String> {
+    let name = token
+        .trim_end_matches(';')
         .trim_matches(|c| c == '"' || c == '`' || c == '\'');
-    if name.is_empty() {
+    if name.is_empty() || is_information_schema(name) {
+        return None;
+    }
+    let bare = name.rsplit('.').next().unwrap_or(name);
+    let bare = bare.trim_matches(|c| c == '"' || c == '`' || c == '\'');
+    if bare.is_empty() {
         None
     } else {
-        Some(name.to_string())
+        Some(bare.to_string())
+    }
+}
+
+/// Table names that follow `FROM` or `JOIN` outside a function call.
+fn relation_names(sql: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 0;
+    // Depth 0 is the statement. A parenthesis starts a new frame that
+    // becomes a table source only after its own SELECT, so
+    // `EXTRACT(YEAR FROM hiredate)` does not load `hiredate`.
+    let mut select_at_depth = vec![true];
+    while index < sql.len() {
+        let ch = sql[index..]
+            .chars()
+            .next()
+            .expect("index on a char boundary");
+        if ch == '\'' || ch == '"' || ch == '`' {
+            index = skip_quoted(sql, index);
+            continue;
+        }
+        if ch == '(' {
+            select_at_depth.push(false);
+            index += 1;
+            continue;
+        }
+        if ch == ')' {
+            if select_at_depth.len() > 1 {
+                select_at_depth.pop();
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(word) = word_at(sql, index) {
+            let word_len = word.len();
+            if word.eq_ignore_ascii_case("select") {
+                if let Some(flag) = select_at_depth.last_mut() {
+                    *flag = true;
+                }
+            }
+            let source = (word.eq_ignore_ascii_case("from") || word.eq_ignore_ascii_case("join"))
+                && select_at_depth.last().copied().unwrap_or(false);
+            if source {
+                index = take_relation_list(sql, index + word_len, &mut names);
+                continue;
+            }
+            index += word_len;
+            continue;
+        }
+        index += ch.len_utf8();
+    }
+    names
+}
+
+fn take_relation_list(sql: &str, mut index: usize, names: &mut Vec<String>) -> usize {
+    loop {
+        index = skip_ws(sql, index);
+        if index >= sql.len() || sql.as_bytes()[index] == b'(' {
+            return index;
+        }
+        let Some((name, next)) = sql_relation_token(sql, index) else {
+            return index;
+        };
+        if let Some(bare) = bare_table(&name) {
+            if !names.iter().any(|existing| existing == &bare) {
+                names.push(bare);
+            }
+        }
+        index = skip_relation_tail(sql, next);
+        index = skip_ws(sql, index);
+        if index < sql.len() && sql.as_bytes()[index] == b',' {
+            index += 1;
+            continue;
+        }
+        return index;
+    }
+}
+
+fn skip_relation_tail(sql: &str, index: usize) -> usize {
+    let index = skip_ws(sql, index);
+    let Some((word, next)) = sql_relation_token(sql, index) else {
+        return index;
+    };
+    if is_sql_clause_word(&word) {
+        return index;
+    }
+    if word.eq_ignore_ascii_case("as") {
+        let after = skip_ws(sql, next);
+        return sql_relation_token(sql, after)
+            .map(|(_, alias_end)| alias_end)
+            .unwrap_or(after);
+    }
+    next
+}
+
+fn is_sql_clause_word(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "where"
+            | "group"
+            | "order"
+            | "limit"
+            | "having"
+            | "union"
+            | "except"
+            | "intersect"
+            | "window"
+            | "offset"
+            | "fetch"
+            | "join"
+            | "inner"
+            | "left"
+            | "right"
+            | "full"
+            | "cross"
+            | "natural"
+            | "outer"
+            | "on"
+            | "using"
+            | "from"
+            | "select"
+            | "with"
+            | "qualify"
+    )
+}
+
+fn sql_relation_token(sql: &str, index: usize) -> Option<(String, usize)> {
+    let rest = sql.get(index..)?;
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    if first == '"' || first == '`' || first == '\'' {
+        let mut name = String::new();
+        let mut consumed = first.len_utf8();
+        for ch in chars {
+            consumed += ch.len_utf8();
+            if ch == first {
+                break;
+            }
+            name.push(ch);
+        }
+        if name.is_empty() {
+            return None;
+        }
+        return Some((name, index + consumed));
+    }
+    if !(first.is_ascii_alphanumeric() || first == '_') {
+        return None;
+    }
+    let mut end = index + first.len_utf8();
+    while let Some(ch) = sql[end..].chars().next() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    Some((sql[index..end].to_string(), end))
+}
+
+fn word_at(sql: &str, index: usize) -> Option<&str> {
+    let bytes = sql.as_bytes();
+    if index > 0 {
+        let prev = bytes[index - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    let rest = sql.get(index..)?;
+    let len = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    if len == 0 {
+        None
+    } else {
+        Some(&rest[..len])
+    }
+}
+
+fn skip_ws(sql: &str, index: usize) -> usize {
+    sql.get(index..)
+        .map(|rest| index + rest.len() - rest.trim_start().len())
+        .unwrap_or(index)
+}
+
+fn skip_quoted(sql: &str, index: usize) -> usize {
+    let bytes = sql.as_bytes();
+    if index >= bytes.len() {
+        return index;
+    }
+    let quote = bytes[index];
+    let mut index = index + 1;
+    while index < bytes.len() {
+        if bytes[index] == quote {
+            if index + 1 < bytes.len() && bytes[index + 1] == quote {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    index
+}
+
+fn is_show_tables(sql: &str) -> bool {
+    sql.trim()
+        .trim_end_matches(';')
+        .trim()
+        .eq_ignore_ascii_case("show tables")
+}
+
+fn is_show_databases(sql: &str) -> bool {
+    sql.trim()
+        .trim_end_matches(';')
+        .trim()
+        .eq_ignore_ascii_case("show databases")
+}
+
+/// `SHOW INDEX FROM emp`, `SHOW INDEXES IN emp`, and `SHOW KEYS FROM emp`.
+///
+/// The collection name keeps the spelling of the last identifier, so
+/// `shop.emp` is the collection `emp` in the command's database.
+fn show_index_table(sql: &str) -> Option<String> {
+    let text = sql.trim().trim_end_matches(';').trim();
+    let mut words = text.split_whitespace();
+    let first = words.next()?;
+    if !first.eq_ignore_ascii_case("show") {
+        return None;
+    }
+    let second = words.next()?;
+    if !(second.eq_ignore_ascii_case("index")
+        || second.eq_ignore_ascii_case("indexes")
+        || second.eq_ignore_ascii_case("keys"))
+    {
+        return None;
+    }
+    let keyword = words.next()?;
+    if !(keyword.eq_ignore_ascii_case("from") || keyword.eq_ignore_ascii_case("in")) {
+        return None;
+    }
+    bare_table(words.next()?)
+}
+
+/// `SELECT ... FROM view WHERE TEXT 'clerk' [FUZZY 0.3] [FACETS ...]`.
+///
+/// DataFusion reads `TEXT 'clerk'` as a string, so this form is handled
+/// before the planner. The search is the same `$text` path a find uses.
+/// `FACETS` turns the Tantivy buckets into rows (`facet`, `bucket`,
+/// `doc_count`) because the SQL cursor is the only result isql prints.
+struct SqlTextSearch {
+    columns: Option<Vec<String>>,
+    table: String,
+    query: String,
+    fuzzy: f64,
+    facets: Option<bson::Document>,
+}
+
+fn sql_text_search(sql: &str) -> Option<Result<SqlTextSearch, String>> {
+    let text = sql.trim().trim_end_matches(';').trim();
+    if !has_where_text_literal(text) {
+        return None;
+    }
+    Some(parse_text_search(text))
+}
+
+fn has_where_text_literal(sql: &str) -> bool {
+    let mut scan = SqlScan::new(sql);
+    while !scan.done() {
+        scan.skip_ws();
+        if scan.done() {
+            break;
+        }
+        if scan.starts_quote() {
+            if scan.string().is_none() {
+                return false;
+            }
+            continue;
+        }
+        if scan.eat_word("where") {
+            if scan.eat_word("text") {
+                scan.skip_ws();
+                return scan.starts_quote();
+            }
+            continue;
+        }
+        if scan.word().is_none() {
+            scan.bump();
+        }
+    }
+    false
+}
+
+fn parse_text_search(sql: &str) -> Result<SqlTextSearch, String> {
+    let mut scan = SqlScan::new(sql);
+    if !scan.eat_word("select") {
+        return Err("TEXT search starts with SELECT".into());
+    }
+    let columns = parse_select_list(&mut scan)?;
+    if !scan.eat_word("from") {
+        return Err("TEXT search requires FROM".into());
+    }
+    let table = scan
+        .ident()
+        .and_then(|name| bare_table(&name))
+        .ok_or_else(|| "TEXT search requires a table name".to_string())?;
+    if scan.eat_word("as") {
+        scan.ident()
+            .ok_or_else(|| "TEXT search alias is missing".to_string())?;
+    } else if scan
+        .peek_word()
+        .is_some_and(|word| !word.eq_ignore_ascii_case("where"))
+    {
+        scan.ident()
+            .ok_or_else(|| "TEXT search alias is missing".to_string())?;
+    }
+    if !scan.eat_word("where") || !scan.eat_word("text") {
+        return Err("TEXT search requires WHERE TEXT '...'".into());
+    }
+    let query = scan
+        .string()
+        .ok_or_else(|| "WHERE TEXT expects a quoted string".to_string())?;
+    let mut fuzzy = 0.0;
+    if scan.eat_word("fuzzy") {
+        fuzzy = scan
+            .number()
+            .as_ref()
+            .and_then(bson_as_f64)
+            .ok_or_else(|| "FUZZY expects a number from 0 to 1".to_string())?;
+        if !(0.0..=1.0).contains(&fuzzy) {
+            return Err("FUZZY expects a number from 0 to 1".into());
+        }
+    }
+    let facets = if scan.eat_word("facets") {
+        Some(parse_facets(&mut scan)?)
+    } else {
+        None
+    };
+    if !scan.done() {
+        return Err("TEXT search has extra tokens after the search clause".into());
+    }
+    Ok(SqlTextSearch {
+        columns,
+        table,
+        query,
+        fuzzy,
+        facets,
+    })
+}
+
+fn parse_select_list(scan: &mut SqlScan<'_>) -> Result<Option<Vec<String>>, String> {
+    scan.skip_ws();
+    if scan.eat_char('*') {
+        return Ok(None);
+    }
+    let mut columns = Vec::new();
+    loop {
+        if scan
+            .peek_word()
+            .is_some_and(|word| word.eq_ignore_ascii_case("from"))
+        {
+            break;
+        }
+        let Some(name) = scan.ident().and_then(|name| bare_table(&name)) else {
+            return Err("SELECT list is missing a column".into());
+        };
+        columns.push(name);
+        if !scan.eat_char(',') {
+            break;
+        }
+    }
+    if columns.is_empty() {
+        return Err("SELECT list is missing a column".into());
+    }
+    Ok(Some(columns))
+}
+
+fn parse_facets(scan: &mut SqlScan<'_>) -> Result<bson::Document, String> {
+    let mut facets = bson::Document::new();
+    loop {
+        let Some(name) = scan.ident() else {
+            return Err("FACETS expects a field name".into());
+        };
+        if scan.eat_word("terms") {
+            facets.insert(name.clone(), bson::doc! { "terms": { "field": name } });
+        } else if scan.eat_word("ranges") {
+            let mut ranges = Vec::new();
+            loop {
+                ranges.push(parse_range(scan, ranges.is_empty())?);
+                if scan.peek_after_comma() == Some('(') {
+                    scan.eat_char(',');
+                    continue;
+                }
+                break;
+            }
+            facets.insert(
+                name.clone(),
+                bson::doc! { "range": { "field": name, "ranges": ranges } },
+            );
+        } else {
+            return Err(format!("FACETS {name} expects TERMS or RANGES"));
+        }
+        match scan.peek_after_comma() {
+            Some(ch) if ch != '(' => {
+                scan.eat_char(',');
+            }
+            _ => break,
+        }
+    }
+    if facets.is_empty() {
+        return Err("FACETS expects at least one field".into());
+    }
+    Ok(facets)
+}
+
+/// `(1500)` on the first range is an open start (`to`). A later `(3000)`
+/// is an open end (`from`). `(1500, 3000)` sets both bounds.
+fn parse_range(scan: &mut SqlScan<'_>, first: bool) -> Result<bson::Document, String> {
+    if !scan.eat_char('(') {
+        return Err("RANGES expects (bound) or (from, to)".into());
+    }
+    let start = scan
+        .number()
+        .ok_or_else(|| "RANGES expects a number".to_string())?;
+    let range = if scan.eat_char(',') {
+        let end = scan
+            .number()
+            .ok_or_else(|| "RANGES expects a second number".to_string())?;
+        bson::doc! { "from": start, "to": end }
+    } else if first {
+        bson::doc! { "to": start }
+    } else {
+        bson::doc! { "from": start }
+    };
+    if !scan.eat_char(')') {
+        return Err("RANGES range is missing ')'".into());
+    }
+    Ok(range)
+}
+
+struct SqlScan<'a> {
+    sql: &'a str,
+    index: usize,
+}
+
+impl<'a> SqlScan<'a> {
+    fn new(sql: &'a str) -> Self {
+        Self { sql, index: 0 }
+    }
+
+    fn skip_ws(&mut self) {
+        self.index = skip_ws(self.sql, self.index);
+    }
+
+    fn done(&mut self) -> bool {
+        self.skip_ws();
+        self.index >= self.sql.len()
+    }
+
+    fn bump(&mut self) {
+        if let Some(ch) = self.sql[self.index..].chars().next() {
+            self.index += ch.len_utf8();
+        }
+    }
+
+    fn starts_quote(&mut self) -> bool {
+        self.skip_ws();
+        matches!(
+            self.sql.as_bytes().get(self.index),
+            Some(b'\'') | Some(b'"')
+        )
+    }
+
+    fn peek_word(&mut self) -> Option<&'a str> {
+        self.skip_ws();
+        word_at(self.sql, self.index)
+    }
+
+    fn eat_word(&mut self, expected: &str) -> bool {
+        let Some(word) = self.peek_word() else {
+            return false;
+        };
+        if word.eq_ignore_ascii_case(expected) {
+            self.index += word.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn word(&mut self) -> Option<&'a str> {
+        let word = self.peek_word()?;
+        self.index += word.len();
+        Some(word)
+    }
+
+    fn ident(&mut self) -> Option<String> {
+        self.skip_ws();
+        let (name, next) = sql_relation_token(self.sql, self.index)?;
+        self.index = next;
+        Some(name)
+    }
+
+    fn eat_char(&mut self, expected: char) -> bool {
+        self.skip_ws();
+        if self.sql[self.index..].starts_with(expected) {
+            self.index += expected.len_utf8();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek_after_comma(&mut self) -> Option<char> {
+        let saved = self.index;
+        self.skip_ws();
+        if !self.sql[self.index..].starts_with(',') {
+            self.index = saved;
+            return None;
+        }
+        let after = skip_ws(self.sql, self.index + 1);
+        let ch = self.sql[after..].chars().next();
+        self.index = saved;
+        ch
+    }
+
+    fn string(&mut self) -> Option<String> {
+        self.skip_ws();
+        let bytes = self.sql.as_bytes();
+        let quote = *bytes.get(self.index)?;
+        if quote != b'\'' && quote != b'"' {
+            return None;
+        }
+        let mut out = String::new();
+        let mut index = self.index + 1;
+        while index < bytes.len() {
+            if bytes[index] == quote {
+                if index + 1 < bytes.len() && bytes[index + 1] == quote {
+                    out.push(quote as char);
+                    index += 2;
+                    continue;
+                }
+                self.index = index + 1;
+                return Some(out);
+            }
+            let ch = self.sql[index..].chars().next()?;
+            out.push(ch);
+            index += ch.len_utf8();
+        }
+        None
+    }
+
+    fn number(&mut self) -> Option<bson::Bson> {
+        self.skip_ws();
+        let rest = self.sql.get(self.index..)?;
+        let bytes = rest.as_bytes();
+        let mut len = 0;
+        if bytes.first() == Some(&b'-') {
+            len = 1;
+        }
+        let mut dot = false;
+        while len < bytes.len() {
+            if bytes[len].is_ascii_digit() {
+                len += 1;
+            } else if bytes[len] == b'.' && !dot {
+                dot = true;
+                len += 1;
+            } else {
+                break;
+            }
+        }
+        if len == 0 || bytes[..len] == [b'-'] {
+            return None;
+        }
+        let value = sql_literal(&rest[..len])?;
+        self.index += len;
+        Some(value)
+    }
+}
+
+fn bson_as_f64(value: &bson::Bson) -> Option<f64> {
+    match value {
+        bson::Bson::Int32(number) => Some(f64::from(*number)),
+        bson::Bson::Int64(number) => Some(*number as f64),
+        bson::Bson::Double(number) if number.is_finite() => Some(*number),
+        _ => None,
+    }
+}
+
+async fn sql_text_query(
+    router: &PartitionRouter,
+    db: &str,
+    search: SqlTextSearch,
+) -> bson::Document {
+    let collection = if db.is_empty() {
+        search.table.clone()
+    } else {
+        format!("{}.{}", db, search.table)
+    };
+    let command = PartitionCommand::Search {
+        collection,
+        query: search.query,
+        filter: bson::doc! {},
+        options: SearchOptions {
+            fuzzy: search.fuzzy,
+            facets: search.facets.clone().unwrap_or_default(),
+            ..SearchOptions::default()
+        },
+    };
+    let reply = match router.dispatch(command) {
+        Some(rx) => match rx.await {
+            Ok(result) => protocol::reply_document(&result),
+            Err(_) => {
+                return bson::doc! {
+                    "ok": 0.0,
+                    "errmsg": "partition worker dropped the request",
+                };
+            }
+        },
+        None => {
+            return bson::doc! {
+                "ok": 0.0,
+                "errmsg": "storage partition unavailable",
+            };
+        }
+    };
+    if !reply_ok(&reply) {
+        return reply;
+    }
+    if search.facets.is_some() {
+        let facets = reply.get_document("facets").cloned().unwrap_or_default();
+        return facets_as_sql(&facets);
+    }
+    let documents = reply
+        .get_document("cursor")
+        .and_then(|cursor| cursor.get_array("firstBatch"))
+        .ok()
+        .map(|batch| batch.clone())
+        .unwrap_or_default();
+    project_sql_rows(search.columns.as_deref(), &documents)
+}
+
+fn project_sql_rows(columns: Option<&[String]>, documents: &[bson::Bson]) -> bson::Document {
+    let rows = documents
+        .iter()
+        .filter_map(|item| item.as_document())
+        .map(|document| match columns {
+            None => document.clone(),
+            Some(columns) => {
+                let mut row = bson::Document::new();
+                for name in columns {
+                    let value = document.get(name).cloned().unwrap_or(bson::Bson::Null);
+                    row.insert(name, value);
+                }
+                row
+            }
+        })
+        .collect();
+    sql_cursor(rows)
+}
+
+fn facets_as_sql(facets: &bson::Document) -> bson::Document {
+    let mut rows = Vec::new();
+    for (name, value) in facets {
+        let Some(facet) = value.as_document() else {
+            continue;
+        };
+        let Ok(buckets) = facet.get_array("buckets") else {
+            continue;
+        };
+        for bucket in buckets {
+            let Some(bucket) = bucket.as_document() else {
+                continue;
+            };
+            rows.push(bson::doc! {
+                "facet": name.clone(),
+                "bucket": bucket_label(bucket),
+                "doc_count": bucket_count(bucket),
+            });
+        }
+    }
+    sql_cursor(rows)
+}
+
+fn bucket_label(bucket: &bson::Document) -> String {
+    let from = bucket.get("from");
+    let to = bucket.get("to");
+    if from.is_some() || to.is_some() {
+        let from = from.map(bson_number_text).unwrap_or_default();
+        let to = to.map(bson_number_text).unwrap_or_default();
+        return format!("{from}..{to}");
+    }
+    match bucket.get("key") {
+        Some(bson::Bson::String(text)) => text.clone(),
+        Some(value) => bson_number_text(value),
+        None => String::new(),
+    }
+}
+
+fn bucket_count(bucket: &bson::Document) -> i64 {
+    match bucket.get("doc_count") {
+        Some(bson::Bson::Int32(number)) => i64::from(*number),
+        Some(bson::Bson::Int64(number)) => *number,
+        Some(bson::Bson::Double(number)) if number.is_finite() => *number as i64,
+        _ => 0,
+    }
+}
+
+fn bson_number_text(value: &bson::Bson) -> String {
+    match value {
+        bson::Bson::Int32(number) => number.to_string(),
+        bson::Bson::Int64(number) => number.to_string(),
+        bson::Bson::Double(number) if number.is_finite() && number.fract() == 0.0 => {
+            format!("{}", *number as i64)
+        }
+        bson::Bson::Double(number) => number.to_string(),
+        bson::Bson::String(text) => text.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn sql_cursor(rows: Vec<bson::Document>) -> bson::Document {
+    bson::doc! {
+        "ok": 1.0,
+        "cursor": {
+            "id": 0i64,
+            "ns": "sql.query",
+            "firstBatch": rows,
+        },
+    }
+}
+
+fn reply_ok(doc: &bson::Document) -> bool {
+    match doc.get("ok") {
+        Some(bson::Bson::Double(value)) => *value == 1.0,
+        Some(bson::Bson::Int32(value)) => *value == 1,
+        Some(bson::Bson::Int64(value)) => *value == 1,
+        _ => false,
+    }
+}
+
+/// DataFusion accepts `DESCRIBE`, not the `DESC` shorthand.
+fn sql_for_engine(sql: &str) -> String {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let Some(first) = trimmed.split_whitespace().next() else {
+        return trimmed.to_string();
+    };
+    if first.eq_ignore_ascii_case("desc") {
+        let rest = trimmed[first.len()..].trim();
+        format!("DESCRIBE {rest}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn databases_as_sql(listed: bson::Document) -> bson::Document {
+    let ok = match listed.get("ok") {
+        Some(bson::Bson::Double(value)) => *value == 1.0,
+        Some(bson::Bson::Int32(value)) => *value == 1,
+        Some(bson::Bson::Int64(value)) => *value == 1,
+        _ => false,
+    };
+    if !ok {
+        return listed;
+    }
+    let rows = listed
+        .get_array("databases")
+        .map(|databases| {
+            databases
+                .iter()
+                .filter_map(|item| item.as_document())
+                .filter_map(|info| info.get_str("name").ok())
+                .map(|name| bson::doc! { "name": name })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    bson::doc! {
+        "ok": 1.0,
+        "cursor": {
+            "id": 0i64,
+            "ns": "sql.query",
+            "firstBatch": rows,
+        },
+    }
+}
+
+fn indexes_as_sql(table: &str, listed: bson::Document) -> bson::Document {
+    let ok = match listed.get("ok") {
+        Some(bson::Bson::Double(value)) => *value == 1.0,
+        Some(bson::Bson::Int32(value)) => *value == 1,
+        Some(bson::Bson::Int64(value)) => *value == 1,
+        _ => false,
+    };
+    if !ok {
+        return listed;
+    }
+    let rows = listed
+        .get_document("cursor")
+        .and_then(|cursor| cursor.get_array("firstBatch"))
+        .map(|batch| {
+            batch
+                .iter()
+                .filter_map(|item| item.as_document())
+                .flat_map(|spec| index_rows(table, spec))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    bson::doc! {
+        "ok": 1.0,
+        "cursor": {
+            "id": 0i64,
+            "ns": "sql.query",
+            "firstBatch": rows,
+        },
+    }
+}
+
+/// One SQL row per indexed column. A composite key occupies several rows
+/// with the same `name` and an increasing `seq`.
+fn index_rows(table: &str, spec: &bson::Document) -> Vec<bson::Document> {
+    let name = spec.get_str("name").unwrap_or("");
+    let unique = spec_flag(spec, "unique") || name == "_id_";
+    let sparse = spec_flag(spec, "sparse");
+    let Some(key) = spec.get_document("key").ok().filter(|key| !key.is_empty()) else {
+        return vec![index_row(table, name, 1, "", "asc", unique, sparse)];
+    };
+    key.iter()
+        .enumerate()
+        .map(|(index, (column, value))| {
+            index_row(
+                table,
+                name,
+                (index + 1) as i32,
+                column,
+                index_order(value),
+                unique,
+                sparse,
+            )
+        })
+        .collect()
+}
+
+fn index_row(
+    table: &str,
+    name: &str,
+    seq: i32,
+    column: &str,
+    order: &str,
+    unique: bool,
+    sparse: bool,
+) -> bson::Document {
+    bson::doc! {
+        "table": table,
+        "name": name,
+        "seq": seq,
+        "column": column,
+        "order": order,
+        "unique": unique,
+        "sparse": sparse,
+    }
+}
+
+fn spec_flag(spec: &bson::Document, key: &str) -> bool {
+    matches!(
+        spec.get(key),
+        Some(bson::Bson::Boolean(true) | bson::Bson::Int32(1) | bson::Bson::Int64(1))
+    )
+}
+
+fn index_order(value: &bson::Bson) -> &'static str {
+    match value {
+        bson::Bson::Int32(1) | bson::Bson::Int64(1) => "asc",
+        bson::Bson::Int32(-1) | bson::Bson::Int64(-1) => "desc",
+        bson::Bson::Double(number) if *number == 1.0 => "asc",
+        bson::Bson::Double(number) if *number == -1.0 => "desc",
+        bson::Bson::String(text) if text.eq_ignore_ascii_case("hashed") => "hashed",
+        _ => "asc",
+    }
+}
+
+fn tables_as_sql(listed: bson::Document) -> bson::Document {
+    let ok = match listed.get("ok") {
+        Some(bson::Bson::Double(value)) => *value == 1.0,
+        Some(bson::Bson::Int32(value)) => *value == 1,
+        Some(bson::Bson::Int64(value)) => *value == 1,
+        _ => false,
+    };
+    if !ok {
+        return listed;
+    }
+    let rows = listed
+        .get_document("cursor")
+        .and_then(|cursor| cursor.get_array("firstBatch"))
+        .map(|batch| {
+            batch
+                .iter()
+                .filter_map(|item| item.as_document())
+                .filter_map(|info| {
+                    let name = info.get_str("name").ok()?;
+                    let kind = match info.get_str("type").unwrap_or("collection") {
+                        "view" => "VIEW",
+                        _ => "TABLE",
+                    };
+                    Some(bson::doc! { "name": name, "type": kind })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    bson::doc! {
+        "ok": 1.0,
+        "cursor": {
+            "id": 0i64,
+            "ns": "sql.query",
+            "firstBatch": rows,
+        },
     }
 }
 
@@ -1524,6 +2499,25 @@ fn cursor_batch(namespace: &str, documents: Vec<bson::Document>) -> bson::Docume
     }
 }
 
+/// Reads one collection's index specs from the partition that owns it.
+async fn list_indexes(router: &PartitionRouter, collection: &str) -> bson::Document {
+    match router.dispatch(PartitionCommand::ListIndexes {
+        collection: collection.to_string(),
+    }) {
+        Some(rx) => match rx.await {
+            Ok(result) => protocol::reply_document(&result),
+            Err(_) => bson::doc! {
+                "ok": 0.0,
+                "errmsg": "partition worker dropped the request",
+            },
+        },
+        None => bson::doc! {
+            "ok": 0.0,
+            "errmsg": "storage partition unavailable",
+        },
+    }
+}
+
 /// Broadcasts `listCollections` to every partition and merges the
 /// collection descriptions into a single cursor reply.
 ///
@@ -1773,6 +2767,52 @@ mod tests {
             "pipeline": [ { "$out": "bonus" } ],
         }));
         assert!(!is_replicated_write(&bson::doc! { "find": "emp" }));
+        assert!(is_show_tables("show tables"));
+        assert!(is_show_tables("  SHOW TABLES;  "));
+        assert!(!is_show_tables("select * from emp"));
+        assert!(is_show_databases("show databases"));
+        assert!(is_show_databases("SHOW DATABASES;"));
+        assert!(!is_show_databases("show databaases"));
+        assert_eq!(sql_for_engine("desc emp;"), "DESCRIBE emp");
+        assert_eq!(sql_for_engine("DESC emp"), "DESCRIBE emp");
+        assert_eq!(
+            sql_for_engine("select ename from emp"),
+            "select ename from emp"
+        );
+        assert_eq!(sql_table_name("describe emp;").as_deref(), Some("emp"));
+        assert_eq!(sql_table_name("DESC `emp`").as_deref(), Some("emp"));
+        assert_eq!(
+            sql_table_name("show columns from emp").as_deref(),
+            Some("emp")
+        );
+        assert_eq!(
+            sql_table_name("SHOW FIELDS IN shop.emp").as_deref(),
+            Some("emp")
+        );
+        assert_eq!(
+            sql_table_name("select ename from emp where sal > 2000").as_deref(),
+            Some("emp")
+        );
+        assert_eq!(
+            sql_table_name("select * from information_schema.tables").as_deref(),
+            None
+        );
+        assert_eq!(
+            sql_table_names("select a.*, b.* from emp a INNER JOIN dept b ON a.deptno = b.deptno"),
+            vec!["emp".to_string(), "dept".to_string()]
+        );
+        assert_eq!(
+            sql_table_names("select * from emp e, dept d"),
+            vec!["emp".to_string(), "dept".to_string()]
+        );
+        assert_eq!(
+            sql_table_names("select extract(year from hiredate) from emp"),
+            vec!["emp".to_string()]
+        );
+        assert_eq!(
+            sql_table_names("select * from (select * from emp) a join dept b"),
+            vec!["emp".to_string(), "dept".to_string()]
+        );
         assert!(!is_replicated_write(
             &bson::doc! { "insert": "emp", "txnId": 1i64 }
         ));
@@ -1971,6 +3011,360 @@ mod tests {
             .get_i64("n")
             .or_else(|_| clerks.get_i32("n").map(|v| i64::from(v)));
         assert_eq!(n, Ok(2), "{clerks:?}");
+    }
+
+    #[tokio::test]
+    async fn test_sql_join_loads_every_collection() {
+        let router = PartitionRouter::new(1);
+        let local = "127.0.0.1:1".parse().expect("addr");
+
+        let inserted = execute_command(
+            &bson::doc! {
+                "insert": "emp",
+                "$db": "db",
+                "documents": [
+                    { "ename": "KING", "deptno": 10i32 },
+                    { "ename": "SMITH", "deptno": 20i32 },
+                ],
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(inserted.get_f64("ok").expect("ok"), 1.0);
+        let inserted = execute_command(
+            &bson::doc! {
+                "insert": "dept",
+                "$db": "db",
+                "documents": [
+                    { "deptno": 10i32, "dname": "ACCOUNTING" },
+                    { "deptno": 30i32, "dname": "SALES" },
+                ],
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(inserted.get_f64("ok").expect("ok"), 1.0);
+
+        let joined = execute_command(
+            &bson::doc! {
+                "sql": "select a.ename, b.dname from emp a inner join dept b on a.deptno = b.deptno",
+                "$db": "db",
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(joined.get_f64("ok").expect("ok"), 1.0, "{joined:?}");
+        let rows = joined
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("firstBatch");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = rows[0].as_document().expect("row");
+        assert_eq!(row.get_str("ename").expect("ename"), "KING");
+        assert_eq!(row.get_str("dname").expect("dname"), "ACCOUNTING");
+
+        let starred = execute_command(
+            &bson::doc! {
+                "sql": "select a.*, b.* from emp a INNER JOIN dept b ON a.deptno = b.deptno",
+                "$db": "db",
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(starred.get_f64("ok").expect("ok"), 1.0, "{starred:?}");
+        let rows = starred
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("firstBatch");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = rows[0].as_document().expect("row");
+        assert_eq!(row.get_str("ename").expect("ename"), "KING");
+        assert_eq!(row.get_str("dname").expect("dname"), "ACCOUNTING");
+    }
+
+    #[test]
+    fn show_index_table_reads_the_collection_name() {
+        assert_eq!(
+            show_index_table("show indexes from emp").as_deref(),
+            Some("emp")
+        );
+        assert_eq!(
+            show_index_table("SHOW KEYS IN `emp`;").as_deref(),
+            Some("emp")
+        );
+        assert_eq!(
+            show_index_table("show index from shop.emp").as_deref(),
+            Some("emp")
+        );
+        assert_eq!(show_index_table("show tables"), None);
+        assert_eq!(show_index_table("show index emp"), None);
+    }
+
+    #[tokio::test]
+    async fn test_show_indexes_lists_the_collection_indexes() {
+        let router = PartitionRouter::new(1);
+        let local = "127.0.0.1:1".parse().expect("addr");
+
+        let inserted = execute_command(
+            &bson::doc! {
+                "insert": "emp",
+                "$db": "db",
+                "documents": [ { "ename": "KING", "sal": 5000i32, "deptno": 10i32 } ],
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(inserted.get_f64("ok").expect("ok"), 1.0);
+
+        let created = execute_command(
+            &bson::doc! {
+                "createIndexes": "emp",
+                "$db": "db",
+                "indexes": [
+                    { "key": { "sal": 1i32 }, "name": "sal_1" },
+                    { "key": { "deptno": 1i32, "sal": -1i32 }, "name": "deptno_1_sal_1" },
+                    { "key": { "ename": 1i32 }, "name": "ename_1", "unique": true },
+                    { "key": { "comm": 1i32 }, "name": "comm_1", "sparse": true },
+                ],
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(created.get_f64("ok").expect("ok"), 1.0, "{created:?}");
+
+        let listed = execute_command(
+            &bson::doc! {
+                "sql": "show indexes from emp",
+                "$db": "db",
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(listed.get_f64("ok").expect("ok"), 1.0, "{listed:?}");
+        let rows = listed
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("firstBatch");
+        let names: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| row.as_document()?.get_str("name").ok())
+            .collect();
+        assert_eq!(names.iter().filter(|name| **name == "_id_").count(), 1);
+        assert!(names.contains(&"sal_1"));
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "deptno_1_sal_1")
+                .count(),
+            2
+        );
+
+        let composite: Vec<&bson::Document> = rows
+            .iter()
+            .filter_map(|row| {
+                let doc = row.as_document()?;
+                (doc.get_str("name").ok() == Some("deptno_1_sal_1")).then_some(doc)
+            })
+            .collect();
+        assert_eq!(composite[0].get_i32("seq").expect("seq"), 1);
+        assert_eq!(composite[0].get_str("column").expect("column"), "deptno");
+        assert_eq!(composite[0].get_str("order").expect("order"), "asc");
+        assert_eq!(composite[1].get_i32("seq").expect("seq"), 2);
+        assert_eq!(composite[1].get_str("column").expect("column"), "sal");
+        assert_eq!(composite[1].get_str("order").expect("order"), "desc");
+
+        let ename = rows
+            .iter()
+            .find(|row| {
+                row.as_document().and_then(|doc| doc.get_str("name").ok()) == Some("ename_1")
+            })
+            .expect("ename_1")
+            .as_document()
+            .expect("row");
+        assert!(ename.get_bool("unique").expect("unique"));
+        let comm = rows
+            .iter()
+            .find(|row| {
+                row.as_document().and_then(|doc| doc.get_str("name").ok()) == Some("comm_1")
+            })
+            .expect("comm_1")
+            .as_document()
+            .expect("row");
+        assert!(comm.get_bool("sparse").expect("sparse"));
+
+        let missing = execute_command(
+            &bson::doc! {
+                "sql": "show keys from missing_table",
+                "$db": "db",
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(missing.get_f64("ok").expect("ok"), 0.0, "{missing:?}");
+    }
+
+    #[test]
+    fn sql_text_search_parses_the_view_query() {
+        let search =
+            sql_text_search("SELECT ename, job, sal\nFROM emp_search\nWHERE TEXT 'clerk';")
+                .expect("text clause")
+                .expect("parse");
+        assert_eq!(search.table, "emp_search");
+        assert_eq!(search.query, "clerk");
+        assert_eq!(search.fuzzy, 0.0);
+        assert!(search.facets.is_none());
+        assert_eq!(
+            search.columns.expect("columns"),
+            vec!["ename".to_string(), "job".to_string(), "sal".to_string()]
+        );
+
+        let fuzzy =
+            sql_text_search("SELECT ename, job, sal FROM emp_search WHERE TEXT 'clrek' FUZZY 0.3;")
+                .expect("fuzzy clause")
+                .expect("parse");
+        assert!((fuzzy.fuzzy - 0.3).abs() < 1e-9);
+
+        let faceted = sql_text_search(
+            "SELECT facet, bucket, doc_count\nFROM emp_search\nWHERE TEXT 'clerk'\nFACETS\n  job TERMS,\n  sal RANGES (1500), (1500, 3000), (3000);",
+        )
+        .expect("facets clause")
+        .expect("parse");
+        let facets = faceted.facets.expect("facets");
+        assert!(facets.get_document("job").unwrap().contains_key("terms"));
+        let ranges = facets
+            .get_document("sal")
+            .unwrap()
+            .get_document("range")
+            .unwrap()
+            .get_array("ranges")
+            .unwrap();
+        assert_eq!(ranges.len(), 3);
+        assert!(ranges[0].as_document().unwrap().get("to").is_some());
+        assert!(ranges[1].as_document().unwrap().get("from").is_some());
+        assert!(ranges[1].as_document().unwrap().get("to").is_some());
+        assert!(ranges[2].as_document().unwrap().get("from").is_some());
+
+        assert!(sql_text_search("select ename from emp where sal > 1").is_none());
+        assert!(sql_text_search("select ename from emp where text = 'clerk'").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sql_text_search_reads_the_inverted_view() {
+        let router = PartitionRouter::new(1);
+        let local = "127.0.0.1:1".parse().expect("addr");
+
+        let inserted = execute_command(
+            &bson::doc! {
+                "insert": "emp",
+                "$db": "db",
+                "documents": [
+                    { "ename": "SMITH", "job": "CLERK", "sal": 800i32 },
+                    { "ename": "ADAMS", "job": "CLERK", "sal": 1100i32 },
+                    { "ename": "KING", "job": "PRESIDENT", "sal": 5000i32 },
+                ],
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(inserted.get_f64("ok").expect("ok"), 1.0, "{inserted:?}");
+
+        let created = execute_command(
+            &bson::doc! {
+                "create": "emp_search",
+                "viewOn": "emp",
+                "$db": "db",
+                "kova": { "inverted": true },
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(created.get_f64("ok").expect("ok"), 1.0, "{created:?}");
+
+        let searched = execute_command(
+            &bson::doc! {
+                "sql": "SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'",
+                "$db": "db",
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(searched.get_f64("ok").expect("ok"), 1.0, "{searched:?}");
+        let mut names = sql_rows(&searched)
+            .iter()
+            .map(|row| row.get_str("ename").expect("ename").to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["ADAMS", "SMITH"]);
+
+        let fuzzy = execute_command(
+            &bson::doc! {
+                "sql": "SELECT ename FROM emp_search WHERE TEXT 'clrek' FUZZY 0.3",
+                "$db": "db",
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(fuzzy.get_f64("ok").expect("ok"), 1.0, "{fuzzy:?}");
+        let mut names = sql_rows(&fuzzy)
+            .iter()
+            .map(|row| row.get_str("ename").expect("ename").to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["ADAMS", "SMITH"]);
+
+        let faceted = execute_command(
+            &bson::doc! {
+                "sql": "SELECT facet, bucket, doc_count FROM emp_search WHERE TEXT 'clerk' FACETS job TERMS, sal RANGES (1500), (1500, 3000), (3000)",
+                "$db": "db",
+            },
+            &router,
+            local,
+        )
+        .await;
+        assert_eq!(faceted.get_f64("ok").expect("ok"), 1.0, "{faceted:?}");
+        let rows = sql_rows(&faceted);
+        assert_eq!(facet_count(&rows, "job", "CLERK"), 2, "{rows:?}");
+        assert_eq!(facet_count(&rows, "sal", "..1500"), 2, "{rows:?}");
+    }
+
+    fn sql_rows(reply: &bson::Document) -> Vec<bson::Document> {
+        reply
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("firstBatch")
+            .iter()
+            .filter_map(|row| row.as_document().cloned())
+            .collect()
+    }
+
+    fn facet_count(rows: &[bson::Document], facet: &str, bucket: &str) -> i64 {
+        rows.iter()
+            .find(|row| {
+                row.get_str("facet").ok() == Some(facet)
+                    && row.get_str("bucket").ok() == Some(bucket)
+            })
+            .map(|row| {
+                row.get_i64("doc_count")
+                    .or_else(|_| row.get_i32("doc_count").map(i64::from))
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
     }
 
     #[test]

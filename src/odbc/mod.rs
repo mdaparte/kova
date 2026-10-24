@@ -4,8 +4,10 @@
 //! file. The connection string is
 //! `DRIVER=Kova;SERVER=host;PORT=27018;DATABASE=name`. `SERVER` is the
 //! host, `PORT` defaults to 27018, and `DATABASE` is the `$db` of the
-//! command. `SQLConnect` also accepts `host`, `host:port`, and
-//! `host:port/database`.
+//! command. `SQLConnect` takes a DSN name and reads `SERVER`, `PORT`,
+//! `DATABASE`, `UID`, and `PWD` from that `odbc.ini` section. It also
+//! accepts `host`, `host:port`, and `host:port/database` when that name
+//! has no section.
 //!
 //! `SQLExecDirect` sends one `{ sql, $db }` command on the MongoDB port
 //! and reads the cursor batch back as rows. The SQL runs through the
@@ -66,6 +68,13 @@ const SQL_C_BIT: i16 = -7;
 
 const SQL_NULLABLE: i16 = 1;
 
+const SQL_DESC_DISPLAY_SIZE: u16 = 6;
+const SQL_DESC_TYPE_NAME: u16 = 14;
+const SQL_DESC_LABEL: u16 = 18;
+const SQL_DESC_TYPE: u16 = 1002;
+const SQL_DESC_NULLABLE_FIELD: u16 = 1008;
+const SQL_DESC_NAME: u16 = 1011;
+
 const SQL_DRIVER_NAME: u16 = 6;
 const SQL_DRIVER_VER: u16 = 7;
 const SQL_ODBC_VER: u16 = 10;
@@ -73,6 +82,21 @@ const SQL_DBMS_NAME: u16 = 17;
 const SQL_DBMS_VER: u16 = 18;
 const SQL_IDENTIFIER_QUOTE_CHAR: u16 = 29;
 const SQL_DRIVER_ODBC_VER: u16 = 77;
+
+const SQL_DIAG_NUMBER: i16 = 2;
+const SQL_DIAG_ROW_COUNT: i16 = 3;
+const SQL_DIAG_SQLSTATE: i16 = 4;
+const SQL_DIAG_NATIVE: i16 = 5;
+const SQL_DIAG_MESSAGE_TEXT: i16 = 6;
+const SQL_DIAG_DYNAMIC_FUNCTION: i16 = 7;
+const SQL_DIAG_CLASS_ORIGIN: i16 = 8;
+const SQL_DIAG_SUBCLASS_ORIGIN: i16 = 9;
+const SQL_DIAG_CONNECTION_NAME: i16 = 10;
+const SQL_DIAG_SERVER_NAME: i16 = 11;
+const SQL_DIAG_DYNAMIC_FUNCTION_CODE: i16 = 12;
+const SQL_DIAG_CURSOR_ROW_COUNT: i16 = -1249;
+const SQL_DIAG_ROW_NUMBER: i16 = -1248;
+const SQL_DIAG_COLUMN_NUMBER: i16 = -1247;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -122,6 +146,7 @@ struct Stmt {
     diag: Diag,
 }
 
+#[derive(Clone)]
 struct Column {
     name: String,
     kind: i16,
@@ -190,52 +215,53 @@ static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
 });
 
 fn connection_target(text: &str) -> Result<Target, String> {
-    let mut server = None;
-    let mut port = None;
-    let mut database = None;
-    let mut user = None;
-    let mut password = None;
-    for part in split_attributes(text) {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let Some((key, value)) = part.split_once('=') else {
-            return Err(format!("connection attribute `{part}` has no value"));
-        };
-        let value = unbrace(value.trim());
-        match key.trim().to_ascii_uppercase().as_str() {
-            "SERVER" | "HOST" | "SERVERNAME" => server = Some(value.to_string()),
-            "PORT" => {
-                port = Some(
-                    value
-                        .parse::<u16>()
-                        .map_err(|_| format!("PORT `{value}` is not a number"))?,
-                );
+    let map = attributes(text)?;
+    let mut server = mapped(&map, &["SERVER", "HOST", "SERVERNAME"]).map(str::to_string);
+    let mut port = match mapped(&map, &["PORT"]) {
+        Some(value) => Some(parse_port(value)?),
+        None => None,
+    };
+    let mut database = mapped(&map, &["DATABASE", "DB"]).map(str::to_string);
+    let mut user = mapped(&map, &["UID", "USER", "USERNAME"]).map(str::to_string);
+    let mut password = mapped(&map, &["PWD", "PASSWORD"]).map(str::to_string);
+    if server.is_none() {
+        if let Some(name) = mapped(&map, &["DSN"]) {
+            if let Some(from_dsn) = dsn_target(name)? {
+                server = Some(from_dsn.host);
+                if port.is_none() {
+                    port = Some(from_dsn.port);
+                }
+                if database.is_none() {
+                    database = Some(from_dsn.database);
+                }
+                if user.is_none() {
+                    user = from_dsn.user;
+                }
+                if password.is_none() {
+                    password = from_dsn.password;
+                }
             }
-            "DATABASE" | "DB" => database = Some(value.to_string()),
-            "UID" | "USER" | "USERNAME" => user = Some(value.to_string()),
-            "PWD" | "PASSWORD" => password = Some(value.to_string()),
-            _ => {}
         }
     }
     let Some(server) = server else {
         return Err("SERVER is missing from the connection string".to_string());
     };
     let (host, port) = host_and_port(&server, port)?;
-    let target = Target {
+    Ok(Target {
         host,
         port,
         database: database.unwrap_or_default(),
         user: blank_to_none(user),
         password: blank_to_none(password),
-    };
-    Ok(target)
+    })
 }
 
 fn server_name_target(server: &str) -> Result<Target, String> {
     if server.contains('=') {
         return connection_target(server);
+    }
+    if let Some(target) = dsn_target(server)? {
+        return Ok(target);
     }
     let (hostport, database) = match server.split_once('/') {
         Some((hostport, database)) => (hostport, database.to_string()),
@@ -249,6 +275,138 @@ fn server_name_target(server: &str) -> Result<Target, String> {
         user: None,
         password: None,
     })
+}
+
+fn attributes(text: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut map = BTreeMap::new();
+    for part in split_attributes(text) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = part.split_once('=') else {
+            return Err(format!("connection attribute `{part}` has no value"));
+        };
+        map.insert(
+            key.trim().to_ascii_uppercase(),
+            unbrace(value.trim()).to_string(),
+        );
+    }
+    Ok(map)
+}
+
+fn mapped<'a>(map: &'a BTreeMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        map.get(*key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn parse_port(value: &str) -> Result<u16, String> {
+    value
+        .parse::<u16>()
+        .map_err(|_| format!("PORT `{value}` is not a number"))
+}
+
+/// Reads one `odbc.ini` section. `None` means the section has no server,
+/// or unixODBC is not loaded in this process.
+fn dsn_target(name: &str) -> Result<Option<Target>, String> {
+    if profile_fn().is_none() {
+        return Ok(None);
+    }
+    let Some(server) = profile_value(name, &["SERVER", "HOST", "SERVERNAME"])? else {
+        return Ok(None);
+    };
+    let port = match profile_value(name, &["PORT"])? {
+        Some(value) => Some(parse_port(&value)?),
+        None => None,
+    };
+    let database = profile_value(name, &["DATABASE", "DB"])?.unwrap_or_default();
+    let user = profile_value(name, &["UID", "USER", "USERNAME"])?;
+    let password = profile_value(name, &["PWD", "PASSWORD"])?;
+    let (host, port) = host_and_port(&server, port)?;
+    Ok(Some(Target {
+        host,
+        port,
+        database,
+        user: blank_to_none(user),
+        password: blank_to_none(password),
+    }))
+}
+
+type ProfileFn = unsafe extern "C" fn(
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    *mut std::ffi::c_char,
+    i32,
+    *const std::ffi::c_char,
+) -> i32;
+
+fn profile_fn() -> Option<ProfileFn> {
+    static SLOT: std::sync::OnceLock<Option<ProfileFn>> = std::sync::OnceLock::new();
+    *SLOT.get_or_init(|| unsafe { load_profile() })
+}
+
+unsafe fn load_profile() -> Option<ProfileFn> {
+    extern "C" {
+        fn dlopen(filename: *const std::ffi::c_char, flags: i32) -> *mut std::ffi::c_void;
+        fn dlsym(
+            handle: *mut std::ffi::c_void,
+            symbol: *const std::ffi::c_char,
+        ) -> *mut std::ffi::c_void;
+    }
+    let symbol = std::ffi::CString::new("SQLGetPrivateProfileString").ok()?;
+    let mut found = dlsym(std::ptr::null_mut(), symbol.as_ptr());
+    if found.is_null() {
+        let file = std::ffi::CString::new("libodbcinst.so.2").ok()?;
+        let handle = dlopen(file.as_ptr(), 1);
+        if handle.is_null() {
+            return None;
+        }
+        found = dlsym(handle, symbol.as_ptr());
+    }
+    if found.is_null() {
+        None
+    } else {
+        Some(std::mem::transmute::<*mut std::ffi::c_void, ProfileFn>(
+            found,
+        ))
+    }
+}
+
+fn profile_value(section: &str, keys: &[&str]) -> Result<Option<String>, String> {
+    let Some(read) = profile_fn() else {
+        return Ok(None);
+    };
+    let section = std::ffi::CString::new(section).map_err(|_| "DSN name is not a C string")?;
+    let file = std::ffi::CString::new("odbc.ini").expect("odbc.ini");
+    let default = std::ffi::CString::new("").expect("empty");
+    for key in keys {
+        let key = std::ffi::CString::new(*key)
+            .map_err(|_| format!("DSN key `{key}` is not a C string"))?;
+        let mut buf = vec![0u8; 512];
+        let copied = unsafe {
+            read(
+                section.as_ptr(),
+                key.as_ptr(),
+                default.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len() as i32,
+                file.as_ptr(),
+            )
+        };
+        if copied <= 0 {
+            continue;
+        }
+        let end = (copied as usize).min(buf.len().saturating_sub(1));
+        let text = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+        if !text.is_empty() {
+            return Ok(Some(text));
+        }
+    }
+    Ok(None)
 }
 
 fn blank_to_none(value: Option<String>) -> Option<String> {
@@ -526,6 +684,115 @@ fn rows_of(doc: &Document) -> Result<(Vec<Column>, Vec<Vec<Cell>>), Fail> {
     Ok((columns, table))
 }
 
+fn odbc_matches(pattern: Option<&str>, value: &str) -> bool {
+    match pattern {
+        None | Some("") => true,
+        Some(pattern) => odbc_like(pattern.as_bytes(), value.as_bytes()),
+    }
+}
+
+fn odbc_like(pattern: &[u8], value: &[u8]) -> bool {
+    let mut pattern_index = 0;
+    let mut value_index = 0;
+    let mut star: Option<(usize, usize)> = None;
+    while value_index < value.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'_'
+                || pattern[pattern_index].eq_ignore_ascii_case(&value[value_index]))
+        {
+            pattern_index += 1;
+            value_index += 1;
+            continue;
+        }
+        if pattern_index < pattern.len() && pattern[pattern_index] == b'%' {
+            star = Some((pattern_index, value_index));
+            pattern_index += 1;
+            continue;
+        }
+        let Some((star_pattern, star_value)) = star else {
+            return false;
+        };
+        pattern_index = star_pattern + 1;
+        value_index = star_value + 1;
+        star = Some((star_pattern, value_index));
+    }
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'%' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
+}
+
+fn type_selected(filter: Option<&str>, kind: &str) -> bool {
+    match filter {
+        None | Some("") => true,
+        Some(filter) => filter
+            .split(',')
+            .any(|part| part.trim().eq_ignore_ascii_case(kind)),
+    }
+}
+
+fn odbc_table_type(mongo_type: &str) -> &'static str {
+    if mongo_type.eq_ignore_ascii_case("view") {
+        "VIEW"
+    } else {
+        "TABLE"
+    }
+}
+
+fn bson_type_name(value: &bson::Bson) -> &'static str {
+    match value {
+        bson::Bson::Int32(_) => "INTEGER",
+        bson::Bson::Int64(_) => "BIGINT",
+        bson::Bson::Double(_) => "DOUBLE",
+        bson::Bson::Boolean(_) => "BIT",
+        bson::Bson::DateTime(_) => "TIMESTAMP",
+        _ => "VARCHAR",
+    }
+}
+
+fn cursor_documents(doc: &Document) -> Result<Vec<Document>, String> {
+    if !command_ok(doc) {
+        let message = doc
+            .get_str("errmsg")
+            .unwrap_or("catalog request failed")
+            .to_string();
+        return Err(message);
+    }
+    let batch = doc
+        .get_document("cursor")
+        .map_err(|_| "catalog reply has no cursor".to_string())?
+        .get_array("firstBatch")
+        .map_err(|_| "catalog reply has no rows".to_string())?;
+    Ok(batch
+        .iter()
+        .filter_map(|item| item.as_document().cloned())
+        .collect())
+}
+
+fn text_result(headers: &[&str], rows: Vec<Vec<Cell>>) -> (Vec<Column>, Vec<Vec<Cell>>) {
+    let columns = headers
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let width = rows
+                .iter()
+                .filter_map(|row| match row.get(index) {
+                    Some(Cell::Text(text)) => Some(text.len() as u64),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(1)
+                .max(name.len() as u64);
+            Column {
+                name: (*name).to_string(),
+                kind: SQL_VARCHAR,
+                size: width.max(1),
+            }
+        })
+        .collect();
+    (columns, rows)
+}
+
 fn connect_id(id: u64, target: Target) -> i16 {
     let login_as = match paired(&target) {
         Ok(pair) => pair,
@@ -573,36 +840,55 @@ fn conn_error(id: u64, state: &'static str, message: &str) -> i16 {
     }
 }
 
+fn take_socket(stmt_id: u64) -> Result<(u64, String, i32, TcpStream), i16> {
+    let taken = {
+        let mut reg = registry();
+        let conn_id = match reg.stmts.get(&stmt_id) {
+            Some(stmt) => Some(stmt.conn),
+            None => None,
+        };
+        match conn_id {
+            None => None,
+            Some(conn_id) => match reg.conns.get_mut(&conn_id) {
+                None => Some(None),
+                Some(conn) => match conn.socket.take() {
+                    None => Some(None),
+                    Some(socket) => {
+                        let request = conn.next_request;
+                        conn.next_request = conn.next_request.wrapping_add(1).max(1);
+                        Some(Some((conn_id, conn.database.clone(), request, socket)))
+                    }
+                },
+            },
+        }
+    };
+    let Some(taken) = taken else {
+        return Err(SQL_INVALID_HANDLE);
+    };
+    taken.ok_or_else(|| stmt_error(stmt_id, "08003", "connection is not open"))
+}
+
+fn restore_socket(conn_id: u64, socket: TcpStream) {
+    let mut reg = registry();
+    if let Some(conn) = reg.conns.get_mut(&conn_id) {
+        conn.socket = Some(socket);
+    }
+}
+
 fn execute_id(stmt_id: u64, sql: &str) -> i16 {
     if sql.is_empty() {
         return stmt_error(stmt_id, "HY090", "statement text is empty");
     }
-    let (conn_id, database, request, mut socket) = {
-        let mut reg = registry();
-        let Some(stmt) = reg.stmts.get(&stmt_id) else {
-            return SQL_INVALID_HANDLE;
-        };
-        let conn_id = stmt.conn;
-        let Some(conn) = reg.conns.get_mut(&conn_id) else {
-            return stmt_error(stmt_id, "08003", "connection is not open");
-        };
-        let Some(socket) = conn.socket.take() else {
-            return stmt_error(stmt_id, "08003", "connection is not open");
-        };
-        let request = conn.next_request;
-        conn.next_request = conn.next_request.wrapping_add(1).max(1);
-        (conn_id, conn.database.clone(), request, socket)
+    let (conn_id, database, request, mut socket) = match take_socket(stmt_id) {
+        Ok(taken) => taken,
+        Err(rc) => return rc,
     };
     let exchanged = round_trip(&mut socket, request, sql, &database);
-    let mut reg = registry();
     match &exchanged {
-        Ok(_) => {
-            if let Some(conn) = reg.conns.get_mut(&conn_id) {
-                conn.socket = Some(socket);
-            }
-        }
+        Ok(_) => restore_socket(conn_id, socket),
         Err(_) => drop(socket),
     }
+    let mut reg = registry();
     let Some(stmt) = reg.stmts.get_mut(&stmt_id) else {
         return SQL_INVALID_HANDLE;
     };
@@ -647,6 +933,131 @@ fn stmt_error(stmt_id: u64, state: &'static str, message: &str) -> i16 {
     } else {
         SQL_INVALID_HANDLE
     }
+}
+
+fn catalog_round_trip(stmt_id: u64, mut command: Document) -> Result<Document, i16> {
+    let (conn_id, database, request, mut socket) = take_socket(stmt_id)?;
+    command.insert("$db", database);
+    let exchanged = exchange(&mut socket, request, command);
+    match exchanged {
+        Ok(doc) => {
+            restore_socket(conn_id, socket);
+            if command_ok(&doc) {
+                Ok(doc)
+            } else {
+                let message = doc
+                    .get_str("errmsg")
+                    .unwrap_or("catalog request failed")
+                    .to_string();
+                Err(stmt_error(stmt_id, "HY000", &message))
+            }
+        }
+        Err(message) => Err(stmt_error(stmt_id, "08S01", &message)),
+    }
+}
+
+fn set_result(stmt_id: u64, columns: Vec<Column>, rows: Vec<Vec<Cell>>) -> i16 {
+    let mut reg = registry();
+    let Some(stmt) = reg.stmts.get_mut(&stmt_id) else {
+        return SQL_INVALID_HANDLE;
+    };
+    stmt.columns = columns;
+    stmt.rows = rows;
+    stmt.next = 0;
+    stmt.current = None;
+    stmt.closed = false;
+    stmt.executed = true;
+    stmt.diag = Diag::clear();
+    SQL_SUCCESS
+}
+
+fn tables_id(stmt_id: u64, table: Option<String>, kind: Option<String>) -> i16 {
+    let listed = match catalog_round_trip(stmt_id, bson::doc! { "listCollections": 1 }) {
+        Ok(listed) => listed,
+        Err(rc) => return rc,
+    };
+    let documents = match cursor_documents(&listed) {
+        Ok(documents) => documents,
+        Err(message) => return stmt_error(stmt_id, "HY000", &message),
+    };
+    let rows = documents
+        .iter()
+        .filter_map(|info| {
+            let name = info.get_str("name").ok()?;
+            let kind_name = odbc_table_type(info.get_str("type").unwrap_or("collection"));
+            if !odbc_matches(table.as_deref(), name) || !type_selected(kind.as_deref(), kind_name) {
+                return None;
+            }
+            Some(vec![
+                Cell::Text(name.to_string()),
+                Cell::Text(kind_name.to_string()),
+            ])
+        })
+        .collect();
+    let (columns, rows) = text_result(&["TABLE_NAME", "TABLE_TYPE"], rows);
+    set_result(stmt_id, columns, rows)
+}
+
+fn columns_id(stmt_id: u64, table: Option<String>, column: Option<String>) -> i16 {
+    let Some(table) = table.filter(|name| !name.is_empty()) else {
+        return stmt_error(stmt_id, "HY009", "table name is missing");
+    };
+    let names = if table.contains('%') || table.contains('_') {
+        let listed = match catalog_round_trip(stmt_id, bson::doc! { "listCollections": 1 }) {
+            Ok(listed) => listed,
+            Err(rc) => return rc,
+        };
+        match cursor_documents(&listed) {
+            Ok(documents) => documents
+                .iter()
+                .filter_map(|info| info.get_str("name").ok())
+                .filter(|name| odbc_matches(Some(&table), name))
+                .map(str::to_string)
+                .collect(),
+            Err(message) => return stmt_error(stmt_id, "HY000", &message),
+        }
+    } else {
+        vec![table]
+    };
+    let mut rows = Vec::new();
+    for name in names {
+        let found = match catalog_round_trip(
+            stmt_id,
+            bson::doc! { "find": &name, "filter": {}, "limit": 32i32 },
+        ) {
+            Ok(found) => found,
+            Err(rc) => return rc,
+        };
+        let documents = match cursor_documents(&found) {
+            Ok(documents) => documents,
+            Err(message) => return stmt_error(stmt_id, "HY000", &message),
+        };
+        let mut fields: Vec<(String, &'static str)> = Vec::new();
+        for document in &documents {
+            for (key, value) in document {
+                if fields.iter().any(|(found, _)| found == key) {
+                    continue;
+                }
+                if !odbc_matches(column.as_deref(), key) {
+                    continue;
+                }
+                fields.push((key.clone(), bson_type_name(value)));
+            }
+        }
+        for (position, (field, type_name)) in fields.into_iter().enumerate() {
+            rows.push(vec![
+                Cell::Text(name.clone()),
+                Cell::Text(field),
+                Cell::Text(type_name.to_string()),
+                Cell::Text((position + 1).to_string()),
+            ]);
+        }
+    }
+    let (columns, rows) = text_result(
+        &["TABLE_NAME", "COLUMN_NAME", "TYPE_NAME", "ORDINAL_POSITION"],
+        rows,
+    );
+    set_result(stmt_id, columns, rows)
 }
 
 fn fetch_id(stmt_id: u64) -> i16 {
@@ -1322,7 +1733,8 @@ pub unsafe extern "C" fn SQLDriverConnectW(
     written
 }
 
-/// Opens `host`, `host:port`, or `host:port/database`. User and password
+/// Opens a DSN from `odbc.ini`, or `host`, `host:port`, or
+/// `host:port/database` when that name has no section. User and password
 /// log in when both are present.
 #[no_mangle]
 pub unsafe extern "C" fn SQLConnect(
@@ -1505,12 +1917,67 @@ pub unsafe extern "C" fn SQLExecute(handle: *mut std::ffi::c_void) -> i16 {
         let Some(stmt) = reg.stmts.get(&id) else {
             return SQL_INVALID_HANDLE;
         };
-        match &stmt.prepared {
-            Some(sql) => sql.clone(),
-            None => return stmt_error(id, "HY010", "statement is not prepared"),
-        }
+        stmt.prepared.clone()
+    };
+    let Some(sql) = sql else {
+        return stmt_error(id, "HY010", "statement is not prepared");
     };
     execute_id(id, &sql)
+}
+
+/// Lists collections in the connection's database. `isql` uses this for `help`.
+#[no_mangle]
+pub unsafe extern "C" fn SQLTables(
+    handle: *mut std::ffi::c_void,
+    _catalog: *mut u8,
+    _catalog_len: i16,
+    _schema: *mut u8,
+    _schema_len: i16,
+    table: *mut u8,
+    table_len: i16,
+    kind: *mut u8,
+    kind_len: i16,
+) -> i16 {
+    let Some(id) = id_of(handle) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let table = match optional_text(table, i32::from(table_len)) {
+        Ok(table) => table,
+        Err(message) => return stmt_error(id, "HY090", &message),
+    };
+    let kind = match optional_text(kind, i32::from(kind_len)) {
+        Ok(kind) => kind,
+        Err(message) => return stmt_error(id, "HY090", &message),
+    };
+    tables_id(id, table, kind)
+}
+
+/// Lists fields of one collection by sampling its documents. `isql` uses
+/// this for `help emp`.
+#[no_mangle]
+pub unsafe extern "C" fn SQLColumns(
+    handle: *mut std::ffi::c_void,
+    _catalog: *mut u8,
+    _catalog_len: i16,
+    _schema: *mut u8,
+    _schema_len: i16,
+    table: *mut u8,
+    table_len: i16,
+    column: *mut u8,
+    column_len: i16,
+) -> i16 {
+    let Some(id) = id_of(handle) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let table = match optional_text(table, i32::from(table_len)) {
+        Ok(table) => table,
+        Err(message) => return stmt_error(id, "HY090", &message),
+    };
+    let column = match optional_text(column, i32::from(column_len)) {
+        Ok(column) => column,
+        Err(message) => return stmt_error(id, "HY090", &message),
+    };
+    columns_id(id, table, column)
 }
 
 /// Writes the number of columns in the current result.
@@ -1641,6 +2108,116 @@ unsafe fn describe_col(
     } else {
         write_text(name, name_max, &label, name_len)
     }
+}
+
+/// Column label and display width. `isql` reads the header from here.
+#[no_mangle]
+pub unsafe extern "C" fn SQLColAttribute(
+    handle: *mut std::ffi::c_void,
+    column: u16,
+    field: u16,
+    text: *mut std::ffi::c_void,
+    text_max: i16,
+    text_len: *mut i16,
+    number: *mut i64,
+) -> i16 {
+    col_attribute(
+        handle, column, field, text, text_max, text_len, number, false,
+    )
+}
+
+/// Wide-character [`SQLColAttribute`].
+#[no_mangle]
+pub unsafe extern "C" fn SQLColAttributeW(
+    handle: *mut std::ffi::c_void,
+    column: u16,
+    field: u16,
+    text: *mut std::ffi::c_void,
+    text_max: i16,
+    text_len: *mut i16,
+    number: *mut i64,
+) -> i16 {
+    col_attribute(
+        handle, column, field, text, text_max, text_len, number, true,
+    )
+}
+
+unsafe fn col_attribute(
+    handle: *mut std::ffi::c_void,
+    column: u16,
+    field: u16,
+    text: *mut std::ffi::c_void,
+    text_max: i16,
+    text_len: *mut i16,
+    number: *mut i64,
+    wide: bool,
+) -> i16 {
+    let Some(id) = id_of(handle) else {
+        return SQL_INVALID_HANDLE;
+    };
+    if column == 0 {
+        return stmt_error(id, "07009", "column number is out of range");
+    }
+    let described = {
+        let mut reg = registry();
+        let Some(stmt) = reg.stmts.get_mut(&id) else {
+            return SQL_INVALID_HANDLE;
+        };
+        if !stmt.executed {
+            stmt.diag = Diag::new("HY010", "statement has no result");
+            return SQL_ERROR;
+        }
+        let Some(described) = stmt.columns.get(column as usize - 1) else {
+            stmt.diag = Diag::new("07009", "column number is out of range");
+            return SQL_ERROR;
+        };
+        described.clone()
+    };
+    let label = described.name;
+    let type_name = match described.kind {
+        SQL_INTEGER => "INTEGER",
+        SQL_BIGINT => "BIGINT",
+        SQL_DOUBLE => "DOUBLE",
+        SQL_BIT => "BIT",
+        _ => "VARCHAR",
+    };
+    let display = match described.kind {
+        SQL_INTEGER => 11,
+        SQL_BIGINT => 20,
+        SQL_DOUBLE => 24,
+        SQL_BIT => 1,
+        _ => i64::try_from(described.size).unwrap_or(i64::MAX),
+    };
+    match field {
+        SQL_DESC_LABEL | SQL_DESC_NAME => write_attr_text(text, text_max, &label, text_len, wide),
+        SQL_DESC_TYPE_NAME => write_attr_text(text, text_max, type_name, text_len, wide),
+        SQL_DESC_DISPLAY_SIZE => write_attr_len(number, display),
+        SQL_DESC_TYPE => write_attr_len(number, i64::from(described.kind)),
+        SQL_DESC_NULLABLE_FIELD => write_attr_len(number, i64::from(SQL_NULLABLE)),
+        _ => stmt_error(id, "HY091", "column attribute is not supported"),
+    }
+}
+
+unsafe fn write_attr_text(
+    text: *mut std::ffi::c_void,
+    text_max: i16,
+    value: &str,
+    text_len: *mut i16,
+    wide: bool,
+) -> i16 {
+    if wide {
+        write_wide(text.cast(), text_max, value, text_len)
+    } else {
+        write_text(text.cast(), text_max, value, text_len)
+    }
+}
+
+unsafe fn write_attr_len(number: *mut i64, value: i64) -> i16 {
+    if number.is_null() {
+        return SQL_ERROR;
+    }
+    *number = value;
+    SQL_SUCCESS
 }
 
 /// Copies the current row into buffers from [`SQLBindCol`] and steps forward.
@@ -1849,6 +2426,210 @@ pub unsafe extern "C" fn SQLGetDiagRecW(
     write_wide(message, message_max, &diag.message, message_len)
 }
 
+/// One diagnostic field. unixODBC reads an error only when both this and
+/// [`SQLGetDiagRec`] are present.
+#[no_mangle]
+pub unsafe extern "C" fn SQLGetDiagField(
+    handle_type: i16,
+    handle: *mut std::ffi::c_void,
+    record: i16,
+    identifier: i16,
+    info: *mut std::ffi::c_void,
+    buffer_max: i16,
+    length: *mut i16,
+) -> i16 {
+    diag_field(
+        handle_type,
+        handle,
+        record,
+        identifier,
+        info,
+        buffer_max,
+        length,
+        false,
+    )
+}
+
+/// Wide-character [`SQLGetDiagField`].
+#[no_mangle]
+pub unsafe extern "C" fn SQLGetDiagFieldW(
+    handle_type: i16,
+    handle: *mut std::ffi::c_void,
+    record: i16,
+    identifier: i16,
+    info: *mut std::ffi::c_void,
+    buffer_max: i16,
+    length: *mut i16,
+) -> i16 {
+    diag_field(
+        handle_type,
+        handle,
+        record,
+        identifier,
+        info,
+        buffer_max,
+        length,
+        true,
+    )
+}
+
+unsafe fn diag_field(
+    handle_type: i16,
+    handle: *mut std::ffi::c_void,
+    record: i16,
+    identifier: i16,
+    info: *mut std::ffi::c_void,
+    buffer_max: i16,
+    length: *mut i16,
+    wide: bool,
+) -> i16 {
+    if record < 0 {
+        return SQL_ERROR;
+    }
+    let Some(id) = id_of(handle) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let Some(view) = diag_view(handle_type, id) else {
+        return SQL_INVALID_HANDLE;
+    };
+    if record == 0 {
+        return header_field(&view, identifier, info, buffer_max, length, wide);
+    }
+    let Some(diag) = view.diag else {
+        return SQL_NO_DATA;
+    };
+    if record > 1 {
+        return SQL_NO_DATA;
+    }
+    record_field(&diag, identifier, info, buffer_max, length, wide)
+}
+
+struct DiagView {
+    diag: Option<Diag>,
+    rows: i64,
+}
+
+fn diag_view(handle_type: i16, id: u64) -> Option<DiagView> {
+    let reg = registry();
+    match handle_type {
+        SQL_HANDLE_ENV => {
+            let env = reg.envs.get(&id)?;
+            Some(DiagView {
+                diag: filled(&env.diag),
+                rows: -1,
+            })
+        }
+        SQL_HANDLE_DBC => {
+            let conn = reg.conns.get(&id)?;
+            Some(DiagView {
+                diag: filled(&conn.diag),
+                rows: -1,
+            })
+        }
+        SQL_HANDLE_STMT => {
+            let stmt = reg.stmts.get(&id)?;
+            let rows = if stmt.executed {
+                i64::try_from(stmt.rows.len()).unwrap_or(i64::MAX)
+            } else {
+                -1
+            };
+            Some(DiagView {
+                diag: filled(&stmt.diag),
+                rows,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn filled(diag: &Diag) -> Option<Diag> {
+    if diag.message.is_empty() {
+        None
+    } else {
+        Some(Diag {
+            state: diag.state,
+            message: diag.message.clone(),
+        })
+    }
+}
+
+unsafe fn header_field(
+    view: &DiagView,
+    identifier: i16,
+    info: *mut std::ffi::c_void,
+    buffer_max: i16,
+    length: *mut i16,
+    wide: bool,
+) -> i16 {
+    match identifier {
+        // unixODBC stores this count in a `SQLLEN`.
+        SQL_DIAG_NUMBER => write_i64(info, i64::from(u8::from(view.diag.is_some()))),
+        SQL_DIAG_ROW_COUNT | SQL_DIAG_CURSOR_ROW_COUNT => write_i64(info, view.rows),
+        SQL_DIAG_DYNAMIC_FUNCTION => write_diag_text(info, buffer_max, "", length, wide),
+        SQL_DIAG_DYNAMIC_FUNCTION_CODE => write_i32(info, 0),
+        _ => SQL_ERROR,
+    }
+}
+
+unsafe fn record_field(
+    diag: &Diag,
+    identifier: i16,
+    info: *mut std::ffi::c_void,
+    buffer_max: i16,
+    length: *mut i16,
+    wide: bool,
+) -> i16 {
+    match identifier {
+        SQL_DIAG_SQLSTATE => write_diag_text(info, buffer_max, diag.state, length, wide),
+        SQL_DIAG_NATIVE => write_i32(info, 0),
+        SQL_DIAG_MESSAGE_TEXT => write_diag_text(info, buffer_max, &diag.message, length, wide),
+        SQL_DIAG_CLASS_ORIGIN | SQL_DIAG_SUBCLASS_ORIGIN => {
+            let origin = if diag.state.starts_with("IM") {
+                "ODBC 3.0"
+            } else {
+                "ISO 9075"
+            };
+            write_diag_text(info, buffer_max, origin, length, wide)
+        }
+        SQL_DIAG_CONNECTION_NAME | SQL_DIAG_SERVER_NAME => {
+            write_diag_text(info, buffer_max, "", length, wide)
+        }
+        SQL_DIAG_COLUMN_NUMBER => write_i32(info, -2),
+        SQL_DIAG_ROW_NUMBER => write_i64(info, -2),
+        _ => SQL_ERROR,
+    }
+}
+
+unsafe fn write_diag_text(
+    info: *mut std::ffi::c_void,
+    buffer_max: i16,
+    text: &str,
+    length: *mut i16,
+    wide: bool,
+) -> i16 {
+    if wide {
+        write_wide(info.cast(), buffer_max, text, length)
+    } else {
+        write_text(info.cast(), buffer_max, text, length)
+    }
+}
+
+unsafe fn write_i32(info: *mut std::ffi::c_void, value: i32) -> i16 {
+    if info.is_null() {
+        return SQL_ERROR;
+    }
+    info.cast::<i32>().write(value);
+    SQL_SUCCESS
+}
+
+unsafe fn write_i64(info: *mut std::ffi::c_void, value: i64) -> i16 {
+    if info.is_null() {
+        return SQL_ERROR;
+    }
+    info.cast::<i64>().write(value);
+    SQL_SUCCESS
+}
+
 /// Reports the driver and DBMS names used by a driver manager.
 #[no_mangle]
 pub unsafe extern "C" fn SQLGetInfo(
@@ -1964,6 +2745,105 @@ mod tests {
         assert!(shown.contains("UID=root"));
         assert!(!shown.contains("secret"));
         assert!(paired(&connection_target("SERVER=127.0.0.1;UID=root").expect("half")).is_err());
+    }
+
+    #[test]
+    fn catalog_patterns_match_like_odbc() {
+        assert!(odbc_matches(None, "emp"));
+        assert!(odbc_matches(Some("emp"), "emp"));
+        assert!(odbc_matches(Some("EMP"), "emp"));
+        assert!(odbc_matches(Some("e%"), "emp"));
+        assert!(odbc_matches(Some("%"), "dept"));
+        assert!(!odbc_matches(Some("emp"), "dept"));
+        assert!(type_selected(None, "TABLE"));
+        assert!(type_selected(Some("TABLE,VIEW"), "VIEW"));
+        assert!(!type_selected(Some("VIEW"), "TABLE"));
+        assert_eq!(odbc_table_type("view"), "VIEW");
+        assert_eq!(odbc_table_type("collection"), "TABLE");
+    }
+
+    #[test]
+    fn dsn_name_reads_odbc_ini() {
+        assert!(profile_fn().is_some(), "libodbcinst.so.2 is not loaded");
+        let dir =
+            std::env::temp_dir().join(format!("kova-odbc-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("odbc.ini");
+        std::fs::write(
+            &path,
+            "[Shop]\nSERVER=10.0.0.8\nPORT=27019\nDATABASE=shop\nUID=ada\nPWD=secret\n",
+        )
+        .unwrap();
+        let previous = std::env::var("ODBCINI").ok();
+        std::env::set_var("ODBCINI", &path);
+        let named = server_name_target("Shop");
+        let from_string = connection_target("DSN=Shop");
+        match previous {
+            Some(value) => std::env::set_var("ODBCINI", value),
+            None => std::env::remove_var("ODBCINI"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let named = named.expect("dsn");
+        assert_eq!(named.host, "10.0.0.8");
+        assert_eq!(named.port, 27019);
+        assert_eq!(named.database, "shop");
+        assert_eq!(named.user.as_deref(), Some("ada"));
+        assert!(!normalized(&named).contains("secret"));
+
+        let from_string = from_string.expect("connection string");
+        assert_eq!(from_string.host, "10.0.0.8");
+        assert_eq!(from_string.database, "shop");
+    }
+
+    #[test]
+    fn diag_field_returns_the_statement_message() {
+        unsafe {
+            let mut env = std::ptr::null_mut();
+            let mut dbc = std::ptr::null_mut();
+            let mut stmt = std::ptr::null_mut();
+            assert_eq!(
+                SQLAllocHandle(SQL_HANDLE_ENV, std::ptr::null_mut(), &mut env),
+                SQL_SUCCESS
+            );
+            assert_eq!(SQLAllocHandle(SQL_HANDLE_DBC, env, &mut dbc), SQL_SUCCESS);
+            assert_eq!(SQLAllocHandle(SQL_HANDLE_STMT, dbc, &mut stmt), SQL_SUCCESS);
+            assert_eq!(SQLExecute(stmt), SQL_ERROR);
+            let text = diagnostic(SQL_HANDLE_STMT, stmt);
+            assert!(text.contains("HY010"), "{text}");
+
+            let mut count = 0i64;
+            let rc = SQLGetDiagField(
+                SQL_HANDLE_STMT,
+                stmt,
+                0,
+                SQL_DIAG_NUMBER,
+                (&mut count as *mut i64).cast(),
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(rc, SQL_SUCCESS);
+            assert_eq!(count, 1);
+
+            let mut message = [0u8; 128];
+            let mut len = 0i16;
+            let rc = SQLGetDiagField(
+                SQL_HANDLE_STMT,
+                stmt,
+                1,
+                SQL_DIAG_MESSAGE_TEXT,
+                message.as_mut_ptr().cast(),
+                128,
+                &mut len,
+            );
+            assert_eq!(rc, SQL_SUCCESS);
+            let message = std::str::from_utf8(&message).unwrap_or("");
+            assert!(message.contains("not prepared"), "{message}");
+
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+            SQLFreeHandle(SQL_HANDLE_ENV, env);
+        }
     }
 
     struct Session {

@@ -24,8 +24,12 @@ use datafusion::prelude::*;
 pub type Session = Arc<SessionContext>;
 
 /// Creates a new shared session context.
+///
+/// `information_schema` is on so `SHOW COLUMNS` and
+/// `information_schema.columns` resolve after the collection is registered.
 pub fn new_session() -> Session {
-    Arc::new(SessionContext::new())
+    let config = SessionConfig::new().with_information_schema(true);
+    Arc::new(SessionContext::new_with_config(config))
 }
 
 /// Registers a collection as a DataFusion table.
@@ -200,6 +204,47 @@ mod tests {
         assert!(names.contains(&"Alice"), "Alice should be in results");
         assert!(names.contains(&"Charlie"), "Charlie should be in results");
         assert!(!names.contains(&"Bob"), "Bob should not be in results");
+    }
+
+    #[tokio::test]
+    async fn describe_and_show_columns_report_the_collection_schema() {
+        let docs = Arc::new(vec![doc! { "name": "Alice", "age": 30i32 }]);
+        let described = execute_sql(Arc::clone(&docs), "users", "DESCRIBE users")
+            .await
+            .expect("describe");
+        assert_eq!(described.get_f64("ok").unwrap(), 1.0);
+        let columns = described
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("batch");
+        let names: Vec<&str> = columns
+            .iter()
+            .filter_map(|row| {
+                row.as_document()
+                    .and_then(|doc| doc.get_str("column_name").ok())
+            })
+            .collect();
+        assert!(names.contains(&"name"), "{names:?}");
+        assert!(names.contains(&"age"), "{names:?}");
+
+        let shown = execute_sql(docs, "users", "SHOW COLUMNS FROM users")
+            .await
+            .expect("show columns");
+        assert_eq!(shown.get_f64("ok").unwrap(), 1.0);
+        let shown_names: Vec<&str> = shown
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("batch")
+            .iter()
+            .filter_map(|row| {
+                row.as_document()
+                    .and_then(|doc| doc.get_str("column_name").ok())
+            })
+            .collect();
+        assert!(shown_names.contains(&"name"), "{shown_names:?}");
+        assert!(shown_names.contains(&"age"), "{shown_names:?}");
     }
 
     #[tokio::test]
