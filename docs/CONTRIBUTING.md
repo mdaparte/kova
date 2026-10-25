@@ -210,6 +210,9 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 26 — Feed:** a committed insert, update, or delete can publish
   one JSON record (`before` and `after`) to Apache Iggy. The listener
   decides what to do. `[feed]` is off unless enabled. ⚪ Planned.
+- **Phase 27 — User guide:** a README and a guide in `docs/` explain how
+  to run the server and use what is shipped. The engineering documents
+  stay as they are. ⚪ Planned.
 
 ---
 

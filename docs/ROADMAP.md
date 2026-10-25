@@ -40,6 +40,7 @@ replication, and multi-model indexing.
 | 24 | Physical catalog (`admin`) | ✅ Complete |
 | 25 | Autoincrement | ✅ Complete |
 | 26 | Feed (Apache Iggy) | ⚪ Planned |
+| 27 | User guide | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -909,6 +910,31 @@ If Iggy is down, the database write still stands. The publisher retries. The sam
 - [ ] Iggy being unreachable leaves the database write in place. A repeated delivery of the same write keeps the same `ns`, `id`, and `lsn`.
 - [ ] Test: with the feed off, an insert does not connect. With the feed on, an update of field `A` from 1 to 2 is a record whose `before.A` is 1 and `after.A` is 2. An insert and a delete have the empty side. Stopping Iggy still lets the insert succeed.
 
+## Phase 27 — User guide ⚪ Planned
+
+The repository explains the engine to a contributor. `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/CONTRACT.md`, and `docs/CONTRIBUTING.md` stay that. A person who wants to run Kova has no guide. `make doc` stays the generated API reference.
+
+This phase adds a README and a user guide in English, for what is already shipped. The README says what Kova is and how to build and run it: `make build`, `make run-debug`, port `27018`, `kova.toml`, and security off unless it is turned on. The commands match the Makefile.
+
+The guide covers the rest of the running server:
+
+- The MongoDB commands a client sends, and SQL through `db.runCommand({ sql })`.
+- The ODBC connection keys `SERVER`, `PORT`, `DATABASE`, `UID`, and `PWD`.
+- `kovadump` backup and restore, and the dump shapes it reads.
+- The `admin` catalog, including `admin.counters` and `last`.
+- A replica set and sharding: when each one is for, and that one process is not both the router and a voter.
+- Autoincrement: `create` with `autoincrement`, and an update of the counter row.
+
+The feed is a planned note that points at Phase 26. The guide describes it after that phase lands. The guide does not rename a client product, and it does not copy the roadmap phase by phase.
+
+### Phase 27 — Sub-tasks
+
+- [ ] A README at the repository root explains what Kova is, how to build it, how to run it, the default port, the config file, and that security is off unless enabled.
+- [ ] A user guide in `docs/` covers the wire commands, SQL, the ODBC connection keys, `kovadump`, the `admin` catalog and counters, replica sets, and sharding.
+- [ ] The text is English and describes what is shipped. The feed is a pointer to Phase 26 until that phase is done.
+- [ ] `ROADMAP`, `ARCHITECTURE`, `CONTRACT`, and `CONTRIBUTING` stay the engineering documents. `make doc` stays the API reference.
+- [ ] The README commands match the Makefile targets and port `27018`.
+
 ## Architecture Principles
 
 1. **Hybrid memory+disk**: documents live in pages. RAM holds the buffer
@@ -934,6 +960,7 @@ If Iggy is down, the database write still stands. The publisher retries. The sam
 | Gap | Phase | Notes |
 |-----|-------|-------|
 | A committed write has no feed for other programs | 26 | `[feed]` will publish one JSON record per committed insert, update, or delete to Apache Iggy. The listener decides what to do with `before` and `after`. Today a program tails a collection or the oplog. |
+| A person who wants to run Kova has no user guide | 27 | A README and a guide in `docs/` will cover the running server. The engineering documents stay as they are. |
 
 ## Architecture Diagram (updated)
 
@@ -991,4 +1018,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–25 are complete. Still open: the feed (Phase 26).*
+*Phases 1–25 are complete. Still open: the feed (Phase 26) and the user guide (Phase 27).*
