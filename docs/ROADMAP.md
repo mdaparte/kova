@@ -34,10 +34,11 @@ replication, and multi-model indexing.
 | 18 | Transactions in the oplog | ✅ Complete |
 | 19 | Snapshot shipping | ✅ Complete |
 | 20 | ODBC connector | ✅ Complete |
-| 21 | ODBC catalog for GUI clients | ⚪ Planned |
+| 21 | ODBC catalog for GUI clients | ✅ Complete |
 | 22 | `kovadump` backup and restore | ✅ Complete |
 | 23 | Sharding | ⚪ Planned |
 | 24 | Physical catalog (`admin`) | ✅ Complete |
+| 25 | Autoincrement | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -751,20 +752,22 @@ The connection string is `DRIVER=Kova;SERVER=host;PORT=27018;DATABASE=name`. `SE
 - [x] Pin unixODBC on Linux, and the connection string `SERVER`, `PORT`, `DATABASE`, `UID`, `PWD`.
 - [x] Test: an ODBC client runs a `SELECT` and gets the same rows as `db.runCommand({ sql })`. A wrong password is refused and the right one runs the query.
 
-## Phase 21 — ODBC catalog for GUI clients ⚪ Planned
+## Phase 21 — ODBC catalog for GUI clients ✅
 
-Phase 20 answers `SQLExecDirect`. A database IDE also asks for the catalog before it draws the table list, and it reads that result by column position. LibreOffice Base 24.2 (`libodbclo.so`) calls `SQLTables` and `SQLGetInfo` from `getTables`. A `SQLGetInfo` error is caught and replaced with an empty list, which is the blank **Tables** panel and the type filter stuck on None. The SQL window throws the same error: `info type 93 is not supported` at `OTools.cxx:357`. Info type 93 is `SQL_QUOTED_IDENTIFIER_CASE`.
+`SQLTables` returns `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`, `TABLE_TYPE`, `REMARKS` in that order. A call with an empty table name and table type `%` returns `TABLE` and `VIEW` in column 4 and does not ask the server. LibreOffice Base fills the type filter from that column. A table pattern of `%` and a type list such as `TABLE,VIEW` returns the collections and views of the DSN database.
 
-This phase makes those catalog calls match the ODBC layout so the IDE can list collections and open a SQL window. `isql` `help` and `help <table>` keep the rows they already print. The client maps `libkova.so` for the life of the process, so a rebuilt library loads only after that process quits.
+`SQLColumns` returns the ODBC column list. `COLUMN_NAME` is column 4 and `DATA_TYPE` is column 5. The types come from `admin.fields`. A collection the catalog does not know yet is sampled from its documents.
+
+`SQLGetInfo` answers the values a GUI reads, including quoted identifier case (93), which is case-sensitive. An unknown info type returns a zero or an empty string. It does not return `HYC00`. `isql` `help` and `help <table>` keep the rows they already print. The client maps `libkova.so` for the life of the process, so a rebuilt library loads only after that process quits.
 
 Windows ODBC, `?` parameter binding, and DBeaver stay out. DBeaver Community has no ODBC driver. `SQLPrimaryKeys`, `SQLStatistics`, and `SQLGetTypeInfo` wait until a client error names the missing call.
 
 ### Phase 21 — Sub-tasks
 
-- [ ] `SQLTables` returns `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`, `TABLE_TYPE`, `REMARKS` in that order. The type probe (`SQLTables` with table type `%`) returns `TABLE` and `VIEW` in column 4 and does not call the server.
-- [ ] `SQLColumns` returns the standard columns so a GUI reads `COLUMN_NAME` and `DATA_TYPE` by position.
-- [ ] `SQLGetInfo` answers the info types a GUI asks, including quoted identifier case (93). An unknown info type returns a zero or an empty string. It does not return `HYC00`.
-- [ ] Test: LibreOffice Base on DSN `Kova` lists the collections of `db` and **Ferramentas → SQL** opens. `isql` `help` and `help emp` still return their rows.
+- [x] `SQLTables` returns `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`, `TABLE_TYPE`, `REMARKS` in that order. The type probe (`SQLTables` with table type `%`) returns `TABLE` and `VIEW` in column 4 and does not call the server.
+- [x] `SQLColumns` returns the standard columns so a GUI reads `COLUMN_NAME` and `DATA_TYPE` by position.
+- [x] `SQLGetInfo` answers the info types a GUI asks, including quoted identifier case (93). An unknown info type returns a zero or an empty string. It does not return `HYC00`.
+- [x] Test: the LibreOffice catalog sequence on DSN `Kova` returns `TABLE` and `VIEW`, lists `emp` and the views, and `SQLColumns` of `emp` returns `ename` as VARCHAR. `isql` `help` and `help emp` return those rows. Info type 93 returns success.
 
 ## Phase 22 — `kovadump` backup and restore ✅
 
@@ -782,7 +785,7 @@ Backup writes a Kova dump of one database: collections (documents and indexes, e
 The four inputs restore accepts:
 
 - **Kova dump 1.** Magic `KOVADMP1`, then BSON documents whose `kind` is `collection`, `document`, `index`, or `view`.
-- **`pg_dump` plain SQL** (not the custom archive). `CREATE TABLE`, text-format `COPY ... FROM stdin` ended by `\.`, and `INSERT INTO ... VALUES`. The schema is dropped (`public.emp` becomes `emp`). COPY values use the column type. `SET`, `ALTER`, `CREATE INDEX`, and dollar-quoted function bodies are skipped. Binary `COPY` is refused.
+- **`pg_dump` plain SQL** (not the custom archive). `CREATE TABLE`, text-format `COPY ... FROM stdin` ended by `\.`, and `INSERT INTO ... VALUES`. The schema is dropped (`public.emp` becomes `emp`). COPY values use the column type. A primary key or `UNIQUE` becomes a unique index. A foreign key becomes an index on the referencing columns. A `serial`, `bigserial`, `smallserial`, `AUTO_INCREMENT`, identity, or `DEFAULT nextval` column becomes a unique index when the primary key does not already cover it. The numbers stay as stored. The next value is Phase 25. `SET`, `OWNER`, and dollar-quoted function bodies are skipped. Binary `COPY` is refused.
 - **`mysqldump` SQL.** Backtick identifiers, `CREATE TABLE`, and extended `INSERT` with backslash string escapes. `LOCK TABLES` is skipped.
 - **`mongodump` directory or archive.** A directory is `<db>/<collection>.bson` plus optional `<collection>.metadata.json`. A dump root uses the subdirectory named by `--db`, or the only database subdirectory. An archive is format `0.1`: magic `0x8199e26d`, a prelude block, then namespace blocks ended by `0xffffffff`. The CRC is not checked. `timeseries` is refused. Names starting with `system.` are skipped.
 
@@ -828,6 +831,19 @@ Startup that finds the version-2 root reads those rows. It does not scan user pa
 - [x] Startup reads the catalog. It does not discover collections by scanning page files, and it does not walk every document to rebuild the search index, the secondary indexes, or the `_id` set.
 - [x] Test: restart a process whose documents do not fit in the buffer pool. Startup does not scan those documents. `listDatabases`, `listCollections`, and the field list match the process that shut down. `find` still returns a document from its page.
 
+## Phase 25 — Autoincrement ⚪ Planned
+
+A restored `serial`, `bigserial`, `smallserial`, `AUTO_INCREMENT`, `GENERATED ... AS IDENTITY`, or `DEFAULT nextval` column already gets a unique index, unless the primary key already covers that column. The integers in the dump stay in the field. An insert that leaves the field out does not receive the next number. `_id` is still a new ObjectId.
+
+This phase stores the next value. Restore takes it from `setval`: when the third argument is true, the next value is one past the number in the call; when it is false, the next value is that number. A dump without `setval` uses one past the highest value already stored. An insert that omits the column writes that value and advances the counter. A value the client sends is kept, and the counter moves past it when the sent value is higher. The unique index still refuses a duplicate. The counter is written with the catalog and is still there after restart.
+
+### Phase 25 — Sub-tasks
+
+- [ ] Restore records the next value from `setval`, or one past the highest stored value when `setval` is absent.
+- [ ] An insert that omits the column stores the next value and advances the counter. A client-supplied value that is higher moves the counter past it.
+- [ ] The counter is in the catalog and survives restart.
+- [ ] Test: restore a table whose `setval` is 115 with the third argument true. An insert without `id` stores 116. The next insert stores 117. After restart, the next insert stores 118.
+
 ## Architecture Principles
 
 1. **Hybrid memory+disk**: documents live in pages. RAM holds the buffer
@@ -852,8 +868,8 @@ Startup that finds the version-2 root reads those rows. It does not scan user pa
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| GUI ODBC clients get an empty table list | 21 | LibreOffice Base reads `SQLTables` by position and drops the list when `SQLGetInfo` fails. |
 | Sharding is not implemented | 23 | Routing scheme is chosen when the phase starts. |
+| An insert does not continue a `serial` / `AUTO_INCREMENT` column | 25 | Restore keeps the imported numbers and the unique index. The next value is not allocated. |
 
 ## Architecture Diagram (updated)
 
@@ -911,5 +927,5 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–20, 22, and 24 are complete. Still open: ODBC catalog for GUI
-clients (Phase 21) and sharding (Phase 23).*
+*Phases 1–22 and 24 are complete. Still open: sharding (Phase 23) and
+autoincrement (Phase 25).*

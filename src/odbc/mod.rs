@@ -64,18 +64,62 @@ const SQL_TYPE_TIMESTAMP: i16 = 93;
 const SQL_C_CHAR: i16 = 1;
 const SQL_C_LONG: i16 = 4;
 const SQL_C_SHORT: i16 = 5;
-const SQL_C_SBIGINT: i16 = -5;
+const SQL_C_FLOAT: i16 = 7;
 const SQL_C_DOUBLE: i16 = 8;
+const SQL_C_DATE: i16 = 9;
+const SQL_C_TIME: i16 = 10;
+const SQL_C_TIMESTAMP: i16 = 11;
+const SQL_C_TYPE_DATE: i16 = 91;
+const SQL_C_TYPE_TIME: i16 = 92;
+const SQL_C_TYPE_TIMESTAMP: i16 = 93;
 const SQL_C_BIT: i16 = -7;
+const SQL_C_TINYINT: i16 = -6;
+/// ODBC 2 name. unixODBC 3 calls the same 64-bit integer `-25`.
+const SQL_C_SBIGINT: i16 = -5;
+const SQL_C_SBIGINT_3: i16 = -25;
+const SQL_C_UBIGINT: i16 = -27;
+const SQL_C_SSHORT: i16 = -15;
+const SQL_C_SLONG: i16 = -16;
+const SQL_C_USHORT: i16 = -17;
+const SQL_C_ULONG: i16 = -18;
+const SQL_C_STINYINT: i16 = -26;
+const SQL_C_UTINYINT: i16 = -28;
 
 const SQL_NULLABLE: i16 = 1;
 
+const SQL_DESC_CONCISE_TYPE: u16 = 2;
+const SQL_COLUMN_LENGTH: u16 = 3;
+const SQL_COLUMN_PRECISION: u16 = 4;
+const SQL_COLUMN_SCALE: u16 = 5;
 const SQL_DESC_DISPLAY_SIZE: u16 = 6;
+const SQL_DESC_UNSIGNED: u16 = 8;
+const SQL_DESC_FIXED_PREC_SCALE: u16 = 9;
+const SQL_DESC_UPDATABLE: u16 = 10;
+const SQL_DESC_AUTO_UNIQUE_VALUE: u16 = 11;
+const SQL_DESC_CASE_SENSITIVE: u16 = 12;
+const SQL_DESC_SEARCHABLE: u16 = 13;
 const SQL_DESC_TYPE_NAME: u16 = 14;
+const SQL_DESC_TABLE_NAME: u16 = 15;
+const SQL_DESC_SCHEMA_NAME: u16 = 16;
+const SQL_DESC_CATALOG_NAME: u16 = 17;
 const SQL_DESC_LABEL: u16 = 18;
+const SQL_DESC_BASE_COLUMN_NAME: u16 = 22;
+const SQL_DESC_BASE_TABLE_NAME: u16 = 23;
+const SQL_DESC_LITERAL_PREFIX: u16 = 27;
+const SQL_DESC_LITERAL_SUFFIX: u16 = 28;
+const SQL_DESC_LOCAL_TYPE_NAME: u16 = 29;
+const SQL_DESC_NUM_PREC_RADIX: u16 = 32;
 const SQL_DESC_TYPE: u16 = 1002;
+const SQL_DESC_LENGTH: u16 = 1003;
+const SQL_DESC_PRECISION: u16 = 1005;
+const SQL_DESC_SCALE: u16 = 1006;
+const SQL_DESC_DATETIME_INTERVAL_CODE: u16 = 1007;
 const SQL_DESC_NULLABLE_FIELD: u16 = 1008;
 const SQL_DESC_NAME: u16 = 1011;
+const SQL_DESC_UNNAMED: u16 = 1012;
+const SQL_DESC_OCTET_LENGTH: u16 = 1013;
+const SQL_PRED_SEARCHABLE: i64 = 3;
+const SQL_CODE_TIMESTAMP: i64 = 3;
 
 const SQL_DRIVER_NAME: u16 = 6;
 const SQL_DRIVER_VER: u16 = 7;
@@ -595,8 +639,148 @@ fn cell_from(value: &bson::Bson) -> Cell {
         bson::Bson::Double(value) => Cell::Float(*value),
         bson::Bson::String(value) => Cell::Text(value.clone()),
         bson::Bson::ObjectId(value) => Cell::Text(value.to_hex()),
+        bson::Bson::DateTime(value) => Cell::Text(format_utc_millis(value.timestamp_millis())),
         other => Cell::Text(format!("{other:?}")),
     }
+}
+
+/// `YYYY-MM-DD HH:MM:SS` in UTC. LibreOffice reads this back as a
+/// timestamp structure when the column type is `TIMESTAMP`.
+fn format_utc_millis(millis: i64) -> String {
+    let secs = millis.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400) as u32;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    (year as i32, month as u32, day as u32)
+}
+
+struct CivilTime {
+    year: i16,
+    month: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    fraction: u32,
+}
+
+/// Reads `1980-12-17 0:00:00.0` out of a value or out of the debug
+/// form `DateTime(1980-12-17 0:00:00.0 +00:00:00)`.
+fn parse_civil(text: &str) -> Option<CivilTime> {
+    let bytes = text.as_bytes();
+    let mut start = None;
+    for index in 0..bytes.len().saturating_sub(4) {
+        if bytes[index].is_ascii_digit()
+            && bytes[index + 1].is_ascii_digit()
+            && bytes[index + 2].is_ascii_digit()
+            && bytes[index + 3].is_ascii_digit()
+            && bytes.get(index + 4) == Some(&b'-')
+        {
+            start = Some(index);
+            break;
+        }
+    }
+    let mut rest = text.get(start?..)?;
+    let (year, next) = take_uint(rest)?;
+    rest = next.strip_prefix('-')?;
+    let (month, next) = take_uint(rest)?;
+    rest = next.strip_prefix('-')?;
+    let (day, next) = take_uint(rest)?;
+    rest = next
+        .strip_prefix(' ')
+        .or_else(|| next.strip_prefix('T'))
+        .unwrap_or("");
+    let (hour, minute, second, fraction) = if rest.starts_with(|ch: char| ch.is_ascii_digit()) {
+        let (hour, next) = take_uint(rest)?;
+        let next = next.strip_prefix(':')?;
+        let (minute, next) = take_uint(next)?;
+        let next = next.strip_prefix(':')?;
+        let (second, next) = take_uint(next)?;
+        let fraction = if let Some(frac) = next.strip_prefix('.') {
+            let digits: String = frac.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+            let mut nanos = digits;
+            nanos.truncate(9);
+            while nanos.len() < 9 {
+                nanos.push('0');
+            }
+            nanos.parse().unwrap_or(0)
+        } else {
+            0
+        };
+        (hour, minute, second, fraction)
+    } else {
+        (0, 0, 0, 0)
+    };
+    Some(CivilTime {
+        year: i16::try_from(year).ok()?,
+        month: u16::try_from(month).ok()?,
+        day: u16::try_from(day).ok()?,
+        hour: u16::try_from(hour).ok()?,
+        minute: u16::try_from(minute).ok()?,
+        second: u16::try_from(second).ok()?,
+        fraction,
+    })
+}
+
+fn take_uint(text: &str) -> Option<(u32, &str)> {
+    let digits = text
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    let number = text[..digits].parse().ok()?;
+    Some((number, &text[digits..]))
+}
+
+fn civil_of(cell: &Cell) -> Result<CivilTime, (&'static str, String)> {
+    let text = cell_text(cell);
+    parse_civil(&text).ok_or(("22018", "column is not a timestamp".to_string()))
+}
+
+#[repr(C)]
+struct DateStruct {
+    year: i16,
+    month: u16,
+    day: u16,
+}
+
+#[repr(C)]
+struct TimeStruct {
+    hour: u16,
+    minute: u16,
+    second: u16,
+}
+
+#[repr(C)]
+struct TimestampStruct {
+    year: i16,
+    month: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    fraction: u32,
 }
 
 fn cell_text(cell: &Cell) -> String {
@@ -1342,7 +1526,7 @@ unsafe fn write_bound(cell: &Cell, binding: &Binding) -> Result<Written, (&'stat
                 Ok(Written::Ok)
             }
         }
-        SQL_C_SHORT => {
+        SQL_C_SHORT | SQL_C_SSHORT | SQL_C_USHORT => {
             let value = cell_i64(cell)?;
             let value = i16::try_from(value).map_err(|_| {
                 (
@@ -1356,7 +1540,23 @@ unsafe fn write_bound(cell: &Cell, binding: &Binding) -> Result<Written, (&'stat
             }
             Ok(Written::Ok)
         }
-        SQL_C_LONG => {
+        SQL_C_TINYINT | SQL_C_STINYINT | SQL_C_UTINYINT => {
+            let value = cell_i64(cell)?;
+            let value = i8::try_from(value).map_err(|_| {
+                (
+                    "22003",
+                    "numeric value is out of range for an 8-bit integer".to_string(),
+                )
+            })?;
+            (target as *mut i8).write(value);
+            if !indicator.is_null() {
+                *indicator = 1;
+            }
+            Ok(Written::Ok)
+        }
+        // LibreOffice asks for an integer with `SQL_C_SLONG` (-16).
+        // That is the signed form of `SQL_C_LONG`.
+        SQL_C_LONG | SQL_C_SLONG | SQL_C_ULONG => {
             let value = cell_i64(cell)?;
             let value = i32::try_from(value).map_err(|_| {
                 (
@@ -1370,11 +1570,62 @@ unsafe fn write_bound(cell: &Cell, binding: &Binding) -> Result<Written, (&'stat
             }
             Ok(Written::Ok)
         }
-        SQL_C_SBIGINT => {
+        SQL_C_SBIGINT | SQL_C_SBIGINT_3 | SQL_C_UBIGINT => {
             let value = cell_i64(cell)?;
             (target as *mut i64).write(value);
             if !indicator.is_null() {
                 *indicator = 8;
+            }
+            Ok(Written::Ok)
+        }
+        SQL_C_FLOAT => {
+            let value = cell_f64(cell)? as f32;
+            (target as *mut f32).write(value);
+            if !indicator.is_null() {
+                *indicator = 4;
+            }
+            Ok(Written::Ok)
+        }
+        SQL_C_DATE | SQL_C_TYPE_DATE => {
+            let civil = civil_of(cell)?;
+            let date = DateStruct {
+                year: civil.year,
+                month: civil.month,
+                day: civil.day,
+            };
+            (target as *mut DateStruct).write(date);
+            if !indicator.is_null() {
+                *indicator = std::mem::size_of::<DateStruct>() as i64;
+            }
+            Ok(Written::Ok)
+        }
+        SQL_C_TIME | SQL_C_TYPE_TIME => {
+            let civil = civil_of(cell)?;
+            let time = TimeStruct {
+                hour: civil.hour,
+                minute: civil.minute,
+                second: civil.second,
+            };
+            (target as *mut TimeStruct).write(time);
+            if !indicator.is_null() {
+                *indicator = std::mem::size_of::<TimeStruct>() as i64;
+            }
+            Ok(Written::Ok)
+        }
+        SQL_C_TIMESTAMP | SQL_C_TYPE_TIMESTAMP => {
+            let civil = civil_of(cell)?;
+            let stamp = TimestampStruct {
+                year: civil.year,
+                month: civil.month,
+                day: civil.day,
+                hour: civil.hour,
+                minute: civil.minute,
+                second: civil.second,
+                fraction: civil.fraction,
+            };
+            (target as *mut TimestampStruct).write(stamp);
+            if !indicator.is_null() {
+                *indicator = std::mem::size_of::<TimestampStruct>() as i64;
             }
             Ok(Written::Ok)
         }
@@ -2355,29 +2606,71 @@ unsafe fn col_attribute(
         };
         described.clone()
     };
-    let label = described.name;
-    let type_name = match described.kind {
+    match column_attr(&described, field) {
+        ColumnAttr::Text(value) => write_attr_text(text, text_max, &value, text_len, wide),
+        ColumnAttr::Number(value) if !number.is_null() => write_attr_len(number, value),
+        ColumnAttr::Number(_) => write_attr_text(text, text_max, "", text_len, wide),
+    }
+}
+
+/// One `SQLColAttribute` answer. LibreOffice reads the concise type
+/// before it draws a table list or a query, and treats an error as an
+/// empty result. An attribute this driver does not use is `0`.
+fn column_attr(column: &Column, field: u16) -> ColumnAttr {
+    let type_name = match column.kind {
         SQL_INTEGER => "INTEGER",
         SQL_BIGINT => "BIGINT",
         SQL_DOUBLE => "DOUBLE",
         SQL_BIT => "BIT",
+        SQL_TYPE_TIMESTAMP => "TIMESTAMP",
         _ => "VARCHAR",
     };
-    let display = match described.kind {
-        SQL_INTEGER => 11,
-        SQL_BIGINT => 20,
-        SQL_DOUBLE => 24,
-        SQL_BIT => 1,
-        _ => i64::try_from(described.size).unwrap_or(i64::MAX),
+    let characters = matches!(column.kind, SQL_VARCHAR);
+    let width = i64::try_from(column.size).unwrap_or(i64::MAX);
+    let (precision, display, octet) = match column.kind {
+        SQL_INTEGER => (10, 11, 4),
+        SQL_BIGINT => (19, 20, 8),
+        SQL_DOUBLE => (15, 24, 8),
+        SQL_BIT => (1, 1, 1),
+        SQL_TYPE_TIMESTAMP => (23, 26, 16),
+        _ => (width, width, width),
     };
     match field {
-        SQL_DESC_LABEL | SQL_DESC_NAME => write_attr_text(text, text_max, &label, text_len, wide),
-        SQL_DESC_TYPE_NAME => write_attr_text(text, text_max, type_name, text_len, wide),
-        SQL_DESC_DISPLAY_SIZE => write_attr_len(number, display),
-        SQL_DESC_TYPE => write_attr_len(number, i64::from(described.kind)),
-        SQL_DESC_NULLABLE_FIELD => write_attr_len(number, i64::from(SQL_NULLABLE)),
-        _ => stmt_error(id, "HY091", "column attribute is not supported"),
+        SQL_DESC_LABEL | SQL_DESC_NAME | SQL_DESC_BASE_COLUMN_NAME => {
+            ColumnAttr::Text(column.name.clone())
+        }
+        SQL_DESC_TYPE_NAME | SQL_DESC_LOCAL_TYPE_NAME => ColumnAttr::Text(type_name.to_string()),
+        SQL_DESC_TABLE_NAME | SQL_DESC_SCHEMA_NAME | SQL_DESC_CATALOG_NAME
+        | SQL_DESC_BASE_TABLE_NAME => ColumnAttr::Text(String::new()),
+        SQL_DESC_LITERAL_PREFIX | SQL_DESC_LITERAL_SUFFIX => {
+            ColumnAttr::Text(if characters { "'" } else { "" }.to_string())
+        }
+        SQL_DESC_DISPLAY_SIZE => ColumnAttr::Number(display),
+        SQL_DESC_CONCISE_TYPE | SQL_DESC_TYPE => ColumnAttr::Number(i64::from(column.kind)),
+        SQL_DESC_LENGTH | SQL_COLUMN_LENGTH | SQL_DESC_OCTET_LENGTH => ColumnAttr::Number(octet),
+        SQL_DESC_PRECISION | SQL_COLUMN_PRECISION => ColumnAttr::Number(precision),
+        SQL_DESC_SCALE | SQL_COLUMN_SCALE => ColumnAttr::Number(0),
+        SQL_DESC_NUM_PREC_RADIX => ColumnAttr::Number(if characters { 0 } else { 10 }),
+        SQL_DESC_NULLABLE_FIELD => ColumnAttr::Number(i64::from(SQL_NULLABLE)),
+        SQL_DESC_CASE_SENSITIVE => ColumnAttr::Number(i64::from(characters)),
+        SQL_DESC_UNSIGNED => ColumnAttr::Number(i64::from(characters || column.kind == SQL_BIT)),
+        SQL_DESC_FIXED_PREC_SCALE | SQL_DESC_AUTO_UNIQUE_VALUE | SQL_DESC_UNNAMED => {
+            ColumnAttr::Number(0)
+        }
+        SQL_DESC_SEARCHABLE => ColumnAttr::Number(SQL_PRED_SEARCHABLE),
+        SQL_DESC_UPDATABLE => ColumnAttr::Number(0),
+        SQL_DESC_DATETIME_INTERVAL_CODE => ColumnAttr::Number(if column.kind == SQL_TYPE_TIMESTAMP {
+            SQL_CODE_TIMESTAMP
+        } else {
+            0
+        }),
+        _ => ColumnAttr::Number(0),
     }
+}
+
+enum ColumnAttr {
+    Text(String),
+    Number(i64),
 }
 
 unsafe fn write_attr_text(
@@ -2999,6 +3292,46 @@ mod tests {
             info_value(SQL_QUOTED_IDENTIFIER_CASE, "db"),
             InfoValue::Number(SQL_IC_SENSITIVE)
         ));
+        let ename = Column {
+            name: "ename".to_string(),
+            kind: SQL_VARCHAR,
+            size: 10,
+        };
+        assert!(matches!(
+            column_attr(&ename, SQL_DESC_CONCISE_TYPE),
+            ColumnAttr::Number(SQL_VARCHAR_N) if SQL_VARCHAR_N == i64::from(SQL_VARCHAR)
+        ));
+        assert!(matches!(column_attr(&ename, SQL_DESC_SCHEMA_NAME), ColumnAttr::Text(ref text) if text.is_empty()));
+        assert!(matches!(column_attr(&ename, 65000), ColumnAttr::Number(0)));
+        let sal = Column {
+            name: "sal".to_string(),
+            kind: SQL_INTEGER,
+            size: 10,
+        };
+        assert!(matches!(
+            column_attr(&sal, SQL_DESC_CONCISE_TYPE),
+            ColumnAttr::Number(4)
+        ));
+        assert_eq!(format_utc_millis(345_859_200_000), "1980-12-17 00:00:00");
+        let hired = parse_civil("DateTime(1980-12-17 0:00:00.0 +00:00:00)").expect("hired");
+        assert_eq!(hired.year, 1980);
+        assert_eq!(hired.month, 12);
+        assert_eq!(hired.day, 17);
+        let mut slot = 0i32;
+        let mut indicator = 0i64;
+        let written = unsafe {
+            write_bound(
+                &Cell::Int(7369),
+                &Binding {
+                    target_type: SQL_C_SLONG,
+                    target: &mut slot as *mut i32 as usize,
+                    buffer_len: 4,
+                    indicator: &mut indicator as *mut i64 as usize,
+                },
+            )
+        };
+        assert!(written.is_ok());
+        assert_eq!(slot, 7369);
         assert!(matches!(
             info_value(SQL_DBMS_NAME, "db"),
             InfoValue::Text("Kova")

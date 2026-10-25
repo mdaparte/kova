@@ -195,7 +195,7 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   same SQL as `db.runCommand({ sql })`. `UID` and `PWD` call `authenticate`. ✅ Complete.
 - **Phase 21 — ODBC catalog for GUI clients:** `SQLTables`, `SQLColumns`,
   and `SQLGetInfo` match the layout a database IDE reads by column position.
-  LibreOffice Base lists the collections and opens the SQL window. ⚪ Planned.
+  LibreOffice Base lists the collections and opens the SQL window. ✅ Complete.
 - **Phase 22 — `kovadump`:** backup and restore over the MongoDB port.
   Restore reads a Kova dump, `pg_dump` plain SQL, `mongodump`, or
   `mysqldump` SQL, and writes through `insert`. ✅ Complete.
