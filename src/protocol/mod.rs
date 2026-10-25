@@ -336,6 +336,35 @@ fn string_names(command: &Document, key: &str) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// `autoincrement` is one field name or a list of them. Absent means none.
+fn autoincrement_fields(command: &Document) -> Result<Vec<String>, String> {
+    let Some(value) = command.get("autoincrement") else {
+        return Ok(Vec::new());
+    };
+    let names = match value {
+        bson::Bson::String(name) => vec![name.clone()],
+        bson::Bson::Array(values) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "autoincrement entries must be field names".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err("autoincrement must be a field name or a list of field names".into());
+        }
+    };
+    if names
+        .iter()
+        .any(|name| name.is_empty() || name.contains('.'))
+    {
+        return Err("an autoincrement field is one name, without '.'".into());
+    }
+    Ok(names)
+}
+
 /// Translates a decoded command document into a [`PartitionCommand`].
 ///
 /// Supports the commands Phase 2 can execute: `insert`, `find`, `update`,
@@ -460,6 +489,7 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             txn_id,
             PartitionCommand::CreateCollection {
                 collection: namespaced(collection),
+                autoincrement: autoincrement_fields(command)?,
             },
         );
     }
@@ -690,10 +720,7 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             _ if db.is_empty() => "admin".to_string(),
             _ => db.to_string(),
         };
-        return bind_txn(
-            txn_id,
-            PartitionCommand::DropDatabase { database },
-        );
+        return bind_txn(txn_id, PartitionCommand::DropDatabase { database });
     }
 
     if command.contains_key("listCollections") {
@@ -1777,11 +1804,35 @@ mod tests {
     fn test_command_create_becomes_create_collection() {
         let command = doc! { "create": "orders", "$db": "shop" };
         match command_from_document(&command).expect("parse") {
-            PartitionCommand::CreateCollection { collection } => {
+            PartitionCommand::CreateCollection { collection, .. } => {
                 assert_eq!(collection, "shop.orders");
             }
             other => panic!("expected CreateCollection, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_create_autoincrement_is_a_name_or_a_list() {
+        let command = doc! { "create": "orders", "autoincrement": "id", "$db": "shop" };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::CreateCollection {
+                collection,
+                autoincrement,
+            } => {
+                assert_eq!(collection, "shop.orders");
+                assert_eq!(autoincrement, vec!["id".to_string()]);
+            }
+            other => panic!("expected CreateCollection, got {:?}", other),
+        }
+        let command = doc! { "create": "orders", "autoincrement": ["id", "n"], "$db": "shop" };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::CreateCollection { autoincrement, .. } => {
+                assert_eq!(autoincrement, vec!["id".to_string(), "n".to_string()]);
+            }
+            other => panic!("expected CreateCollection, got {:?}", other),
+        }
+        let command = doc! { "create": "orders", "autoincrement": 1i32, "$db": "shop" };
+        assert!(command_from_document(&command).is_err());
     }
 
     #[test]

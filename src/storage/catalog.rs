@@ -9,15 +9,17 @@ pub const DATABASES: &str = "admin.databases";
 pub const COLLECTIONS: &str = "admin.collections";
 pub const FIELDS: &str = "admin.fields";
 pub const INDEXES: &str = "admin.indexes";
+pub const COUNTERS: &str = "admin.counters";
 pub const USERS: &str = "admin.users";
 pub const ROLES: &str = "admin.roles";
 pub const VIEWS: &str = "admin.views";
 
-pub const NAMES: [&str; 7] = [
+pub const NAMES: [&str; 8] = [
     DATABASES,
     COLLECTIONS,
     FIELDS,
     INDEXES,
+    COUNTERS,
     USERS,
     ROLES,
     VIEWS,
@@ -29,7 +31,9 @@ pub fn is_catalog(name: &str) -> bool {
 
 /// Database that owns `namespace`. A bare name belongs to `test`.
 pub fn database_of(namespace: &str) -> &str {
-    namespace.split_once('.').map_or("test", |(database, _)| database)
+    namespace
+        .split_once('.')
+        .map_or("test", |(database, _)| database)
 }
 
 /// Collection name without the database prefix.
@@ -66,7 +70,12 @@ pub fn type_name(value: &Bson) -> &'static str {
 }
 
 pub fn u64s(ids: &[u64]) -> Bson {
-    Bson::Array(ids.iter().copied().map(|id| Bson::Int64(id as i64)).collect())
+    Bson::Array(
+        ids.iter()
+            .copied()
+            .map(|id| Bson::Int64(id as i64))
+            .collect(),
+    )
 }
 
 pub fn read_u64s(document: &Document, key: &str) -> Vec<u64> {

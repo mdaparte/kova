@@ -114,14 +114,7 @@ empty when security is off. Set both when it is on."
         let report = backup(&target, &path)?;
         println!("wrote {report} to {}", path.display());
     } else {
-        let report = restore(
-            &target,
-            &path,
-            &RestoreOptions {
-                tables,
-                yes,
-            },
-        )?;
+        let report = restore(&target, &path, &RestoreOptions { tables, yes })?;
         println!("restored {report} into {database}");
     }
     Ok(())

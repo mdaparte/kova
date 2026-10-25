@@ -178,7 +178,11 @@ pub enum PartitionCommand {
     /// their "create collection" dialog; MongoDB itself creates
     /// collections implicitly on first insert, but GUI tools expect
     /// the explicit command to exist.
-    CreateCollection { collection: String },
+    CreateCollection {
+        collection: String,
+        /// Fields whose missing values are filled from `admin.counters`.
+        autoincrement: Vec<String>,
+    },
     /// Declare secondary indexes on a collection (`createIndexes`).
     ///
     /// The catalog keeps the spec. The worker also builds the B-tree
@@ -388,7 +392,7 @@ impl PartitionCommand {
             | PartitionCommand::Delete { collection, .. }
             | PartitionCommand::Count { collection, .. }
             | PartitionCommand::Drop { collection }
-            | PartitionCommand::CreateCollection { collection }
+            | PartitionCommand::CreateCollection { collection, .. }
             | PartitionCommand::CreateIndexes { collection, .. }
             | PartitionCommand::DropIndexes { collection, .. }
             | PartitionCommand::Explain { collection, .. }

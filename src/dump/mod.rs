@@ -62,6 +62,10 @@ struct CollectionDump {
     name: String,
     documents: Vec<Document>,
     indexes: Vec<Document>,
+    /// Fields filled from `admin.counters` when an insert omits them.
+    autoincrement: Vec<String>,
+    /// Explicit `last` values. Empty means the inserted numbers decide it.
+    last: Vec<(String, i64)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -446,10 +450,29 @@ impl Client {
                 .into_iter()
                 .filter(|spec| spec.get_str("name") != Ok("_id_"))
                 .collect();
+            let namespace = format!("{database}.{name}");
+            let found_counters = self.command(doc! {
+                "find": "counters",
+                "filter": { "collection": &namespace },
+                "$db": "admin",
+            })?;
+            let mut autoincrement = Vec::new();
+            let mut last = Vec::new();
+            for row in cursor_batch(&found_counters)? {
+                let Ok(field) = row.get_str("field") else {
+                    continue;
+                };
+                autoincrement.push(field.to_string());
+                if let Some(value) = bson_i64(row.get("last")) {
+                    last.push((field.to_string(), value));
+                }
+            }
             dump.collections.push(CollectionDump {
                 name,
                 documents,
                 indexes,
+                autoincrement,
+                last,
             });
         }
         Ok(dump)
@@ -495,7 +518,19 @@ impl Client {
     ) -> Result<(), String> {
         progress.set_label(&collection.name);
         ensure_ok(&self.command(doc! { "drop": &collection.name, "$db": database })?)?;
-        ensure_ok(&self.command(doc! { "create": &collection.name, "$db": database })?)?;
+        let mut create = doc! { "create": &collection.name, "$db": database };
+        if !collection.autoincrement.is_empty() {
+            create.insert(
+                "autoincrement",
+                collection
+                    .autoincrement
+                    .iter()
+                    .cloned()
+                    .map(Bson::String)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        ensure_ok(&self.command(create)?)?;
         if !collection.indexes.is_empty() {
             let indexes = collection
                 .indexes
@@ -530,6 +565,17 @@ impl Client {
                 "$db": database,
             })?)?;
             progress.tick(count);
+        }
+        for (field, last) in &collection.last {
+            ensure_ok(&self.command(doc! {
+                "update": "counters",
+                "updates": [{
+                    "q": { "_id": format!("{database}.{}.{}", collection.name, field) },
+                    "u": { "$set": { "last": *last } },
+                    "multi": false,
+                }],
+                "$db": "admin",
+            })?)?;
         }
         Ok(())
     }
@@ -609,6 +655,15 @@ fn cursor_batch(reply: &Document) -> Result<Vec<Document>, String> {
         .collect()
 }
 
+pub(super) fn bson_i64(value: Option<&Bson>) -> Option<i64> {
+    match value? {
+        Bson::Int32(number) => Some(i64::from(*number)),
+        Bson::Int64(number) => Some(*number),
+        Bson::Double(number) if number.is_finite() && number.fract() == 0.0 => Some(*number as i64),
+        _ => None,
+    }
+}
+
 fn ensure_ok(reply: &Document) -> Result<(), String> {
     let ok = match reply.get("ok") {
         Some(Bson::Double(value)) => *value == 1.0,
@@ -630,10 +685,7 @@ fn io_message(err: &std::io::Error) -> String {
         || err.kind() == std::io::ErrorKind::TimedOut
         || err.raw_os_error() == Some(11)
     {
-        return format!(
-            "the server did not answer within {}s",
-            IO_TIMEOUT.as_secs()
-        );
+        return format!("the server did not answer within {}s", IO_TIMEOUT.as_secs());
     }
     err.to_string()
 }
@@ -963,11 +1015,15 @@ INSERT INTO `bonus` VALUES ('SMITH',800),('ALLEN',1600);
                     name: "emp".into(),
                     documents: vec![doc! { "ename": "SMITH" }],
                     indexes: Vec::new(),
+                    autoincrement: Vec::new(),
+                    last: Vec::new(),
                 },
                 CollectionDump {
                     name: "dept".into(),
                     documents: vec![doc! { "dname": "SALES" }],
                     indexes: Vec::new(),
+                    autoincrement: Vec::new(),
+                    last: Vec::new(),
                 },
             ],
             views: vec![ViewDump {
@@ -992,6 +1048,8 @@ INSERT INTO `bonus` VALUES ('SMITH',800),('ALLEN',1600);
                 name: "emp".into(),
                 documents: Vec::new(),
                 indexes: Vec::new(),
+                autoincrement: Vec::new(),
+                last: Vec::new(),
             }],
             views: Vec::new(),
         };
@@ -1026,6 +1084,85 @@ INSERT INTO `bonus` VALUES ('SMITH',800),('ALLEN',1600);
             progress_line(6, 6, "proposta_venda"),
             "[============================] 100%  6/6  proposta_venda"
         );
+    }
+
+    #[tokio::test]
+    async fn sql_setval_continues_on_the_next_insert() {
+        let running = server().await;
+        let port = running.addr.port();
+        let result = tokio::task::spawn_blocking(move || setval_round_trip(port))
+            .await
+            .expect("join");
+        result.expect("setval");
+    }
+
+    fn setval_round_trip(port: u16) -> Result<(), String> {
+        let target = target(port);
+        let dir = temp_dir();
+        let sql = dir.0.join("banco.sql");
+        std::fs::write(
+            &sql,
+            r#"
+-- PostgreSQL database dump
+CREATE TABLE public.banco (
+    id integer DEFAULT nextval('public.banco_id_seq'::regclass) NOT NULL,
+    codigo text
+);
+INSERT INTO public.banco VALUES (115, '001');
+ALTER TABLE ONLY public.banco
+    ADD CONSTRAINT banco_pkey PRIMARY KEY (id);
+SELECT pg_catalog.setval('public.banco_id_seq', 115, true);
+"#,
+        )
+        .map_err(|err| err.to_string())?;
+        restore(&target, &sql, &yes_restore())?;
+        let mut client = Client::connect(&target)?;
+        assert_eq!(counter_of(&mut client, "shop.banco.id")?, 115);
+        insert_codigo(&mut client, "002")?;
+        assert_eq!(counter_of(&mut client, "shop.banco.id")?, 116);
+        assert!(banco_ids(&mut client)?.contains(&116));
+        insert_codigo(&mut client, "003")?;
+        assert!(banco_ids(&mut client)?.contains(&117));
+
+        let path = dir.0.join("shop.kdmp");
+        backup(&target, &path)?;
+        restore(&target, &path, &yes_restore())?;
+        let mut client = Client::connect(&target)?;
+        assert_eq!(counter_of(&mut client, "shop.banco.id")?, 117);
+        insert_codigo(&mut client, "004")?;
+        assert!(banco_ids(&mut client)?.contains(&118));
+        Ok(())
+    }
+
+    fn counter_of(client: &mut Client, id: &str) -> Result<i64, String> {
+        let reply = client.command(doc! {
+            "find": "counters",
+            "filter": { "_id": id },
+            "$db": "admin",
+        })?;
+        let rows = cursor_batch(&reply)?;
+        let row = rows.first().ok_or_else(|| format!("no counter {id}"))?;
+        bson_i64(row.get("last")).ok_or_else(|| format!("counter {id} has no last"))
+    }
+
+    fn insert_codigo(client: &mut Client, codigo: &str) -> Result<(), String> {
+        ensure_ok(&client.command(doc! {
+            "insert": "banco",
+            "documents": [{ "codigo": codigo }],
+            "$db": "shop",
+        })?)
+    }
+
+    fn banco_ids(client: &mut Client) -> Result<Vec<i32>, String> {
+        let reply = client.command(doc! {
+            "find": "banco",
+            "filter": {},
+            "$db": "shop",
+        })?;
+        Ok(cursor_batch(&reply)?
+            .iter()
+            .filter_map(|document| document.get_i32("id").ok())
+            .collect())
     }
 
     fn sample_archive() -> Vec<u8> {

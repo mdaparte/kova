@@ -37,6 +37,9 @@ struct CollectionState {
     /// Top-level field name and BSON type. A later value of another
     /// type becomes `"mixed"`.
     fields: Vec<(String, String)>,
+    /// Autoincrement field and the last number handed out. The next
+    /// insert that omits the field stores `last + 1`.
+    counters: Vec<(String, i64)>,
 }
 
 struct UserRecord {
@@ -78,6 +81,7 @@ impl CollectionState {
             doc_count: 0,
             ids: HashSet::new(),
             fields: Vec::new(),
+            counters: Vec::new(),
         }
     }
 }
@@ -140,7 +144,7 @@ impl Heap {
         }
     }
 
-    /// Makes the seven `admin` collections exist in memory so
+    /// Makes the `admin` collections exist in memory so
     /// `listDatabases` can return `admin` before any user write.
     pub fn ensure_catalog(&mut self) {
         for name in crate::storage::catalog::NAMES {
@@ -371,6 +375,117 @@ impl Heap {
         if let Some(state) = self.collections.get_mut(collection) {
             state.indexes = indexes;
         }
+    }
+
+    /// Records an autoincrement field. A field that already has a counter
+    /// keeps its `last` value.
+    pub fn declare_counter(&mut self, collection: &str, field: &str) {
+        self.ensure_collection(collection);
+        let Some(state) = self.collections.get_mut(collection) else {
+            return;
+        };
+        if !state.counters.iter().any(|(name, _)| name == field) {
+            state.counters.push((field.to_string(), 0));
+        }
+        if !state.fields.iter().any(|(name, _)| name == field) {
+            state.fields.push((field.to_string(), "int".to_string()));
+        }
+    }
+
+    pub fn set_counter_last(&mut self, collection: &str, field: &str, last: i64) -> bool {
+        let Some(state) = self.collections.get_mut(collection) else {
+            return false;
+        };
+        let Some((_, slot)) = state.counters.iter_mut().find(|(name, _)| name == field) else {
+            return false;
+        };
+        *slot = last;
+        true
+    }
+
+    /// Writes the next number into fields the document left out.
+    ///
+    /// `already` holds documents staged ahead of this batch, so a second
+    /// insert in the same transaction does not draw the same number.
+    /// The stored `last` changes when the document is applied.
+    pub fn fill_autoincrement(
+        &self,
+        collection: &str,
+        documents: &mut [Document],
+        already: &[Document],
+    ) {
+        let Some(state) = self.collections.get(collection) else {
+            return;
+        };
+        if state.counters.is_empty() {
+            return;
+        }
+        let mut running: HashMap<String, i64> = state.counters.iter().cloned().collect();
+        for document in already {
+            raise_counters(&mut running, document);
+        }
+        for document in documents {
+            for (field, last) in &mut running {
+                match document.get(field).and_then(bson_i64) {
+                    Some(value) => {
+                        if value > *last {
+                            *last = value;
+                        }
+                    }
+                    None if document.get(field).is_none() => {
+                        let next = last.saturating_add(1);
+                        *last = next;
+                        document.insert(field.clone(), fit_int(next));
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    fn observe_counters(&mut self, collection: &str, document: &Document) {
+        let Some(state) = self.collections.get_mut(collection) else {
+            return;
+        };
+        for (field, last) in &mut state.counters {
+            if let Some(value) = document.get(field).and_then(bson_i64) {
+                if value > *last {
+                    *last = value;
+                }
+            }
+        }
+    }
+
+    /// Applies an update to `admin.counters` rows kept beside each collection.
+    pub fn update_counters(
+        &mut self,
+        filter: &Document,
+        update: &Document,
+        multi: bool,
+    ) -> Result<(u32, u32), String> {
+        let rows = self.counter_docs();
+        let mut matched = 0u32;
+        let mut modified = 0u32;
+        for mut row in rows {
+            if !document_matches(&row, filter) {
+                continue;
+            }
+            if !multi && matched > 0 {
+                break;
+            }
+            matched += 1;
+            let collection = row.get_str("collection").unwrap_or("").to_string();
+            let field = row.get_str("field").unwrap_or("").to_string();
+            let previous = row.get("last").and_then(bson_i64);
+            super::apply_update(&mut row, update)?;
+            let Some(last) = row.get("last").and_then(bson_i64) else {
+                return Err("admin.counters.last must be an integer".into());
+            };
+            if self.set_counter_last(&collection, &field, last) && previous != Some(last) {
+                modified += 1;
+            }
+        }
+        Ok((matched, modified))
     }
 
     pub fn can_create_user(
@@ -649,9 +764,16 @@ impl Heap {
         let roles = self.role_docs();
         let views = self.view_docs();
         self.rewrite(pool, disk, crate::storage::catalog::DATABASES, databases)?;
-        self.rewrite(pool, disk, crate::storage::catalog::COLLECTIONS, collections)?;
+        self.rewrite(
+            pool,
+            disk,
+            crate::storage::catalog::COLLECTIONS,
+            collections,
+        )?;
         self.rewrite(pool, disk, crate::storage::catalog::FIELDS, fields)?;
         self.rewrite(pool, disk, crate::storage::catalog::INDEXES, indexes)?;
+        let counters = self.counter_docs();
+        self.rewrite(pool, disk, crate::storage::catalog::COUNTERS, counters)?;
         self.rewrite(pool, disk, crate::storage::catalog::USERS, users)?;
         self.rewrite(pool, disk, crate::storage::catalog::ROLES, roles)?;
         self.rewrite(pool, disk, crate::storage::catalog::VIEWS, views)?;
@@ -752,7 +874,9 @@ impl Heap {
                 continue;
             };
             if let Some(state) = self.collections.get_mut(namespace) {
-                state.fields.push((field.to_string(), type_name.to_string()));
+                state
+                    .fields
+                    .push((field.to_string(), type_name.to_string()));
             }
         }
         let index_docs = self.read_catalog(pool, crate::storage::catalog::INDEXES)?;
@@ -782,6 +906,18 @@ impl Heap {
             .iter()
             .filter_map(|document| view_from_bson(&Bson::Document(document.clone())))
             .collect();
+        let counter_docs = self.read_catalog(pool, crate::storage::catalog::COUNTERS)?;
+        for document in &counter_docs {
+            let Ok(collection) = document.get_str("collection") else {
+                continue;
+            };
+            let Ok(field) = document.get_str("field") else {
+                continue;
+            };
+            let last = document.get("last").and_then(bson_i64).unwrap_or(0);
+            self.declare_counter(collection, field);
+            self.set_counter_last(collection, field, last);
+        }
         self.catalog_warm = true;
         Ok(true)
     }
@@ -908,6 +1044,7 @@ impl Heap {
             crate::storage::catalog::COLLECTIONS => self.collection_docs(),
             crate::storage::catalog::FIELDS => self.field_docs(),
             crate::storage::catalog::INDEXES => self.index_docs(),
+            crate::storage::catalog::COUNTERS => self.counter_docs(),
             crate::storage::catalog::USERS => self.user_docs(),
             crate::storage::catalog::ROLES => self.role_docs(),
             crate::storage::catalog::VIEWS => self.view_docs(),
@@ -1018,6 +1155,29 @@ impl Heap {
         documents
     }
 
+    fn counter_docs(&self) -> Vec<Document> {
+        let mut names: Vec<&String> = self
+            .collections
+            .keys()
+            .filter(|name| !crate::storage::catalog::is_catalog(name))
+            .collect();
+        names.sort();
+        let mut documents = Vec::new();
+        for namespace in names {
+            let mut counters = self.collections[namespace].counters.clone();
+            counters.sort();
+            for (field, last) in counters {
+                documents.push(doc! {
+                    "_id": format!("{namespace}.{field}"),
+                    "collection": namespace.clone(),
+                    "field": field,
+                    "last": last,
+                });
+            }
+        }
+        documents
+    }
+
     fn user_docs(&self) -> Vec<Document> {
         self.users
             .iter()
@@ -1072,6 +1232,7 @@ impl Heap {
         self.ensure_collection(collection);
         let mut stored = Vec::new();
         for document in documents {
+            self.observe_counters(collection, &document);
             let id = document_id_string(&document);
             if self.contains_id(collection, &id) {
                 continue;
@@ -1142,6 +1303,17 @@ impl Heap {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
+        if crate::storage::catalog::is_catalog(collection) {
+            let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+            return Ok(self
+                .catalog_documents(collection)
+                .into_iter()
+                .filter(|document| {
+                    wanted.contains(document_id_string(document).as_str())
+                        && document_matches(document, filter)
+                })
+                .collect());
+        }
         let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let mut matches = Vec::new();
         self.for_each_in(pool, collection, &mut |doc| {
@@ -1158,6 +1330,12 @@ impl Heap {
         collection: &str,
         id: &str,
     ) -> Result<Option<Document>, String> {
+        if crate::storage::catalog::is_catalog(collection) {
+            return Ok(self
+                .catalog_documents(collection)
+                .into_iter()
+                .find(|document| document_id_string(document) == id));
+        }
         if !self.contains_id(collection, id) {
             return Ok(None);
         }
@@ -1442,7 +1620,11 @@ impl Heap {
             .iter()
             .rev()
             .copied()
-            .find(|page_id| !self.collections[collection].overflow_heads.contains(page_id));
+            .find(|page_id| {
+                !self.collections[collection]
+                    .overflow_heads
+                    .contains(page_id)
+            });
         if let Some(page_id) = tail {
             let mut docs = self.read_docs(pool, page_id)?;
             docs.push(document.clone());
@@ -1943,6 +2125,32 @@ fn view_from_bson(value: &Bson) -> Option<ViewSpec> {
         pipeline,
         kova: doc.get_document("kova").ok().cloned().unwrap_or_default(),
     })
+}
+
+fn raise_counters(running: &mut HashMap<String, i64>, document: &Document) {
+    for (field, last) in running.iter_mut() {
+        if let Some(value) = document.get(field).and_then(bson_i64) {
+            if value > *last {
+                *last = value;
+            }
+        }
+    }
+}
+
+fn bson_i64(value: &Bson) -> Option<i64> {
+    match value {
+        Bson::Int32(number) => Some(i64::from(*number)),
+        Bson::Int64(number) => Some(*number),
+        Bson::Double(number) if number.is_finite() && number.fract() == 0.0 => Some(*number as i64),
+        _ => None,
+    }
+}
+
+fn fit_int(number: i64) -> Bson {
+    match i32::try_from(number) {
+        Ok(small) => Bson::Int32(small),
+        Err(_) => Bson::Int64(number),
+    }
 }
 
 fn string_list(doc: &Document, key: &str) -> Vec<String> {

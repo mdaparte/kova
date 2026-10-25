@@ -202,7 +202,10 @@ impl ShardRouter {
                 continue;
             }
             let mut forwarded = command.clone();
-            let documents = documents.into_iter().map(Bson::Document).collect::<Vec<_>>();
+            let documents = documents
+                .into_iter()
+                .map(Bson::Document)
+                .collect::<Vec<_>>();
             forwarded.insert("documents", documents);
             let reply = self.link.call(shard, forwarded).await;
             if !is_ok(&reply) {
@@ -216,10 +219,7 @@ impl ShardRouter {
     }
 
     async fn route_find(&self, command: &Document) -> Document {
-        let filter = command
-            .get_document("filter")
-            .cloned()
-            .unwrap_or_default();
+        let filter = command.get_document("filter").cloned().unwrap_or_default();
         if let Some(id) = sole_id(&filter) {
             return self
                 .link
@@ -250,6 +250,11 @@ impl ShardRouter {
     }
 
     async fn route_update(&self, command: &Document) -> Document {
+        if command.get_str("update").ok() == Some("counters")
+            && command.get_str("$db").unwrap_or("") == "admin"
+        {
+            return sum_n(&self.scatter(command.clone()).await, &["n", "nModified"]);
+        }
         let Some(entry) = first_entry(command, "updates") else {
             return fail("update requires an 'updates' array");
         };
@@ -312,7 +317,13 @@ impl ShardRouter {
         if command.contains_key("dbStats") {
             let mut reply = sum_n(
                 &replies,
-                &["collections", "objects", "dataSize", "storageSize", "indexes"],
+                &[
+                    "collections",
+                    "objects",
+                    "dataSize",
+                    "storageSize",
+                    "indexes",
+                ],
             );
             reply.insert("scaleFactor", 1i32);
             return reply;
@@ -392,11 +403,7 @@ fn aggregate_refusal(command: &Document) -> Option<String> {
 }
 
 fn first_entry<'a>(command: &'a Document, key: &str) -> Option<&'a Document> {
-    command
-        .get_array(key)
-        .ok()?
-        .first()?
-        .as_document()
+    command.get_array(key).ok()?.first()?.as_document()
 }
 
 fn sole_id(filter: &Document) -> Option<&Bson> {
@@ -554,10 +561,7 @@ fn first_ok(replies: &[Document]) -> Document {
 
 fn documents_of(reply: &Document) -> Result<Vec<Document>, String> {
     if !is_ok(reply) {
-        return Err(reply
-            .get_str("errmsg")
-            .unwrap_or("find failed")
-            .to_string());
+        return Err(reply.get_str("errmsg").unwrap_or("find failed").to_string());
     }
     let cursor = reply
         .get_document("cursor")

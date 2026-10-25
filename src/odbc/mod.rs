@@ -742,10 +742,7 @@ fn parse_civil(text: &str) -> Option<CivilTime> {
 }
 
 fn take_uint(text: &str) -> Option<(u32, &str)> {
-    let digits = text
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .count();
+    let digits = text.chars().take_while(|ch| ch.is_ascii_digit()).count();
     if digits == 0 {
         return None;
     }
@@ -1305,7 +1302,10 @@ fn columns_id(stmt_id: u64, table: Option<String>, column: Option<String>) -> i1
                 if !odbc_matches(column.as_deref(), &field) {
                     return None;
                 }
-                Some((field, catalog_odbc_type(document.get_str("type").unwrap_or("string"))))
+                Some((
+                    field,
+                    catalog_odbc_type(document.get_str("type").unwrap_or("string")),
+                ))
             })
             .collect();
         if fields.is_empty() {
@@ -2640,7 +2640,9 @@ fn column_attr(column: &Column, field: u16) -> ColumnAttr {
             ColumnAttr::Text(column.name.clone())
         }
         SQL_DESC_TYPE_NAME | SQL_DESC_LOCAL_TYPE_NAME => ColumnAttr::Text(type_name.to_string()),
-        SQL_DESC_TABLE_NAME | SQL_DESC_SCHEMA_NAME | SQL_DESC_CATALOG_NAME
+        SQL_DESC_TABLE_NAME
+        | SQL_DESC_SCHEMA_NAME
+        | SQL_DESC_CATALOG_NAME
         | SQL_DESC_BASE_TABLE_NAME => ColumnAttr::Text(String::new()),
         SQL_DESC_LITERAL_PREFIX | SQL_DESC_LITERAL_SUFFIX => {
             ColumnAttr::Text(if characters { "'" } else { "" }.to_string())
@@ -2659,11 +2661,13 @@ fn column_attr(column: &Column, field: u16) -> ColumnAttr {
         }
         SQL_DESC_SEARCHABLE => ColumnAttr::Number(SQL_PRED_SEARCHABLE),
         SQL_DESC_UPDATABLE => ColumnAttr::Number(0),
-        SQL_DESC_DATETIME_INTERVAL_CODE => ColumnAttr::Number(if column.kind == SQL_TYPE_TIMESTAMP {
-            SQL_CODE_TIMESTAMP
-        } else {
-            0
-        }),
+        SQL_DESC_DATETIME_INTERVAL_CODE => {
+            ColumnAttr::Number(if column.kind == SQL_TYPE_TIMESTAMP {
+                SQL_CODE_TIMESTAMP
+            } else {
+                0
+            })
+        }
         _ => ColumnAttr::Number(0),
     }
 }
@@ -3301,7 +3305,9 @@ mod tests {
             column_attr(&ename, SQL_DESC_CONCISE_TYPE),
             ColumnAttr::Number(SQL_VARCHAR_N) if SQL_VARCHAR_N == i64::from(SQL_VARCHAR)
         ));
-        assert!(matches!(column_attr(&ename, SQL_DESC_SCHEMA_NAME), ColumnAttr::Text(ref text) if text.is_empty()));
+        assert!(
+            matches!(column_attr(&ename, SQL_DESC_SCHEMA_NAME), ColumnAttr::Text(ref text) if text.is_empty())
+        );
         assert!(matches!(column_attr(&ename, 65000), ColumnAttr::Number(0)));
         let sal = Column {
             name: "sal".to_string(),

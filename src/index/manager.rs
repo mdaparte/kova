@@ -336,7 +336,9 @@ fn spec_from_bson(document: &Document) -> Result<Spec, String> {
                         .map(|values| {
                             values
                                 .iter()
-                                .filter_map(|value| value.as_document().and_then(component_from_bson))
+                                .filter_map(|value| {
+                                    value.as_document().and_then(component_from_bson)
+                                })
                                 .collect()
                         })
                         .unwrap_or_default();

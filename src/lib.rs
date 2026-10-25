@@ -14,8 +14,8 @@ mod protocol;
 mod query_engine;
 mod replication;
 mod search;
-mod shard;
 mod security;
+mod shard;
 mod storage;
 mod types;
 

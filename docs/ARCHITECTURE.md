@@ -170,7 +170,7 @@ Rust concurrency, memory management, and storage engine design.
 - **Durability on disk:** mutations go to the WAL before a page is dirtied.
   A checkpoint flushes dirty pages, records the LSN, and truncates that WAL.
 - **Startup:** read the `admin` catalog (databases, collections, fields,
-  indexes, users, views) and replay the WAL tail. The search index opens
+  indexes, counters, users, views) and replay the WAL tail. The search index opens
   from `text/`. Secondary indexes open from `indexes.bin`. A directory
   written before that catalog is scanned once.
 
@@ -322,6 +322,7 @@ about and ignored.
 | 22 | `kovadump`: backup, and restore from Kova, PostgreSQL, MongoDB, and MySQL dumps |
 | 23 | Sharding: consistent hash of `_id`, router forwards to shard processes |
 | 24 | Physical catalog: database `admin` holds databases, collections, fields, and indexes. Startup reads those rows |
+| 25 | Autoincrement: `admin.counters.last` is the last value handed out. `create` declares the field. A hand update of the row changes the next insert |
 
 ---
 

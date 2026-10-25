@@ -234,6 +234,19 @@ impl StorageEngine {
         self.heap.set_indexes(collection, indexes);
     }
 
+    pub fn declare_counter(&mut self, collection: &str, field: &str) {
+        self.heap.declare_counter(collection, field);
+    }
+
+    pub fn fill_autoincrement(
+        &self,
+        collection: &str,
+        documents: &mut [bson::Document],
+        already: &[bson::Document],
+    ) {
+        self.heap.fill_autoincrement(collection, documents, already);
+    }
+
     pub fn validator(&self, collection: &str) -> Option<bson::Document> {
         self.heap.validator(collection)
     }
@@ -505,11 +518,15 @@ mod tests {
         assert!(engine.names().iter().any(|name| name == "admin.fields"));
         let fields = engine.field_types("db.t");
         assert!(
-            fields.iter().any(|(name, kind)| name == "name" && kind == "string"),
+            fields
+                .iter()
+                .any(|(name, kind)| name == "name" && kind == "string"),
             "{fields:?}"
         );
         assert!(
-            fields.iter().any(|(name, kind)| name == "_id" && kind == "int"),
+            fields
+                .iter()
+                .any(|(name, kind)| name == "_id" && kind == "int"),
             "{fields:?}"
         );
         let found = engine
@@ -543,11 +560,15 @@ mod tests {
         assert_eq!(rebuilt, 1);
         let fields = engine.field_types("db.emp");
         assert!(
-            fields.iter().any(|(name, kind)| name == "ename" && kind == "string"),
+            fields
+                .iter()
+                .any(|(name, kind)| name == "ename" && kind == "string"),
             "{fields:?}"
         );
         assert!(
-            fields.iter().any(|(name, kind)| name == "sal" && kind == "int"),
+            fields
+                .iter()
+                .any(|(name, kind)| name == "sal" && kind == "int"),
             "{fields:?}"
         );
         engine.checkpoint_pages().unwrap();

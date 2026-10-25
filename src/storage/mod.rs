@@ -36,6 +36,8 @@ pub fn is_catalog(name: &str) -> bool {
     catalog::is_catalog(name)
 }
 
+pub use catalog::COUNTERS;
+
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -75,9 +77,7 @@ pub fn run_pipeline(input: Vec<Document>, pipeline: &[Document]) -> PartitionRes
     if let Err(message) = aggregate::validate_pipeline(pipeline) {
         return PartitionResult::Error { message };
     }
-    match aggregate::run(input, pipeline, &mut |_| {
-        Ok(aggregate::Foreign::Remote)
-    }) {
+    match aggregate::run(input, pipeline, &mut |_| Ok(aggregate::Foreign::Remote)) {
         Ok(aggregate::Output::Docs(documents)) => PartitionResult::Found { documents },
         Ok(aggregate::Output::Remote { namespace }) => PartitionResult::Error {
             message: format!("lookup of '{namespace}' is not available on a catalog collection"),
@@ -353,12 +353,17 @@ impl PartitionWorker {
         // written. Replay then sees the same id and does not store a
         // second copy. Two identical documents from the client stay
         // distinct because each call draws a new id.
-        if let PartitionCommand::Insert { documents, .. } = &mut command {
+        if let PartitionCommand::Insert {
+            collection,
+            documents,
+        } = &mut command
+        {
             for document in documents.iter_mut() {
                 if document.get("_id").is_none() {
                     document.insert("_id", bson::Bson::ObjectId(bson::oid::ObjectId::new()));
                 }
             }
+            self.engine.fill_autoincrement(collection, documents, &[]);
         }
         if let Err(message) = self.screen_schema(&command) {
             return PartitionResult::Error { message };
@@ -531,6 +536,29 @@ impl PartitionWorker {
                 filter,
                 update,
                 multi,
+            } if collection == COUNTERS => {
+                if let Err(message) = validate_filter(&filter) {
+                    return PartitionResult::Error { message };
+                }
+                if let Err(message) = validate_update(&update) {
+                    return PartitionResult::Error { message };
+                }
+                let (matched_count, modified_count) =
+                    match self.engine.heap.update_counters(&filter, &update, multi) {
+                        Ok(counts) => counts,
+                        Err(message) => return PartitionResult::Error { message },
+                    };
+                PartitionResult::Modified {
+                    matched_count,
+                    modified_count,
+                }
+            }
+
+            PartitionCommand::Update {
+                collection,
+                filter,
+                update,
+                multi,
             } => {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
@@ -621,7 +649,10 @@ impl PartitionWorker {
                 PartitionResult::DroppedDatabase { database }
             }
 
-            PartitionCommand::CreateCollection { collection } => {
+            PartitionCommand::CreateCollection {
+                collection,
+                autoincrement,
+            } => {
                 // MongoDB reports NamespaceExists for a duplicate
                 // create; erroring (instead of a silent no-op) keeps
                 // the operation idempotent for the data: an existing
@@ -630,6 +661,30 @@ impl PartitionWorker {
                     return PartitionResult::Error {
                         message: format!("collection already exists: {}", collection),
                     };
+                }
+                for field in &autoincrement {
+                    self.engine.declare_counter(&collection, field);
+                }
+                if !autoincrement.is_empty() {
+                    let mut declared = self.engine.index_specs(&collection).unwrap_or_default();
+                    for field in &autoincrement {
+                        if declared.iter().any(|spec| index_covers_field(spec, field)) {
+                            continue;
+                        }
+                        let mut key = doc! {};
+                        key.insert(field, 1i32);
+                        declared.push(doc! {
+                            "name": format!("{field}_1"),
+                            "key": key,
+                            "unique": true,
+                        });
+                    }
+                    self.engine.set_indexes(&collection, declared);
+                    if touch_index {
+                        if let Err(message) = self.install_indexes(&collection) {
+                            return PartitionResult::Error { message };
+                        }
+                    }
                 }
                 PartitionResult::Created
             }
@@ -1434,13 +1489,15 @@ impl PartitionWorker {
                         document.insert("_id", bson::Bson::ObjectId(bson::oid::ObjectId::new()));
                     }
                 }
-                if let Err(message) = self.validate_docs(&collection, &documents) {
-                    return PartitionResult::Error { message };
-                }
                 let mut view = match self.collection_view(txn_id, &collection) {
                     Ok(view) => view,
                     Err(message) => return PartitionResult::Error { message },
                 };
+                self.engine
+                    .fill_autoincrement(&collection, &mut documents, &view);
+                if let Err(message) = self.validate_docs(&collection, &documents) {
+                    return PartitionResult::Error { message };
+                }
                 let mut inserted = 0u32;
                 for document in documents {
                     let id = document_id_string(&document);
@@ -1836,6 +1893,7 @@ impl PartitionWorker {
                 }
                 Ok(images)
             }
+            PartitionCommand::Update { collection, .. } if collection == COUNTERS => Ok(Vec::new()),
             PartitionCommand::Update {
                 collection,
                 filter,
@@ -2573,6 +2631,12 @@ fn abort_storage(id: usize, err: String) -> ! {
 /// Every MongoDB collection carries this index; drivers expect to see
 /// it in `listCollections` (`idIndex`) and `listIndexes`, so both
 /// reply shapes are built from this one definition.
+fn index_covers_field(spec: &Document, field: &str) -> bool {
+    spec.get_document("key")
+        .map(|key| key.len() == 1 && key.get(field).is_some())
+        .unwrap_or(false)
+}
+
 fn default_id_index() -> Document {
     doc! {
         "v": 2i32,
@@ -3461,11 +3525,12 @@ fn refuse_catalog_write(command: &PartitionCommand) -> Result<(), String> {
         PartitionCommand::DropDatabase { database } if database == "admin" => {
             Err("cannot drop the admin database".into())
         }
+        PartitionCommand::Update { collection, .. } if collection == COUNTERS => Ok(()),
         PartitionCommand::Insert { collection, .. }
         | PartitionCommand::Update { collection, .. }
         | PartitionCommand::Delete { collection, .. }
         | PartitionCommand::Drop { collection }
-        | PartitionCommand::CreateCollection { collection }
+        | PartitionCommand::CreateCollection { collection, .. }
         | PartitionCommand::CreateIndexes { collection, .. }
         | PartitionCommand::DropIndexes { collection, .. }
         | PartitionCommand::CollMod { collection, .. }
@@ -3493,7 +3558,7 @@ fn collect_op_collections(op: &wal::WalOp, names: &mut Vec<String>) {
         | wal::WalOp::Update { collection, .. }
         | wal::WalOp::Delete { collection, .. }
         | wal::WalOp::Drop { collection }
-        | wal::WalOp::CreateCollection { collection }
+        | wal::WalOp::CreateCollection { collection, .. }
         | wal::WalOp::CreateIndexes { collection, .. }
         | wal::WalOp::DropIndexes { collection, .. }
         | wal::WalOp::CollMod { collection, .. } => names.push(collection.clone()),
@@ -3967,6 +4032,7 @@ mod tests {
         let rx = router
             .dispatch(PartitionCommand::CreateCollection {
                 collection: "shop.orders".into(),
+                autoincrement: Vec::new(),
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
@@ -4004,6 +4070,7 @@ mod tests {
         let rx = router
             .dispatch(PartitionCommand::CreateCollection {
                 collection: "shop.orders".into(),
+                autoincrement: Vec::new(),
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
@@ -4033,6 +4100,7 @@ mod tests {
         router
             .dispatch(PartitionCommand::CreateCollection {
                 collection: "shop.orders".into(),
+                autoincrement: Vec::new(),
             })
             .expect("worker reachable")
             .await
@@ -4189,6 +4257,7 @@ mod tests {
         router
             .dispatch(PartitionCommand::CreateCollection {
                 collection: "plain".into(),
+                autoincrement: Vec::new(),
             })
             .expect("worker reachable")
             .await
@@ -4267,6 +4336,7 @@ mod tests {
         router
             .dispatch(PartitionCommand::CreateCollection {
                 collection: "empty.logs".into(),
+                autoincrement: Vec::new(),
             })
             .expect("worker reachable")
             .await
@@ -4468,11 +4538,15 @@ mod tests {
             "{database_names:?}"
         );
         assert!(
-            !fields.iter().any(|document| document.get_str("database").ok() == Some("shop")),
+            !fields
+                .iter()
+                .any(|document| document.get_str("database").ok() == Some("shop")),
             "dropped fields still in admin.fields: {fields:?}"
         );
         assert!(
-            !views.iter().any(|document| document.get_str("_id").ok() == Some("shop.orders_view")),
+            !views
+                .iter()
+                .any(|document| document.get_str("_id").ok() == Some("shop.orders_view")),
             "dropped view still in admin.views: {views:?}"
         );
 
@@ -6289,6 +6363,7 @@ mod tests {
             &router,
             PartitionCommand::CreateCollection {
                 collection: "db.emp".into(),
+                autoincrement: Vec::new(),
             },
         )
         .await;
@@ -6656,12 +6731,15 @@ mod tests {
                     })
                     .collect();
                 fields.sort();
-                assert!(fields.iter().any(|field| field == "ename:string"), "{fields:?}");
+                assert!(
+                    fields.iter().any(|field| field == "ename:string"),
+                    "{fields:?}"
+                );
                 assert!(fields.iter().any(|field| field == "sal:int"), "{fields:?}");
                 assert!(
-                    documents.iter().any(|document| {
-                        document.get_str("_id").ok() == Some("db.emp.ename")
-                    }),
+                    documents
+                        .iter()
+                        .any(|document| { document.get_str("_id").ok() == Some("db.emp.ename") }),
                     "{documents:?}"
                 );
             }
@@ -6733,5 +6811,107 @@ mod tests {
             other => panic!("expected the index after restart, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_autoincrement_last_is_editable_and_survives_restart() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, true);
+        {
+            let router = PartitionRouter::with_storage(1, config.clone());
+            match dispatch(
+                &router,
+                PartitionCommand::CreateCollection {
+                    collection: "shop.orders".into(),
+                    autoincrement: vec!["id".into()],
+                },
+            )
+            .await
+            {
+                PartitionResult::Created => {}
+                other => panic!("expected Created, got {other:?}"),
+            }
+            assert_eq!(counter_last(&router).await, 0);
+
+            let first = inserted_id(&router, doc! { "sku": "a" }).await;
+            assert_eq!(first, 1);
+            assert_eq!(counter_last(&router).await, 1);
+            let second = inserted_id(&router, doc! { "sku": "b" }).await;
+            assert_eq!(second, 2);
+
+            match dispatch(
+                &router,
+                PartitionCommand::Update {
+                    collection: COUNTERS.into(),
+                    filter: doc! { "_id": "shop.orders.id" },
+                    update: doc! { "$set": { "last": 10i64 } },
+                    multi: false,
+                },
+            )
+            .await
+            {
+                PartitionResult::Modified {
+                    matched_count: 1,
+                    modified_count: 1,
+                } => {}
+                other => panic!("expected the counter row to change, got {other:?}"),
+            }
+            assert_eq!(inserted_id(&router, doc! { "sku": "c" }).await, 11);
+        }
+        let router = PartitionRouter::with_storage(1, config);
+        assert_eq!(counter_last(&router).await, 11);
+        assert_eq!(inserted_id(&router, doc! { "sku": "d" }).await, 12);
+        assert_eq!(
+            inserted_id(&router, doc! { "id": 50i32, "sku": "e" }).await,
+            50
+        );
+        assert_eq!(counter_last(&router).await, 50);
+        assert_eq!(inserted_id(&router, doc! { "sku": "f" }).await, 51);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn counter_last(router: &PartitionRouter) -> i64 {
+        match dispatch(
+            router,
+            PartitionCommand::find(
+                COUNTERS,
+                doc! { "collection": "shop.orders", "field": "id" },
+            ),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1, "{documents:?}");
+                match documents[0].get("last") {
+                    Some(bson::Bson::Int64(value)) => *value,
+                    Some(bson::Bson::Int32(value)) => i64::from(*value),
+                    other => panic!("last is {other:?}"),
+                }
+            }
+            other => panic!("expected the counter, got {other:?}"),
+        }
+    }
+
+    async fn inserted_id(router: &PartitionRouter, document: Document) -> i32 {
+        match dispatch(
+            router,
+            PartitionCommand::Insert {
+                collection: "shop.orders".into(),
+                documents: vec![document],
+            },
+        )
+        .await
+        {
+            PartitionResult::Inserted { inserted_count: 1 } => {}
+            other => panic!("expected one insert, got {other:?}"),
+        }
+        match dispatch(router, PartitionCommand::find("shop.orders", doc! {})).await {
+            PartitionResult::Found { documents } => documents
+                .iter()
+                .filter_map(|document| document.get_i32("id").ok())
+                .max()
+                .expect("an id"),
+            other => panic!("expected the orders, got {other:?}"),
+        }
     }
 }

@@ -204,6 +204,8 @@ fn apply_metadata(
             name: name.to_string(),
             documents,
             indexes: Vec::new(),
+            autoincrement: Vec::new(),
+            last: Vec::new(),
         });
         return Ok(());
     }
@@ -247,6 +249,8 @@ fn apply_metadata(
         name: name.to_string(),
         documents,
         indexes,
+        autoincrement: Vec::new(),
+        last: Vec::new(),
     });
     Ok(())
 }

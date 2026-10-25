@@ -8,6 +8,7 @@
 //! - `document` carries one stored document in `doc`.
 //! - `index` carries one `createIndexes` spec in `spec`. The `_id_` index
 //!   is not written; the server adds it.
+//! - `counter` carries `field` and `last` for one autoincrement field.
 //! - `view` carries `name`, `viewOn`, `pipeline`, and `kova`.
 
 use std::fs::File;
@@ -45,6 +46,13 @@ pub(super) fn write(path: &Path, dump: &Dump) -> Result<(), String> {
             }
             for spec in &collection.indexes {
                 write_doc(&mut file, &doc! { "kind": "index", "spec": spec.clone() })?;
+            }
+            for field in &collection.autoincrement {
+                let mut record = doc! { "kind": "counter", "field": field };
+                if let Some((_, last)) = collection.last.iter().find(|(name, _)| name == field) {
+                    record.insert("last", *last);
+                }
+                write_doc(&mut file, &record)?;
             }
         }
         for view in &dump.views {
@@ -100,6 +108,8 @@ pub(super) fn read_bytes(bytes: &[u8]) -> Result<Dump, String> {
                         name: name.clone(),
                         documents: Vec::new(),
                         indexes: Vec::new(),
+                        autoincrement: Vec::new(),
+                        last: Vec::new(),
                     });
                 }
                 current = Some(name);
@@ -124,6 +134,26 @@ pub(super) fn read_bytes(bytes: &[u8]) -> Result<Dump, String> {
                     .clone();
                 if spec.get_str("name") != Ok("_id_") {
                     collection_mut(&mut dump, &name).indexes.push(spec);
+                }
+            }
+            "counter" => {
+                let name = current
+                    .clone()
+                    .ok_or_else(|| "counter record before its collection".to_string())?;
+                let field = record
+                    .get_str("field")
+                    .map_err(|_| format!("counter record for {name} has no field"))?
+                    .to_string();
+                let collection = collection_mut(&mut dump, &name);
+                if !collection
+                    .autoincrement
+                    .iter()
+                    .any(|existing| existing == &field)
+                {
+                    collection.autoincrement.push(field.clone());
+                }
+                if let Some(last) = super::bson_i64(record.get("last")) {
+                    collection.last.push((field, last));
                 }
             }
             "view" => {
@@ -210,6 +240,8 @@ mod tests {
                 name: "emp".into(),
                 documents: vec![doc! { "ename": "SMITH", "sal": 800i32 }],
                 indexes: vec![doc! { "key": { "ename": 1i32 }, "name": "ename_1", "unique": true }],
+                autoincrement: vec!["id".into()],
+                last: vec![("id".into(), 14)],
             }],
             views: vec![ViewDump {
                 name: "well_paid".into(),
@@ -235,6 +267,8 @@ mod tests {
             loaded.collections[0].indexes[0].get_str("name"),
             Ok("ename_1")
         );
+        assert_eq!(loaded.collections[0].autoincrement, vec!["id".to_string()]);
+        assert_eq!(loaded.collections[0].last, vec![("id".to_string(), 14)]);
         assert_eq!(loaded.views[0].name, "well_paid");
         assert_eq!(loaded.views[0].view_on, "emp");
         assert_eq!(loaded.views[0].kova.get_bool("inverted"), Ok(true));

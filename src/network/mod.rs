@@ -1187,6 +1187,18 @@ async fn execute_command(
                 Err(message) => bson::doc! { "ok": 0.0, "errmsg": message },
             }
         }
+        Ok(partition_command)
+            if matches!(
+                &partition_command,
+                PartitionCommand::Update { collection, .. }
+                    if collection == crate::storage::COUNTERS
+            ) =>
+        {
+            match broadcast_counter_update(router, partition_command).await {
+                Ok(result) => protocol::reply_document(&result),
+                Err(message) => bson::doc! { "ok": 0.0, "errmsg": message },
+            }
+        }
         Ok(partition_command) => match router.dispatch(partition_command) {
             Some(rx) => match rx.await {
                 Ok(result) => cursor_ns(command, protocol::reply_document(&result)),
@@ -2381,7 +2393,8 @@ async fn load_collection_documents(
     // spread over every partition. A SQL read has to merge them, the
     // same way a find does.
     if !crate::storage::is_catalog(table_name) {
-        if let Ok(shards) = crate::shard::SQL_ROUTER.try_with(|router| std::sync::Arc::clone(router))
+        if let Ok(shards) =
+            crate::shard::SQL_ROUTER.try_with(|router| std::sync::Arc::clone(router))
         {
             return match shards.find_documents(table_name, filter).await {
                 Ok(documents) => Ok(Arc::new(documents)),
@@ -2650,6 +2663,7 @@ async fn write_out(
             router,
             PartitionCommand::CreateCollection {
                 collection: namespace.to_string(),
+                autoincrement: Vec::new(),
             },
         )
         .await?;
@@ -2860,7 +2874,8 @@ async fn broadcast_catalog(
             count: documents.len() as u64,
         });
     }
-    let documents = crate::storage::shape_cursor(documents, projection.as_ref(), sort.as_ref(), skip, limit)?;
+    let documents =
+        crate::storage::shape_cursor(documents, projection.as_ref(), sort.as_ref(), skip, limit)?;
     Ok(PartitionResult::Found { documents })
 }
 
@@ -2886,19 +2901,52 @@ async fn execute_catalog_aggregate(
         },
         _ => Vec::new(),
     };
-    let documents = match broadcast_catalog(router, PartitionCommand::find(&namespace, bson::doc! {})).await {
-        Ok(PartitionResult::Found { documents }) => documents,
-        Ok(other) => {
-            return protocol::reply_document(&PartitionResult::Error {
-                message: format!("catalog aggregate expected documents, got {other:?}"),
-            });
-        }
-        Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
-    };
+    let documents =
+        match broadcast_catalog(router, PartitionCommand::find(&namespace, bson::doc! {})).await {
+            Ok(PartitionResult::Found { documents }) => documents,
+            Ok(other) => {
+                return protocol::reply_document(&PartitionResult::Error {
+                    message: format!("catalog aggregate expected documents, got {other:?}"),
+                });
+            }
+            Err(message) => return bson::doc! { "ok": 0.0, "errmsg": message },
+        };
     let result = crate::storage::run_pipeline(documents, &pipeline);
-    cursor_batch(&namespace, match result {
-        PartitionResult::Found { documents } => documents,
-        other => return protocol::reply_document(&other),
+    cursor_batch(
+        &namespace,
+        match result {
+            PartitionResult::Found { documents } => documents,
+            other => return protocol::reply_document(&other),
+        },
+    )
+}
+
+/// Sends an `admin.counters` update to every partition and sums the counts.
+///
+/// The counter lives with the collection, so the partition that owns
+/// `admin.counters` by name is not the one that stores the row.
+async fn broadcast_counter_update(
+    router: &PartitionRouter,
+    command: PartitionCommand,
+) -> Result<PartitionResult, String> {
+    let mut matched = 0u32;
+    let mut modified = 0u32;
+    for rx in router.broadcast(command) {
+        match rx.await {
+            Ok(PartitionResult::Modified {
+                matched_count,
+                modified_count,
+            }) => {
+                matched += matched_count;
+                modified += modified_count;
+            }
+            Ok(PartitionResult::Error { message }) => return Err(message),
+            Ok(_) | Err(_) => return Err("partition worker returned no counter update".into()),
+        }
+    }
+    Ok(PartitionResult::Modified {
+        matched_count: matched,
+        modified_count: modified,
     })
 }
 
@@ -4137,7 +4185,9 @@ mod tests {
         .await;
         let columns = sql_batch(&described);
         assert!(
-            columns.iter().any(|row| row.get_str("column_name").ok() == Some("p")),
+            columns
+                .iter()
+                .any(|row| row.get_str("column_name").ok() == Some("p")),
             "{columns:?}"
         );
 
@@ -4152,7 +4202,10 @@ mod tests {
             .iter()
             .filter_map(|row| row.get_str("table_name").ok())
             .collect();
-        assert!(table_names.contains(&"c") && table_names.contains(&"d"), "{table_names:?}");
+        assert!(
+            table_names.contains(&"c") && table_names.contains(&"d"),
+            "{table_names:?}"
+        );
         assert!(!table_names.contains(&"item"), "{table_names:?}");
 
         let fields = execute_command(
@@ -4163,11 +4216,15 @@ mod tests {
         .await;
         let field_rows = sql_batch(&fields);
         assert!(
-            field_rows.iter().any(|row| row.get_str("collection").ok() == Some("c")),
+            field_rows
+                .iter()
+                .any(|row| row.get_str("collection").ok() == Some("c")),
             "{field_rows:?}"
         );
         assert!(
-            field_rows.iter().any(|row| row.get_str("collection").ok() == Some("d")),
+            field_rows
+                .iter()
+                .any(|row| row.get_str("collection").ok() == Some("d")),
             "{field_rows:?}"
         );
 
@@ -4290,6 +4347,7 @@ mod tests {
         router
             .dispatch(PartitionCommand::CreateCollection {
                 collection: "empty.logs".into(),
+                autoincrement: Vec::new(),
             })
             .expect("worker reachable")
             .await

@@ -11,7 +11,9 @@
 //! the referencing columns. `serial`, `bigserial`, `smallserial`,
 //! `AUTO_INCREMENT`, `GENERATED ... AS IDENTITY`, and `DEFAULT nextval`
 //! mark the column; if no unique index already covers it, one is added.
-//! The numbers already in the dump stay as they are. `SET`, `OWNER`,
+//! `SELECT pg_catalog.setval(seq, n, called)` records `last`: `n` when
+//! `called` is true, and one below `n` when it is false. The numbers
+//! already in the dump stay as they are. `SET`, `OWNER`,
 //! dollar-quoted function bodies, and psql commands such as `\restrict`
 //! are skipped.
 //!
@@ -47,6 +49,8 @@ struct Column {
     array: bool,
     /// `serial`, `AUTO_INCREMENT`, identity, or `nextval`.
     serial: bool,
+    /// Sequence name without the schema, when the dump named one.
+    sequence: Option<String>,
 }
 
 pub(super) fn detect(text: &str) -> Result<Dialect, String> {
@@ -74,6 +78,7 @@ pub(super) fn parse(text: &str, dialect: Dialect) -> Result<Dump, String> {
     let mut sql = Sql { text, index: 0 };
     let mut columns: BTreeMap<String, Vec<Column>> = BTreeMap::new();
     let mut dump = Dump::default();
+    let mut setvals: BTreeMap<String, i64> = BTreeMap::new();
     while !sql.eof() {
         sql.skip()?;
         if sql.eof() {
@@ -96,6 +101,10 @@ pub(super) fn parse(text: &str, dialect: Dialect) -> Result<Dump, String> {
             sql.parse_copy(&columns, &mut dump)?;
         } else if word.eq_ignore_ascii_case("alter") {
             sql.parse_alter(&mut columns, &mut dump)?;
+        } else if word.eq_ignore_ascii_case("select") {
+            if let Some((sequence, last)) = sql.take_setval()? {
+                setvals.insert(sequence, last);
+            }
         } else {
             sql.skip_statement()?;
         }
@@ -109,6 +118,31 @@ pub(super) fn parse(text: &str, dialect: Dialect) -> Result<Dump, String> {
             continue;
         };
         for column in declared.iter().filter(|column| column.serial) {
+            if !collection
+                .autoincrement
+                .iter()
+                .any(|field| field == &column.name)
+            {
+                collection.autoincrement.push(column.name.clone());
+            }
+            let guessed = format!("{table}_{}_seq", column.name);
+            let sequence = column
+                .sequence
+                .clone()
+                .or_else(|| setvals.contains_key(&guessed).then(|| guessed));
+            if let Some(sequence) = sequence.as_ref() {
+                if let Some(last) = setvals.get(sequence) {
+                    if let Some(slot) = collection
+                        .last
+                        .iter_mut()
+                        .find(|(field, _)| field == &column.name)
+                    {
+                        slot.1 = *last;
+                    } else {
+                        collection.last.push((column.name.clone(), *last));
+                    }
+                }
+            }
             push_index(
                 &mut collection.indexes,
                 String::new(),
@@ -226,7 +260,8 @@ impl Sql<'_> {
     ) -> Result<(), String> {
         let kind = self.read_word()?;
         if kind.eq_ignore_ascii_case("sequence") {
-            let _name = self.read_path()?;
+            let sequence = self.read_path()?;
+            let sequence = sequence.last().cloned().map(|name| sequence_key(&name));
             self.skip()?;
             if self.peek_word("owned") {
                 self.read_word()?;
@@ -238,7 +273,7 @@ impl Sql<'_> {
                 if path.len() >= 2 {
                     let column = path[path.len() - 1].clone();
                     let table = path[path.len() - 2].clone();
-                    mark_serial(columns, &table, &column);
+                    mark_serial(columns, &table, &column, sequence);
                 }
             }
             self.skip_statement()?;
@@ -277,7 +312,7 @@ impl Sql<'_> {
             if is_word_start(self.peek()) || self.peek() == '"' || self.peek() == '`' {
                 let column = self.read_ident()?;
                 if self.statement_has_nextval() {
-                    mark_serial(columns, &table, &column);
+                    mark_serial(columns, &table, &column, self.statement_nextval_name());
                 }
             }
         }
@@ -527,6 +562,8 @@ impl Sql<'_> {
                 name: name.to_string(),
                 documents: Vec::new(),
                 indexes: Vec::new(),
+                autoincrement: Vec::new(),
+                last: Vec::new(),
             });
             dump.collections.last_mut().expect("just pushed")
         };
@@ -563,13 +600,14 @@ impl Sql<'_> {
             }
             let type_text = self.read_type_text()?;
             let array = self.take_array_markers()?;
-            let (serial, term) = self.read_column_tail(&name, &mut indexes)?;
+            let (serial, sequence, term) = self.read_column_tail(&name, &mut indexes)?;
             let serial = serial || is_serial_type(&type_text);
             columns.push(Column {
                 name,
                 kind: type_kind(&type_text),
                 array,
                 serial,
+                sequence,
             });
             match term {
                 ',' => {
@@ -594,8 +632,9 @@ impl Sql<'_> {
         &mut self,
         column: &str,
         indexes: &mut Vec<Document>,
-    ) -> Result<(bool, char), String> {
+    ) -> Result<(bool, Option<String>, char), String> {
         let mut serial = false;
+        let mut sequence = None;
         let mut primary = false;
         let mut unique = false;
         let mut references = false;
@@ -636,7 +675,11 @@ impl Sql<'_> {
                     "primary" => primary = true,
                     "unique" => unique = true,
                     "references" => references = true,
-                    "auto_increment" | "nextval" | "identity" | "generated" => serial = true,
+                    "auto_increment" | "identity" | "generated" => serial = true,
+                    "nextval" => {
+                        serial = true;
+                        sequence = self.read_nextval_argument();
+                    }
                     _ => {}
                 }
                 continue;
@@ -658,7 +701,61 @@ impl Sql<'_> {
                 false,
             );
         }
-        Ok((serial, term))
+        Ok((serial, sequence, term))
+    }
+
+    /// `SELECT pg_catalog.setval('seq', n, called)` after the word `SELECT`.
+    /// Any other `SELECT` is skipped.
+    fn take_setval(&mut self) -> Result<Option<(String, i64)>, String> {
+        self.skip()?;
+        if self.eof() || !is_word_start(self.peek()) {
+            self.skip_statement()?;
+            return Ok(None);
+        }
+        let mut name = self.read_word()?;
+        if self.eat('.') {
+            name = self.read_word()?;
+        }
+        if !name.eq_ignore_ascii_case("setval") {
+            self.skip_statement()?;
+            return Ok(None);
+        }
+        self.skip()?;
+        if !self.eat('(') {
+            self.skip_statement()?;
+            return Ok(None);
+        }
+        self.skip()?;
+        let sequence = sequence_key(&self.read_quoted_string(false)?);
+        self.skip()?;
+        if !self.eat(',') {
+            self.skip_statement()?;
+            return Ok(None);
+        }
+        self.skip()?;
+        let number = match self.read_number()? {
+            Bson::Int32(value) => i64::from(value),
+            Bson::Int64(value) => value,
+            Bson::Double(value) if value.is_finite() && value.fract() == 0.0 => value as i64,
+            _ => {
+                self.skip_statement()?;
+                return Ok(None);
+            }
+        };
+        self.skip()?;
+        let mut called = true;
+        if self.eat(',') {
+            self.skip()?;
+            let flag = self.read_word()?;
+            called = !flag.eq_ignore_ascii_case("false");
+        }
+        self.skip_statement()?;
+        let last = if called {
+            number
+        } else {
+            number.saturating_sub(1)
+        };
+        Ok(Some((sequence, last)))
     }
 
     fn read_key_columns(&mut self) -> Result<Vec<String>, String> {
@@ -757,6 +854,70 @@ impl Sql<'_> {
             window.push(ch.to_ascii_lowercase());
         }
         window.contains("nextval")
+    }
+
+    /// The sequence named by `nextval('...')` before this statement ends.
+    fn statement_nextval_name(&self) -> Option<String> {
+        let mut index = self.index;
+        let bytes = self.text.as_bytes();
+        while index < bytes.len() && bytes[index] != b';' {
+            if bytes[index] == b'\'' {
+                let start = index + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end] != b'\'' {
+                    end += 1;
+                }
+                let window = &self.text[self.index..index];
+                if window.to_ascii_lowercase().contains("nextval") {
+                    return Some(sequence_key(&self.text[start..end]));
+                }
+                index = end + 1;
+                continue;
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// The quoted argument of `nextval`, when it is still ahead.
+    /// The parser position stays put so the following parentheses keep
+    /// their depth.
+    fn read_nextval_argument(&mut self) -> Option<String> {
+        let saved = self.index;
+        let mut index = self.index;
+        let text = self.text;
+        while index < text.len()
+            && text[index..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_whitespace())
+        {
+            index += text[index..].chars().next().unwrap().len_utf8();
+        }
+        if !text[index..].starts_with('(') {
+            return None;
+        }
+        index += 1;
+        while index < text.len()
+            && text[index..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_whitespace())
+        {
+            index += text[index..].chars().next().unwrap().len_utf8();
+        }
+        if !text[index..].starts_with('\'') {
+            self.index = saved;
+            return None;
+        }
+        index += 1;
+        let start = index;
+        while index < text.len() && !text[index..].starts_with('\'') {
+            index += text[index..].chars().next().unwrap().len_utf8();
+        }
+        let name = sequence_key(&text[start..index]);
+        self.index = saved;
+        Some(name)
     }
 
     fn read_type_text(&mut self) -> Result<String, String> {
@@ -1349,14 +1510,24 @@ fn collection_indexes<'a>(dump: &'a mut Dump, name: &str) -> Result<&'a mut Vec<
         name: name.to_string(),
         documents: Vec::new(),
         indexes: Vec::new(),
+        autoincrement: Vec::new(),
+        last: Vec::new(),
     });
     Ok(&mut dump.collections.last_mut().expect("just pushed").indexes)
 }
 
-fn mark_serial(columns: &mut BTreeMap<String, Vec<Column>>, table: &str, field: &str) {
+fn mark_serial(
+    columns: &mut BTreeMap<String, Vec<Column>>,
+    table: &str,
+    field: &str,
+    sequence: Option<String>,
+) {
     let declared = columns.entry(table.to_string()).or_default();
     if let Some(column) = declared.iter_mut().find(|column| column.name == field) {
         column.serial = true;
+        if sequence.is_some() {
+            column.sequence = sequence;
+        }
         return;
     }
     declared.push(Column {
@@ -1364,7 +1535,12 @@ fn mark_serial(columns: &mut BTreeMap<String, Vec<Column>>, table: &str, field: 
         kind: TypeKind::Int,
         array: false,
         serial: true,
+        sequence,
     });
+}
+
+fn sequence_key(name: &str) -> String {
+    name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase()
 }
 
 fn matches_modifier(word: &str) -> bool {
@@ -2116,6 +2292,8 @@ SELECT pg_catalog.setval('public.banco_id_seq', 115, true);
             .find(|collection| collection.name == "banco")
             .unwrap();
         assert_eq!(banco.documents[0].get_i32("id"), Ok(115));
+        assert_eq!(banco.autoincrement, vec!["id".to_string()]);
+        assert_eq!(banco.last, vec![("id".to_string(), 115)]);
         assert_eq!(banco.indexes.len(), 1);
         assert_eq!(banco.indexes[0].get_str("name"), Ok("banco_pkey"));
         assert_eq!(banco.indexes[0].get_bool("unique"), Ok(true));
@@ -2151,5 +2329,17 @@ SELECT pg_catalog.setval('public.banco_id_seq', 115, true);
         assert_eq!(pessoa.indexes.len(), 1);
         assert_eq!(pessoa.indexes[0].get_str("name"), Ok("cpf_lookup"));
         assert_eq!(pessoa.indexes[0].get_bool("unique"), Ok(true));
+
+        let false_call = parse(
+            "CREATE TABLE public.banco (id serial);\nSELECT setval('banco_id_seq', 10, false);",
+            Dialect::Postgres,
+        )
+        .expect("parse");
+        let called_false = false_call
+            .collections
+            .iter()
+            .find(|collection| collection.name == "banco")
+            .unwrap();
+        assert_eq!(called_false.last, vec![("id".to_string(), 9)]);
     }
 }

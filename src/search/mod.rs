@@ -21,6 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tantivy::collector::TopDocs;
+use tantivy::directory::MmapDirectory;
 use tantivy::query::{
     BooleanQuery, FuzzyTermQuery, Occur, Query, QueryParser, RegexQuery, TermQuery,
 };
@@ -30,7 +31,6 @@ use tantivy::schema::{
 use tantivy::tokenizer::{
     Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
 };
-use tantivy::directory::MmapDirectory;
 use tantivy::{doc, Index, IndexReader, IndexSettings, IndexWriter, TantivyDocument, Term};
 
 mod disk;
@@ -115,11 +115,7 @@ impl SearchIndex {
         let mut fields = HashMap::new();
         for entry in fs::read_dir(root).map_err(|err| format!("search dir: {err}"))? {
             let entry = entry.map_err(|err| format!("search dir: {err}"))?;
-            if !entry
-                .file_type()
-                .map(|kind| kind.is_dir())
-                .unwrap_or(false)
-            {
+            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                 continue;
             }
             let name_path = entry.path().join("name.txt");
@@ -130,10 +126,7 @@ impl SearchIndex {
             if name.is_empty() {
                 continue;
             }
-            fields.insert(
-                name,
-                TextIndex::open(&entry.path(), &analyzer, &stopwords)?,
-            );
+            fields.insert(name, TextIndex::open(&entry.path(), &analyzer, &stopwords)?);
         }
         Ok(Self {
             fields,

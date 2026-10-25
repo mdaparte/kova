@@ -81,6 +81,8 @@ pub enum WalOp {
     CreateCollection {
         /// `db.collection` namespace.
         collection: String,
+        /// Autoincrement fields declared with the collection.
+        autoincrement: Vec<String>,
     },
     /// Record index declarations.
     CreateIndexes {
@@ -182,8 +184,12 @@ impl WalOp {
             PartitionCommand::DropDatabase { database } => Some(Self::DropDatabase {
                 database: database.clone(),
             }),
-            PartitionCommand::CreateCollection { collection } => Some(Self::CreateCollection {
+            PartitionCommand::CreateCollection {
+                collection,
+                autoincrement,
+            } => Some(Self::CreateCollection {
                 collection: collection.clone(),
+                autoincrement: autoincrement.clone(),
             }),
             PartitionCommand::CreateIndexes {
                 collection,
@@ -323,9 +329,13 @@ impl WalOp {
             },
             Self::Drop { collection } => PartitionCommand::Drop { collection },
             Self::DropDatabase { database } => PartitionCommand::DropDatabase { database },
-            Self::CreateCollection { collection } => {
-                PartitionCommand::CreateCollection { collection }
-            }
+            Self::CreateCollection {
+                collection,
+                autoincrement,
+            } => PartitionCommand::CreateCollection {
+                collection,
+                autoincrement,
+            },
             Self::CreateIndexes {
                 collection,
                 indexes,
@@ -406,8 +416,24 @@ impl WalOp {
                 body.insert("filter", filter.clone());
                 body.insert("limit", i64::from(*limit));
             }
-            Self::Drop { collection } | Self::CreateCollection { collection } => {
+            Self::Drop { collection } => {
                 body.insert("ns", collection.clone());
+            }
+            Self::CreateCollection {
+                collection,
+                autoincrement,
+            } => {
+                body.insert("ns", collection.clone());
+                if !autoincrement.is_empty() {
+                    body.insert(
+                        "autoincrement",
+                        autoincrement
+                            .iter()
+                            .cloned()
+                            .map(Bson::String)
+                            .collect::<Vec<_>>(),
+                    );
+                }
             }
             Self::DropDatabase { database } => {
                 body.insert("db", database.clone());
@@ -481,6 +507,16 @@ impl WalOp {
             }),
             "create" => Ok(Self::CreateCollection {
                 collection: required_str(body, "ns")?,
+                autoincrement: body
+                    .get_array("autoincrement")
+                    .ok()
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|value| value.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }),
             "createIndexes" => Ok(Self::CreateIndexes {
                 collection: required_str(body, "ns")?,
