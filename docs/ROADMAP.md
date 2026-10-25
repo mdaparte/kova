@@ -36,7 +36,7 @@ replication, and multi-model indexing.
 | 20 | ODBC connector | ✅ Complete |
 | 21 | ODBC catalog for GUI clients | ✅ Complete |
 | 22 | `kovadump` backup and restore | ✅ Complete |
-| 23 | Sharding | ⚪ Planned |
+| 23 | Sharding | ✅ Complete |
 | 24 | Physical catalog (`admin`) | ✅ Complete |
 | 25 | Autoincrement | ⚪ Planned |
 
@@ -798,15 +798,17 @@ PostgreSQL custom archives and MySQL binary logs stay out.
 - [x] Restore a `pg_dump` plain-SQL file, a `mysqldump` SQL file, and a `mongodump` directory or archive.
 - [x] Test: each of the four inputs restores, and a `find` returns the loaded documents.
 
-## Phase 23 — Sharding ⚪ Planned
+## Phase 23 — Sharding ✅
 
-A replica set is still a full copy of every document on each voter. This phase splits documents across shards. The routing scheme (consistent hashing or a key range) and the shard router are chosen when the phase starts. A shard can itself be a replica set.
+A replica set is still a full copy of every document on each voter. Sharding splits one collection across Kova processes. The router hashes `_id` onto a ring of 128 virtual nodes per shard and forwards the command to the process that owns that arc. The router is a Kova process with `[sharding] role = "router"`. It does not store the documents. A shard is the Kova process at `shards[].client`. That process can also enable `[replication]`: the router speaks OP_MSG to the listed client address and does not join the replica set.
+
+An insert with no `_id` receives one on the router, then goes to one shard. A find, count, update, or delete whose filter is one `_id` goes to that shard. The same commands without a single `_id` visit every shard, and the router merges the batches or sums `n`. A single-document update or delete that is not one `_id` stops at the first shard that changes a row. `create`, `drop`, `createIndexes`, and `dropDatabase` visit every shard, so the collection and its indexes exist wherever a document lands. `listCollections` and `listDatabases` merge the names. SQL on the router loads each named collection from every shard and runs DataFusion there. An aggregate stage other than match, project, or unwind is refused on the router, because a `$group` inside each shard is not the group of the whole collection. `mapReduce` visits every shard and the batches are concatenated. A transaction is refused on the router. With `[sharding]` absent the process is unchanged.
 
 ### Phase 23 — Sub-tasks
 
-- [ ] Choose the routing scheme and the place the router runs.
-- [ ] Send a command to the shard that owns the document.
-- [ ] Test: two shards hold different documents of one collection, and a `find` on the router returns both.
+- [x] Consistent hashing of `_id`. The router is the process with `role = "router"`.
+- [x] A command for one document is sent to the shard that owns it.
+- [x] Test: two shards hold different documents of one collection, and a `find` on the router returns both.
 
 ## Phase 24 — Physical catalog (`admin`) ✅ Complete
 
@@ -868,7 +870,6 @@ This phase stores the next value. Restore takes it from `setval`: when the third
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| Sharding is not implemented | 23 | Routing scheme is chosen when the phase starts. |
 | An insert does not continue a `serial` / `AUTO_INCREMENT` column | 25 | Restore keeps the imported numbers and the unique index. The next value is not allocated. |
 
 ## Architecture Diagram (updated)
@@ -927,5 +928,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–22 and 24 are complete. Still open: sharding (Phase 23) and
-autoincrement (Phase 25).*
+*Phases 1–24 are complete. Still open: autoincrement (Phase 25).*

@@ -199,8 +199,8 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 22 — `kovadump`:** backup and restore over the MongoDB port.
   Restore reads a Kova dump, `pg_dump` plain SQL, `mongodump`, or
   `mysqldump` SQL, and writes through `insert`. ✅ Complete.
-- **Phase 23 — Sharding:** documents split across shards. The routing
-  scheme is chosen when the phase starts. ⚪ Planned.
+- **Phase 23 — Sharding:** the router hashes `_id` and forwards the
+  command. A shard is a Kova process and can also be a replica set. ✅ Complete.
 - **Phase 24 — Physical catalog (`admin`):** database `admin` holds
   databases, collections, fields, and indexes. Startup reads those rows
   instead of scanning every document. ✅ Complete.

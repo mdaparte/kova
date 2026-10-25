@@ -290,6 +290,7 @@ async fn run_listener(
     listener: TcpListener,
     router: PartitionRouter,
     replica: Option<Arc<crate::replication::Replica>>,
+    shards: Option<Arc<crate::shard::ShardRouter>>,
     table: Arc<ConnTable>,
 ) -> std::io::Result<()> {
     let mut stop = table.subscribe_stop();
@@ -310,12 +311,14 @@ async fn run_listener(
                 LOGGER.info(format!("Connection received from {}", addr));
                 let client_router = router.clone();
                 let client_replica = replica.clone();
+                let client_shards = shards.clone();
                 let table = Arc::clone(&table);
                 spawn(async move {
                     if let Err(err) = serve_client(
                         &mut socket,
                         &client_router,
                         client_replica.as_deref(),
+                        client_shards.as_deref(),
                         &table,
                     )
                     .await
@@ -358,12 +361,13 @@ pub(crate) async fn serve_bound(
     router: PartitionRouter,
 ) -> std::io::Result<()> {
     let table = ConnTable::limited(128, 0);
-    run_listener(listener, router, None, table).await
+    run_listener(listener, router, None, None, table).await
 }
 
 pub async fn start_server(
     router: PartitionRouter,
     replica: Option<Arc<crate::replication::Replica>>,
+    shards: Option<Arc<crate::shard::ShardRouter>>,
 ) -> std::io::Result<()> {
     let port = resolve_port();
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
@@ -381,7 +385,7 @@ pub async fn start_server(
             shutdown.shutdown();
         }
     });
-    run_listener(listener, router, replica, table).await
+    run_listener(listener, router, replica, shards, table).await
 }
 
 /// Reads OP_MSG frames from one client until it disconnects.
@@ -395,13 +399,14 @@ pub(crate) async fn handle_client(
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
 ) -> std::io::Result<()> {
-    serve_client(socket, router, replica, connections().as_ref()).await
+    serve_client(socket, router, replica, None, connections().as_ref()).await
 }
 
 async fn serve_client(
     socket: &mut TcpStream,
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
+    shards: Option<&crate::shard::ShardRouter>,
     table: &ConnTable,
 ) -> std::io::Result<()> {
     let peer = socket
@@ -416,6 +421,7 @@ async fn serve_client(
         socket,
         router,
         replica,
+        shards,
         table,
         conn_id,
         &mut close,
@@ -430,6 +436,7 @@ async fn handle_frames(
     socket: &mut TcpStream,
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
+    shards: Option<&crate::shard::ShardRouter>,
     table: &ConnTable,
     conn_id: u64,
     close: &mut watch::Receiver<bool>,
@@ -508,7 +515,7 @@ async fn handle_frames(
                 ));
 
                 if let Err(err) = process_op_msg(
-                    &header, &body_buf, router, replica, table, socket, conn_id, session,
+                    &header, &body_buf, router, replica, shards, table, socket, conn_id, session,
                 )
                 .await
                 {
@@ -536,7 +543,7 @@ async fn handle_frames(
                 ));
 
                 if let Err(err) = process_op_query(
-                    &header, &body_buf, router, replica, table, socket, conn_id, session,
+                    &header, &body_buf, router, replica, shards, table, socket, conn_id, session,
                 )
                 .await
                 {
@@ -558,6 +565,7 @@ async fn process_op_msg(
     body: &[u8],
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
+    shards: Option<&crate::shard::ShardRouter>,
     table: &ConnTable,
     socket: &mut TcpStream,
     conn_id: u64,
@@ -572,6 +580,7 @@ async fn process_op_msg(
         router,
         local_addr,
         replica,
+        shards,
         table,
         conn_id,
         session,
@@ -605,6 +614,7 @@ async fn process_op_query(
     body: &[u8],
     router: &PartitionRouter,
     replica: Option<&crate::replication::Replica>,
+    shards: Option<&crate::shard::ShardRouter>,
     table: &ConnTable,
     socket: &mut TcpStream,
     conn_id: u64,
@@ -619,6 +629,7 @@ async fn process_op_query(
         router,
         local_addr,
         replica,
+        shards,
         table,
         conn_id,
         session,
@@ -738,6 +749,7 @@ async fn execute_replicated(
     router: &PartitionRouter,
     local_addr: std::net::SocketAddr,
     replica: Option<&crate::replication::Replica>,
+    shards: Option<&crate::shard::ShardRouter>,
     table: &ConnTable,
     conn_id: u64,
     session: &mut Option<Session>,
@@ -749,7 +761,7 @@ async fn execute_replicated(
     if let Err(message) = authorize(&mut command, session) {
         return bson::doc! { "ok": 0.0, "errmsg": message };
     }
-    let mut reply = dispatch_command(&command, router, local_addr, replica).await;
+    let mut reply = dispatch_command(&command, router, local_addr, replica, shards).await;
     bind_session(&command, &mut reply, table, conn_id, session);
     reply
 }
@@ -835,7 +847,22 @@ async fn dispatch_command(
     router: &PartitionRouter,
     local_addr: std::net::SocketAddr,
     replica: Option<&crate::replication::Replica>,
+    shards: Option<&crate::shard::ShardRouter>,
 ) -> bson::Document {
+    if let Some(shards) = shards {
+        if command.contains_key("sql") {
+            return crate::shard::SQL_ROUTER
+                .scope(
+                    std::sync::Arc::new(shards.clone()),
+                    execute_command(command, router, local_addr),
+                )
+                .await;
+        }
+        if stays_on_router(command) {
+            return execute_command(command, router, local_addr).await;
+        }
+        return shards.route(command).await;
+    }
     let Some(replica) = replica else {
         return execute_command(command, router, local_addr).await;
     };
@@ -941,6 +968,14 @@ pub async fn propose_commit(
         entry.insert("$db", db);
     }
     replica.propose(entry).await
+}
+
+/// Handshake and authentication stay on the process the client opened.
+/// A data command is forwarded.
+fn stays_on_router(command: &bson::Document) -> bool {
+    protocol::special_command(command).is_some()
+        || command.contains_key("whatsmyuri")
+        || command.contains_key("authenticate")
 }
 
 fn split_namespace(namespace: &str) -> (String, String) {
@@ -2345,6 +2380,15 @@ async fn load_collection_documents(
     // `admin.fields` and the other catalog collections are one row set
     // spread over every partition. A SQL read has to merge them, the
     // same way a find does.
+    if !crate::storage::is_catalog(table_name) {
+        if let Ok(shards) = crate::shard::SQL_ROUTER.try_with(|router| std::sync::Arc::clone(router))
+        {
+            return match shards.find_documents(table_name, filter).await {
+                Ok(documents) => Ok(Arc::new(documents)),
+                Err(message) => Err(message),
+            };
+        }
+    }
     if crate::storage::is_catalog(table_name) {
         return match broadcast_catalog(router, find_cmd).await {
             Ok(PartitionResult::Found { documents }) => Ok(Arc::new(documents)),
@@ -4446,7 +4490,7 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         let server_table = Arc::clone(&table);
         tokio::spawn(async move {
-            let _ = run_listener(listener, router, None, server_table).await;
+            let _ = run_listener(listener, router, None, None, server_table).await;
         });
 
         let mut held = TcpStream::connect(addr).await.expect("held connect");
@@ -4711,7 +4755,7 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
-            let _ = run_listener(listener, router, None, table).await;
+            let _ = run_listener(listener, router, None, None, table).await;
         });
         addr
     }

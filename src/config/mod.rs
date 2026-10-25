@@ -105,6 +105,8 @@ pub struct Config {
     pub storage: StorageConfig,
     /// Replica set. Absent or `enabled = false` keeps a single writable node.
     pub replication: ReplicationConfig,
+    /// Shard router. Absent or `enabled = false` keeps every document here.
+    pub sharding: ShardingConfig,
     /// Users, roles, and the optional encryption key (Phase 13).
     pub security: SecurityConfig,
 }
@@ -135,6 +137,7 @@ impl Default for Config {
             search: SearchConfig::default(),
             storage: StorageConfig::default(),
             replication: ReplicationConfig::default(),
+            sharding: ShardingConfig::default(),
             security: SecurityConfig::default(),
         }
     }
@@ -260,6 +263,91 @@ impl ReplicationConfig {
                 "{CONFIG_FILE}: replication member {} client {} must use the listener port {}",
                 me.id, me.client, port
             ));
+        }
+        Ok(())
+    }
+}
+
+fn default_shard_role() -> String {
+    "shard".into()
+}
+
+/// Splits documents across Kova processes. `enabled = false` (the
+/// default) stores every document in this process.
+///
+/// `role = "router"` hashes `_id` and forwards the command. `role =
+/// "shard"` stores the documents the router sends. A shard may also
+/// enable `[replication]`; the router talks to `client` and does not
+/// join that replica set.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ShardingConfig {
+    pub enabled: bool,
+    /// `"router"` or `"shard"`.
+    #[serde(default = "default_shard_role")]
+    pub role: String,
+    /// Label of this process when `role` is `"shard"`.
+    pub id: u64,
+    /// Every shard the router forwards to. Ignored on a shard.
+    pub shards: Vec<ShardMember>,
+}
+
+/// One shard. `client` is its MongoDB port.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ShardMember {
+    pub id: u64,
+    pub client: String,
+}
+
+impl Default for ShardingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            role: default_shard_role(),
+            id: 1,
+            shards: Vec::new(),
+        }
+    }
+}
+
+impl ShardingConfig {
+    fn validate(&self, replication_enabled: bool) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.role != "router" && self.role != "shard" {
+            return Err(format!(
+                "{CONFIG_FILE}: sharding.role {:?} must be \"router\" or \"shard\"",
+                self.role
+            ));
+        }
+        if self.role == "shard" {
+            return Ok(());
+        }
+        if replication_enabled {
+            return Err(format!(
+                "{CONFIG_FILE}: a shard router cannot also join a replica set"
+            ));
+        }
+        if self.shards.is_empty() {
+            return Err(format!(
+                "{CONFIG_FILE}: sharding.shards must list the shard addresses"
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for shard in &self.shards {
+            if shard.client.is_empty() {
+                return Err(format!(
+                    "{CONFIG_FILE}: sharding shard {} needs a client address",
+                    shard.id
+                ));
+            }
+            if !seen.insert(shard.id) {
+                return Err(format!(
+                    "{CONFIG_FILE}: sharding shard id {} is duplicated",
+                    shard.id
+                ));
+            }
         }
         Ok(())
     }
@@ -508,6 +596,7 @@ impl Config {
         }
         self.storage.validate()?;
         self.replication.validate(self.port)?;
+        self.sharding.validate(self.replication.enabled)?;
         Ok(())
     }
 }
@@ -740,6 +829,41 @@ mod tests {
         assert!(config.replication.enabled);
         assert!(config.replication.members[1].arbiter);
         config.validate().expect("set");
+    }
+
+    #[test]
+    fn test_sharding_is_optional_and_a_router_lists_its_shards() {
+        let standalone = Config::from_toml("port = 27018").expect("parse");
+        assert!(!standalone.sharding.enabled);
+        standalone.validate().expect("standalone");
+
+        let config = Config::from_toml(
+            r#"
+            port = 27018
+            [sharding]
+            enabled = true
+            role = "router"
+            shards = [
+              { id = 1, client = "127.0.0.1:27101" },
+              { id = 2, client = "127.0.0.1:27102" },
+            ]
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(config.sharding.shards.len(), 2);
+        config.validate().expect("router");
+
+        let mut both = config.clone();
+        both.replication.enabled = true;
+        both.replication.members = vec![crate::config::ReplicaMember {
+            id: 1,
+            client: "127.0.0.1:27018".into(),
+            raft: "127.0.0.1:27118".into(),
+            arbiter: false,
+        }];
+        both.replication.bootstrap = true;
+        let err = both.validate().expect_err("router is not a replica");
+        assert!(err.contains("replica set"), "{err}");
     }
 
     #[test]

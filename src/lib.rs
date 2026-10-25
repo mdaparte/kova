@@ -14,6 +14,7 @@ mod protocol;
 mod query_engine;
 mod replication;
 mod search;
+mod shard;
 mod security;
 mod storage;
 mod types;
@@ -70,6 +71,23 @@ pub async fn serve() {
     ));
 
     let router = storage::PartitionRouter::new(PARTITION_COUNT);
+    let shards = if config.sharding.enabled && config.sharding.role == "router" {
+        logger::LOGGER.info(format!(
+            "Shard router hashing _id across {} shard(s)",
+            config.sharding.shards.len()
+        ));
+        Some(std::sync::Arc::new(shard::ShardRouter::connect(
+            &config.sharding.shards,
+        )))
+    } else {
+        if config.sharding.enabled {
+            logger::LOGGER.info(format!(
+                "Shard {} storing the documents the router sends",
+                config.sharding.id
+            ));
+        }
+        None
+    };
     let replica = if config.replication.enabled {
         let applier = network::storage_applier(router.clone());
         match replication::boot(config, applier).await {
@@ -83,7 +101,7 @@ pub async fn serve() {
         None
     };
 
-    if let Err(err) = network::start_server(router, replica).await {
+    if let Err(err) = network::start_server(router, replica, shards).await {
         logger::LOGGER.error(format!("Network server error: {}", err));
         std::process::exit(1);
     }

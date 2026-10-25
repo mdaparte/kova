@@ -40,7 +40,7 @@ Rust concurrency, memory management, and storage engine design.
 
 ## 3. Non-Goals (Current Phase)
 
-- Sharding across multiple nodes stays out of scope. Phase 11 is one replica set inside each process.
+- A shard router is opt-in. With `[sharding]` absent, one process still stores every document. Phase 11 remains one replica set inside a process.
 - Full MongoDB command-level compatibility (only the wire protocol minimum
   required to speak with official drivers).
 - Documents stay on pages. A query reads through the buffer pool. Startup
@@ -239,10 +239,14 @@ An arbiter is a learner: it stores the oplog, applies no documents, and
 does not vote. `begin`, staged statements, and `abort` stay on the
 primary. `commit` proposes one `applyTransaction` entry carrying the
 writes. Followers apply that entry as one WAL record and do not open a
-transaction. Sharding is not implemented. A snapshot of the page files
+transaction. Sharding is a router in front of these processes, not a second copy inside the replica set. A snapshot of the page files
 goes out every 64 log entries. A follower whose log no longer overlaps
 installs that snapshot and then applies the later oplog entries. An
 arbiter does not install document pages.
+
+### 4.6 Sharding (Phase 23)
+
+`[sharding] role = "router"` hashes `_id` onto a ring of 128 virtual nodes per shard and forwards the OP_MSG command to `shards[].client`. The router does not store those documents. A find, count, update, or delete of one `_id` goes to one shard. The same command without that `_id` visits every shard and the replies are merged. `create`, `drop`, and `createIndexes` visit every shard. SQL loads each named collection from the shards and runs on the router. A shard is a normal Kova process and may enable `[replication]` on its own port. The router does not join that set. With the section absent, the process stores every document itself.
 
 ## 5. Data Flow
 
@@ -286,6 +290,9 @@ about and ignored.
 | `replication.id` | — | `1` | This process's Raft id |
 | `replication.bootstrap` | — | `false` | Commit the voter set and campaign |
 | `replication.members` | — | `[]` | `client` (MongoDB) and `raft` (RPC) addresses |
+| `sharding.enabled` | — | `false` | Hash `_id` across the `shards` list |
+| `sharding.role` | — | `shard` | `router` forwards. `shard` stores |
+| `sharding.shards` | — | `[]` | `id` and `client` (MongoDB port) of each shard |
 
 ## 7. Phases
 
@@ -313,7 +320,7 @@ about and ignored.
 | 20 | ODBC connector for the existing DataFusion SQL path |
 | 21 | ODBC catalog for GUI clients: `SQLTables`, `SQLColumns`, `SQLGetInfo` |
 | 22 | `kovadump`: backup, and restore from Kova, PostgreSQL, MongoDB, and MySQL dumps |
-| 23 | Sharding: routing scheme chosen when the phase starts |
+| 23 | Sharding: consistent hash of `_id`, router forwards to shard processes |
 | 24 | Physical catalog: database `admin` holds databases, collections, fields, and indexes. Startup reads those rows |
 
 ---

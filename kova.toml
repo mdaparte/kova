@@ -92,3 +92,17 @@ checkpoint_every = 128
 #   { id = 2, client = "127.0.0.1:27019", raft = "127.0.0.1:27119" },
 #   { id = 3, client = "127.0.0.1:27020", raft = "127.0.0.1:27120", arbiter = true },
 # ]
+
+# Sharding. Leave this out and every document stays in this process.
+# role = "router" hashes `_id` and forwards. It does not store the
+# documents, and it cannot also join a replica set. role = "shard" is a
+# normal Kova process; point the router at its MongoDB port. A shard
+# may enable [replication] on its own. The router does not join that set.
+#
+# [sharding]
+# enabled = true
+# role = "router"
+# shards = [
+#   { id = 1, client = "127.0.0.1:27101" },
+#   { id = 2, client = "127.0.0.1:27102" },
+# ]
