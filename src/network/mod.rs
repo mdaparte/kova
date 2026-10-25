@@ -1529,7 +1529,7 @@ fn show_index_table(sql: &str) -> Option<String> {
 /// DataFusion reads `TEXT 'clerk'` as a string, so this form is handled
 /// before the planner. The search is the same `$text` path a find uses.
 /// `FACETS` turns the Tantivy buckets into rows (`facet`, `bucket`,
-/// `doc_count`) because the SQL cursor is the only result isql prints.
+/// `doc_count`) because the SQL cursor is the only result a command-line client prints.
 struct SqlTextSearch {
     columns: Option<Vec<String>>,
     table: String,

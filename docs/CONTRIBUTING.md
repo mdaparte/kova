@@ -195,7 +195,7 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   same SQL as `db.runCommand({ sql })`. `UID` and `PWD` call `authenticate`. ✅ Complete.
 - **Phase 21 — ODBC catalog for GUI clients:** `SQLTables`, `SQLColumns`,
   and `SQLGetInfo` match the layout a database IDE reads by column position.
-  LibreOffice Base lists the collections and opens the SQL window. ✅ Complete.
+  A GUI client lists the collections and opens the SQL window. ✅ Complete.
 - **Phase 22 — `kovadump`:** backup and restore over the MongoDB port.
   Restore reads a Kova dump, `pg_dump` plain SQL, `mongodump`, or
   `mysqldump` SQL, and writes through `insert`. ✅ Complete.
@@ -207,6 +207,9 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 25 — Autoincrement:** `admin.counters` stores `last` for the
   field. `create` can declare it. A SQL restore can seed it from
   `setval`. Updating the row by hand changes the next insert. ✅ Complete.
+- **Phase 26 — Feed:** a committed insert, update, or delete can publish
+  one JSON record (`before` and `after`) to Apache Iggy. The listener
+  decides what to do. `[feed]` is off unless enabled. ⚪ Planned.
 
 ---
 

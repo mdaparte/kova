@@ -644,7 +644,7 @@ fn cell_from(value: &bson::Bson) -> Cell {
     }
 }
 
-/// `YYYY-MM-DD HH:MM:SS` in UTC. LibreOffice reads this back as a
+/// `YYYY-MM-DD HH:MM:SS` in UTC. A GUI client reads this back as a
 /// timestamp structure when the column type is `TIMESTAMP`.
 fn format_utc_millis(millis: i64) -> String {
     let secs = millis.div_euclid(1000);
@@ -927,13 +927,13 @@ fn type_selected(filter: Option<&str>, kind: &str) -> bool {
 }
 
 /// `SQLTables(NULL, NULL, NULL, "%")` asks for the type names only.
-/// LibreOffice fills the table-type filter from column 4 of that result.
+/// A GUI client fills the table-type filter from column 4 of that result.
 fn table_type_probe(table: &Option<String>, kind: &Option<String>) -> bool {
     table.as_deref().unwrap_or("").is_empty() && kind.as_deref() == Some("%")
 }
 
 /// Column order is the ODBC `SQLTables` result: catalog, schema, name,
-/// type, remarks. LibreOffice reads the name from column 3 and the type
+/// type, remarks. A GUI client reads the name from column 3 and the type
 /// from column 4, by position.
 fn table_catalog_row(name: Option<&str>, kind: Option<&str>) -> Vec<Cell> {
     vec![
@@ -1554,7 +1554,7 @@ unsafe fn write_bound(cell: &Cell, binding: &Binding) -> Result<Written, (&'stat
             }
             Ok(Written::Ok)
         }
-        // LibreOffice asks for an integer with `SQL_C_SLONG` (-16).
+        // A GUI client asks for an integer with `SQL_C_SLONG` (-16).
         // That is the signed form of `SQL_C_LONG`.
         SQL_C_LONG | SQL_C_SLONG | SQL_C_ULONG => {
             let value = cell_i64(cell)?;
@@ -2357,7 +2357,7 @@ pub unsafe extern "C" fn SQLExecute(handle: *mut std::ffi::c_void) -> i16 {
     execute_id(id, &sql)
 }
 
-/// Lists collections in the connection's database. `isql` uses this for `help`.
+/// Lists collections in the connection's database. A command-line client uses this to list tables.
 #[no_mangle]
 pub unsafe extern "C" fn SQLTables(
     handle: *mut std::ffi::c_void,
@@ -2384,8 +2384,8 @@ pub unsafe extern "C" fn SQLTables(
     tables_id(id, table, kind)
 }
 
-/// Lists fields of one collection from `admin.fields`. `isql` uses this
-/// for `help emp`. A collection the catalog does not know yet is sampled
+/// Lists fields of one collection from `admin.fields`. A command-line client
+/// uses this to list one table's columns. A collection the catalog does not know yet is sampled
 /// from its documents.
 #[no_mangle]
 pub unsafe extern "C" fn SQLColumns(
@@ -2543,7 +2543,7 @@ unsafe fn describe_col(
     }
 }
 
-/// Column label and display width. `isql` reads the header from here.
+/// Column label and display width. A command-line client reads the header from here.
 #[no_mangle]
 pub unsafe extern "C" fn SQLColAttribute(
     handle: *mut std::ffi::c_void,
@@ -2613,7 +2613,7 @@ unsafe fn col_attribute(
     }
 }
 
-/// One `SQLColAttribute` answer. LibreOffice reads the concise type
+/// One `SQLColAttribute` answer. A GUI client reads the concise type
 /// before it draws a table list or a query, and treats an error as an
 /// empty result. An attribute this driver does not use is `0`.
 fn column_attr(column: &Column, field: u16) -> ColumnAttr {
@@ -3153,7 +3153,7 @@ unsafe fn info(
     drop(reg);
     // A short buffer is an integer (`SQLUSMALLINT` is 2 bytes,
     // `SQLUINTEGER` is 4). A long buffer is a string. Returning an
-    // error here makes LibreOffice drop the table list and refuse SQL.
+    // error here makes a GUI client drop the table list and refuse SQL.
     match info_value(info_type, &database) {
         InfoValue::Text(text) => write_info_text(value, buffer_max, text, length, wide),
         InfoValue::Owned(text) => write_info_text(value, buffer_max, &text, length, wide),

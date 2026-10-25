@@ -39,6 +39,7 @@ replication, and multi-model indexing.
 | 23 | Sharding | ✅ Complete |
 | 24 | Physical catalog (`admin`) | ✅ Complete |
 | 25 | Autoincrement | ✅ Complete |
+| 26 | Feed (Apache Iggy) | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -754,20 +755,20 @@ The connection string is `DRIVER=Kova;SERVER=host;PORT=27018;DATABASE=name`. `SE
 
 ## Phase 21 — ODBC catalog for GUI clients ✅
 
-`SQLTables` returns `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`, `TABLE_TYPE`, `REMARKS` in that order. A call with an empty table name and table type `%` returns `TABLE` and `VIEW` in column 4 and does not ask the server. LibreOffice Base fills the type filter from that column. A table pattern of `%` and a type list such as `TABLE,VIEW` returns the collections and views of the DSN database.
+`SQLTables` returns `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`, `TABLE_TYPE`, `REMARKS` in that order. A call with an empty table name and table type `%` returns `TABLE` and `VIEW` in column 4 and does not ask the server. A GUI client fills the type filter from that column. A table pattern of `%` and a type list such as `TABLE,VIEW` returns the collections and views of the DSN database.
 
 `SQLColumns` returns the ODBC column list. `COLUMN_NAME` is column 4 and `DATA_TYPE` is column 5. The types come from `admin.fields`. A collection the catalog does not know yet is sampled from its documents.
 
-`SQLGetInfo` answers the values a GUI reads, including quoted identifier case (93), which is case-sensitive. An unknown info type returns a zero or an empty string. It does not return `HYC00`. `isql` `help` and `help <table>` keep the rows they already print. The client maps `libkova.so` for the life of the process, so a rebuilt library loads only after that process quits.
+`SQLGetInfo` answers the values a GUI reads, including quoted identifier case (93), which is case-sensitive. An unknown info type returns a zero or an empty string. It does not return `HYC00`. A command-line client that lists tables and columns keeps the rows it already prints. The client maps `libkova.so` for the life of the process, so a rebuilt library loads only after that process quits.
 
-Windows ODBC, `?` parameter binding, and DBeaver stay out. DBeaver Community has no ODBC driver. `SQLPrimaryKeys`, `SQLStatistics`, and `SQLGetTypeInfo` wait until a client error names the missing call.
+Windows ODBC and `?` parameter binding stay out. A client that does not speak ODBC stays out. `SQLPrimaryKeys`, `SQLStatistics`, and `SQLGetTypeInfo` wait until a client error names the missing call.
 
 ### Phase 21 — Sub-tasks
 
 - [x] `SQLTables` returns `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`, `TABLE_TYPE`, `REMARKS` in that order. The type probe (`SQLTables` with table type `%`) returns `TABLE` and `VIEW` in column 4 and does not call the server.
 - [x] `SQLColumns` returns the standard columns so a GUI reads `COLUMN_NAME` and `DATA_TYPE` by position.
 - [x] `SQLGetInfo` answers the info types a GUI asks, including quoted identifier case (93). An unknown info type returns a zero or an empty string. It does not return `HYC00`.
-- [x] Test: the LibreOffice catalog sequence on DSN `Kova` returns `TABLE` and `VIEW`, lists `emp` and the views, and `SQLColumns` of `emp` returns `ename` as VARCHAR. `isql` `help` and `help emp` return those rows. Info type 93 returns success.
+- [x] Test: a GUI client's catalog sequence on DSN `Kova` returns `TABLE` and `VIEW`, lists `emp` and the views, and `SQLColumns` of `emp` returns `ename` as VARCHAR. A command-line client's table list and column list return those rows. Info type 93 returns success.
 
 ## Phase 22 — `kovadump` backup and restore ✅
 
@@ -867,6 +868,47 @@ Each process keeps its own `admin.counters`. On a router, `create` starts every 
 - [x] Test: `create` of `orders` with `autoincrement: "id"` leaves `admin.counters` at `last: 0`. An insert without `id` stores 1 and `last` becomes 1. The next stores 2. Setting `last` to 10 by hand makes the following insert store 11. After restart, the next insert stores 12.
 - [x] Test: restore a table whose `setval` is 115 with the third argument true. `last` is 115. An insert without `id` stores 116. The next insert stores 117. After restart, the next insert stores 118.
 
+## Phase 26 — Feed (Apache Iggy) ⚪ Planned
+
+A program that wants to react to a write connects to a feed. It does not open a MongoDB driver, tail a collection, or read the oplog. The condition lives in that program. Kova publishes what happened.
+
+The sidecar is Apache Iggy, a separate process. Kova is a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client in its own language, or receives the same JSON over HTTP and applies its own condition. Kova does not embed the Iggy server.
+
+`[feed]` is off unless `enabled` is true. With the section absent, or with `enabled` false, a write opens no connection and the insert path stays as it is.
+
+```toml
+[feed]
+enabled = false
+address = "127.0.0.1:8090"
+username = "iggy"
+password = "iggy"
+stream = "kova"
+topic = "changes"
+```
+
+After a committed insert, update, or delete, the process that applied the write publishes one JSON record to stream `kova`, topic `changes`:
+
+```json
+{ "op": "update", "ns": "db.C1", "id": "674a1c", "before": { "A": 1 }, "after": { "A": 2 }, "lsn": 120 }
+```
+
+`op` is `insert`, `update`, or `delete`. `ns` is `database.collection`. `before` is the document that was stored. `after` is the document that is stored. An insert leaves `before` empty. A delete leaves `after` empty. A listener that wants “field `A` on `C1` changed from 1 to 2” compares `before.A` and `after.A`. Another listener on the same feed can look at another collection. Kova does not store that rule.
+
+The primary of a replica set publishes. A follower applies the same oplog entry and does not publish it again. A shard router forwards the command and does not publish it. The shard that stored the document publishes.
+
+A committed transaction publishes one record per document after commit. An abort publishes nothing.
+
+If Iggy is down, the database write still stands. The publisher retries. The same write can arrive twice, and the listener tells the repeat by `ns`, `id`, and `lsn`. The feed is not a second WAL and it does not roll a write back.
+
+### Phase 26 — Sub-tasks
+
+- [ ] `[feed]` absent or `enabled` false publishes nothing and opens no Iggy connection.
+- [ ] A committed insert, update, or delete publishes one JSON record to stream `kova`, topic `changes`, from the process that applied the write. A follower and a shard router do not publish that write again.
+- [ ] The record carries `op`, `ns`, `id`, `before`, `after`, and `lsn`. An insert has an empty `before`. A delete has an empty `after`. An update carries both documents.
+- [ ] A committed transaction publishes one record per document after commit. An abort publishes nothing.
+- [ ] Iggy being unreachable leaves the database write in place. A repeated delivery of the same write keeps the same `ns`, `id`, and `lsn`.
+- [ ] Test: with the feed off, an insert does not connect. With the feed on, an update of field `A` from 1 to 2 is a record whose `before.A` is 1 and `after.A` is 2. An insert and a delete have the empty side. Stopping Iggy still lets the insert succeed.
+
 ## Architecture Principles
 
 1. **Hybrid memory+disk**: documents live in pages. RAM holds the buffer
@@ -889,7 +931,9 @@ Each process keeps its own `admin.counters`. On a router, `create` starts every 
 
 ## Current Implementation Gaps
 
-None. Phases 1–25 are complete.
+| Gap | Phase | Notes |
+|-----|-------|-------|
+| A committed write has no feed for other programs | 26 | `[feed]` will publish one JSON record per committed insert, update, or delete to Apache Iggy. The listener decides what to do with `before` and `after`. Today a program tails a collection or the oplog. |
 
 ## Architecture Diagram (updated)
 
@@ -947,4 +991,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–25 are complete.*
+*Phases 1–25 are complete. Still open: the feed (Phase 26).*
