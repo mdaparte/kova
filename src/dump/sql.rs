@@ -6,8 +6,12 @@
 //! COPY use the column type from `CREATE TABLE`: `json` and `jsonb`
 //! become documents. A value is also read from its shape: a date, a
 //! number, `true`/`false`, or a JSON object or array, including inside
-//! other JSON. `integer[]` or `text[]` become arrays. `SET`,
-//! `ALTER`, `CREATE INDEX`,
+//! other JSON. `integer[]` or `text[]` become arrays. A primary key or
+//! `UNIQUE` becomes a unique index. A foreign key becomes an index on
+//! the referencing columns. `serial`, `bigserial`, `smallserial`,
+//! `AUTO_INCREMENT`, `GENERATED ... AS IDENTITY`, and `DEFAULT nextval`
+//! mark the column; if no unique index already covers it, one is added.
+//! The numbers already in the dump stay as they are. `SET`, `OWNER`,
 //! dollar-quoted function bodies, and psql commands such as `\restrict`
 //! are skipped.
 //!
@@ -17,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use bson::{Bson, Document};
+use bson::{doc, Bson, Document};
 
 use super::{check_name, CollectionDump, Dump};
 
@@ -41,6 +45,8 @@ struct Column {
     name: String,
     kind: TypeKind,
     array: bool,
+    /// `serial`, `AUTO_INCREMENT`, identity, or `nextval`.
+    serial: bool,
 }
 
 pub(super) fn detect(text: &str) -> Result<Dialect, String> {
@@ -88,8 +94,27 @@ pub(super) fn parse(text: &str, dialect: Dialect) -> Result<Dump, String> {
             sql.parse_insert(dialect, &columns, &mut dump)?;
         } else if word.eq_ignore_ascii_case("copy") && dialect == Dialect::Postgres {
             sql.parse_copy(&columns, &mut dump)?;
+        } else if word.eq_ignore_ascii_case("alter") {
+            sql.parse_alter(&mut columns, &mut dump)?;
         } else {
             sql.skip_statement()?;
+        }
+    }
+    for (table, declared) in &columns {
+        let Some(collection) = dump
+            .collections
+            .iter_mut()
+            .find(|collection| &collection.name == table)
+        else {
+            continue;
+        };
+        for column in declared.iter().filter(|column| column.serial) {
+            push_index(
+                &mut collection.indexes,
+                String::new(),
+                vec![column.name.clone()],
+                true,
+            );
         }
     }
     Ok(dump)
@@ -109,6 +134,13 @@ impl Sql<'_> {
         let mut word = self.read_word()?;
         while matches_modifier(&word) {
             word = self.read_word()?;
+        }
+        let unique_index = word.eq_ignore_ascii_case("unique");
+        if unique_index {
+            word = self.read_word()?;
+        }
+        if word.eq_ignore_ascii_case("index") {
+            return self.parse_index(dump, unique_index);
         }
         if !word.eq_ignore_ascii_case("table") {
             self.skip_statement()?;
@@ -131,19 +163,195 @@ impl Sql<'_> {
                 self.here()
             ));
         }
-        let declared = self.read_columns()?;
+        let (mut declared, indexes) = self.read_columns()?;
         self.skip_statement()?;
+        if let Some(previous) = columns.get(&name) {
+            for column in &mut declared {
+                if previous
+                    .iter()
+                    .any(|older| older.name == column.name && older.serial)
+                {
+                    column.serial = true;
+                }
+            }
+        }
         columns.insert(name.clone(), declared);
-        if !dump
-            .collections
-            .iter()
-            .any(|collection| collection.name == name)
-        {
-            dump.collections.push(CollectionDump {
-                name,
-                documents: Vec::new(),
-                indexes: Vec::new(),
-            });
+        let slot = collection_indexes(dump, &name)?;
+        adopt_indexes(slot, indexes);
+        Ok(())
+    }
+
+    /// `CREATE [UNIQUE] INDEX name ON table (columns)`.
+    fn parse_index(&mut self, dump: &mut Dump, unique: bool) -> Result<(), String> {
+        if self.peek_word("concurrently") {
+            self.read_word()?;
+        }
+        if self.peek_word("if") {
+            self.read_word()?;
+            let not = self.read_word()?;
+            let exists = self.read_word()?;
+            if !not.eq_ignore_ascii_case("not") || !exists.eq_ignore_ascii_case("exists") {
+                return Err(format!("expected IF NOT EXISTS {}", self.here()));
+            }
+        }
+        let index_name = self.read_ident()?;
+        let on = self.read_word()?;
+        if !on.eq_ignore_ascii_case("on") {
+            return Err(format!("CREATE INDEX is missing ON {}", self.here()));
+        }
+        if self.peek_word("only") {
+            self.read_word()?;
+        }
+        let table = self.read_qualified()?;
+        check_name(&table)?;
+        if self.peek_word("using") {
+            self.read_word()?;
+            let _method = self.read_word()?;
+        }
+        let fields = self.read_key_columns()?;
+        let indexes = collection_indexes(dump, &table)?;
+        push_index(indexes, index_name, fields, unique);
+        self.skip_statement()?;
+        Ok(())
+    }
+
+    /// `ALTER TABLE ... ADD CONSTRAINT` and `ALTER SEQUENCE ... OWNED BY`.
+    /// pg_dump writes the primary key and the foreign keys here, after
+    /// the rows, and writes `nextval` either on the column or in a
+    /// later `ALTER COLUMN`.
+    fn parse_alter(
+        &mut self,
+        columns: &mut BTreeMap<String, Vec<Column>>,
+        dump: &mut Dump,
+    ) -> Result<(), String> {
+        let kind = self.read_word()?;
+        if kind.eq_ignore_ascii_case("sequence") {
+            let _name = self.read_path()?;
+            self.skip()?;
+            if self.peek_word("owned") {
+                self.read_word()?;
+                let by = self.read_word()?;
+                if !by.eq_ignore_ascii_case("by") {
+                    return Err(format!("expected OWNED BY {}", self.here()));
+                }
+                let path = self.read_path()?;
+                if path.len() >= 2 {
+                    let column = path[path.len() - 1].clone();
+                    let table = path[path.len() - 2].clone();
+                    mark_serial(columns, &table, &column);
+                }
+            }
+            self.skip_statement()?;
+            return Ok(());
+        }
+        if !kind.eq_ignore_ascii_case("table") {
+            self.skip_statement()?;
+            return Ok(());
+        }
+        if self.peek_word("only") {
+            self.read_word()?;
+        }
+        if self.peek_word("if") {
+            self.read_word()?;
+            let exists = self.read_word()?;
+            if !exists.eq_ignore_ascii_case("exists") {
+                return Err(format!("expected IF EXISTS {}", self.here()));
+            }
+        }
+        if self.peek_word("only") {
+            self.read_word()?;
+        }
+        let table = self.read_qualified()?;
+        check_name(&table)?;
+        self.skip()?;
+        if self.peek_word("add") {
+            let mut found = Vec::new();
+            self.read_add_constraint(&mut found)?;
+            let indexes = collection_indexes(dump, &table)?;
+            adopt_indexes(indexes, found);
+        } else if self.peek_word("alter") {
+            self.read_word()?;
+            if self.peek_word("column") {
+                self.read_word()?;
+            }
+            if is_word_start(self.peek()) || self.peek() == '"' || self.peek() == '`' {
+                let column = self.read_ident()?;
+                if self.statement_has_nextval() {
+                    mark_serial(columns, &table, &column);
+                }
+            }
+        }
+        self.skip_statement()?;
+        Ok(())
+    }
+
+    fn read_add_constraint(&mut self, indexes: &mut Vec<Document>) -> Result<(), String> {
+        self.read_word()?;
+        let mut name = None;
+        if self.peek_word("constraint") {
+            self.read_word()?;
+            name = Some(self.read_ident()?);
+        }
+        let kind = self.read_word()?;
+        self.apply_constraint(&kind, name, indexes)?;
+        Ok(())
+    }
+
+    fn apply_constraint(
+        &mut self,
+        kind: &str,
+        name: Option<String>,
+        indexes: &mut Vec<Document>,
+    ) -> Result<(), String> {
+        if kind.eq_ignore_ascii_case("constraint") {
+            let name = self.read_ident()?;
+            let kind = self.read_word()?;
+            return self.apply_constraint(&kind, Some(name), indexes);
+        }
+        if kind.eq_ignore_ascii_case("primary") {
+            if self.peek_word("key") {
+                self.read_word()?;
+            }
+            let fields = self.read_key_columns()?;
+            let name = name.unwrap_or_else(|| default_index_name(&fields));
+            push_index(indexes, name, fields, true);
+            return Ok(());
+        }
+        if kind.eq_ignore_ascii_case("unique") {
+            if self.peek_word("key") || self.peek_word("index") {
+                self.read_word()?;
+            }
+            self.skip()?;
+            let name = match name {
+                Some(name) => Some(name),
+                None if self.peek() != '(' && self.looks_like_ident() => Some(self.read_ident()?),
+                None => None,
+            };
+            let fields = self.read_key_columns()?;
+            let name = name.unwrap_or_else(|| default_index_name(&fields));
+            push_index(indexes, name, fields, true);
+            return Ok(());
+        }
+        if kind.eq_ignore_ascii_case("foreign") {
+            if self.peek_word("key") {
+                self.read_word()?;
+            }
+            let fields = self.read_key_columns()?;
+            let name = name.unwrap_or_else(|| default_index_name(&fields));
+            push_index(indexes, name, fields, false);
+            return Ok(());
+        }
+        if kind.eq_ignore_ascii_case("key") || kind.eq_ignore_ascii_case("index") {
+            self.skip()?;
+            let name = match name {
+                Some(name) => Some(name),
+                None if self.peek() != '(' && self.looks_like_ident() => Some(self.read_ident()?),
+                None => None,
+            };
+            let fields = self.read_key_columns()?;
+            let name = name.unwrap_or_else(|| default_index_name(&fields));
+            push_index(indexes, name, fields, false);
+            return Ok(());
         }
         Ok(())
     }
@@ -301,8 +509,9 @@ impl Sql<'_> {
         let mut document = Document::new();
         for ((column, kind, array), value) in names.into_iter().zip(values.iter()) {
             let value = match value {
-                Bson::String(text) => coerce_value(text, kind, array)
-                    .map_err(|err| format!("{column}: {err}"))?,
+                Bson::String(text) => {
+                    coerce_value(text, kind, array).map_err(|err| format!("{column}: {err}"))?
+                }
                 other => other.clone(),
             };
             document.insert(column, value);
@@ -325,8 +534,9 @@ impl Sql<'_> {
         Ok(())
     }
 
-    fn read_columns(&mut self) -> Result<Vec<Column>, String> {
+    fn read_columns(&mut self) -> Result<(Vec<Column>, Vec<Document>), String> {
         let mut columns = Vec::new();
+        let mut indexes = Vec::new();
         loop {
             self.skip()?;
             if self.eat(')') {
@@ -337,6 +547,7 @@ impl Sql<'_> {
             }
             let name = self.read_ident()?;
             if is_table_constraint(&name) {
+                self.apply_constraint(&name, None, &mut indexes)?;
                 match self.skip_until_comma_or_close()? {
                     ',' => {
                         self.bump();
@@ -352,16 +563,15 @@ impl Sql<'_> {
             }
             let type_text = self.read_type_text()?;
             let array = self.take_array_markers()?;
+            let (serial, term) = self.read_column_tail(&name, &mut indexes)?;
+            let serial = serial || is_serial_type(&type_text);
             columns.push(Column {
                 name,
                 kind: type_kind(&type_text),
                 array,
+                serial,
             });
-            self.skip()?;
-            if self.peek() == ',' || self.peek() == ')' {
-                continue;
-            }
-            match self.skip_until_comma_or_close()? {
+            match term {
                 ',' => {
                     self.bump();
                 }
@@ -375,7 +585,178 @@ impl Sql<'_> {
         if columns.is_empty() {
             return Err(format!("CREATE TABLE has no columns {}", self.here()));
         }
-        Ok(columns)
+        Ok((columns, indexes))
+    }
+
+    /// Column constraints up to the comma or the closing parenthesis.
+    /// The terminator is left for the caller.
+    fn read_column_tail(
+        &mut self,
+        column: &str,
+        indexes: &mut Vec<Document>,
+    ) -> Result<(bool, char), String> {
+        let mut serial = false;
+        let mut primary = false;
+        let mut unique = false;
+        let mut references = false;
+        let mut depth = 0i32;
+        let term = loop {
+            self.skip()?;
+            if self.eof() {
+                return Err(format!("unclosed column {}", self.here()));
+            }
+            let ch = self.peek();
+            if ch == '\'' {
+                self.read_quoted_string(false)?;
+                continue;
+            }
+            if ch == '"' || ch == '`' {
+                self.read_quoted_ident(ch)?;
+                continue;
+            }
+            if ch == '(' {
+                depth += 1;
+                self.bump();
+                continue;
+            }
+            if ch == ')' {
+                if depth == 0 {
+                    break ')';
+                }
+                depth -= 1;
+                self.bump();
+                continue;
+            }
+            if ch == ',' && depth == 0 {
+                break ',';
+            }
+            if depth == 0 && (is_word_start(ch)) {
+                let word = self.read_word()?;
+                match word.to_ascii_lowercase().as_str() {
+                    "primary" => primary = true,
+                    "unique" => unique = true,
+                    "references" => references = true,
+                    "auto_increment" | "nextval" | "identity" | "generated" => serial = true,
+                    _ => {}
+                }
+                continue;
+            }
+            self.bump();
+        };
+        if primary || unique {
+            push_index(
+                indexes,
+                default_index_name(&[column.to_string()]),
+                vec![column.to_string()],
+                true,
+            );
+        } else if references {
+            push_index(
+                indexes,
+                default_index_name(&[column.to_string()]),
+                vec![column.to_string()],
+                false,
+            );
+        }
+        Ok((serial, term))
+    }
+
+    fn read_key_columns(&mut self) -> Result<Vec<String>, String> {
+        self.skip()?;
+        if !self.eat('(') {
+            return Err(format!("expected a column list {}", self.here()));
+        }
+        let mut names = Vec::new();
+        loop {
+            self.skip()?;
+            if self.eat(')') {
+                break;
+            }
+            if self.eat(',') {
+                continue;
+            }
+            names.push(self.read_ident()?);
+            loop {
+                self.skip()?;
+                if self.eof() || self.peek() == ',' || self.peek() == ')' {
+                    break;
+                }
+                if self.peek() == '\'' {
+                    self.read_quoted_string(false)?;
+                    continue;
+                }
+                if self.eat('(') {
+                    let mut depth = 1i32;
+                    while depth > 0 && !self.eof() {
+                        let ch = self.peek();
+                        if ch == '\'' {
+                            self.read_quoted_string(false)?;
+                            continue;
+                        }
+                        self.bump();
+                        if ch == '(' {
+                            depth += 1;
+                        }
+                        if ch == ')' {
+                            depth -= 1;
+                        }
+                    }
+                    continue;
+                }
+                if is_word_start(self.peek()) {
+                    let _ = self.read_word()?;
+                    continue;
+                }
+                self.bump();
+            }
+        }
+        if names.is_empty() {
+            return Err(format!("empty key {}", self.here()));
+        }
+        Ok(names)
+    }
+
+    fn read_path(&mut self) -> Result<Vec<String>, String> {
+        let mut parts = vec![self.read_ident()?];
+        loop {
+            self.skip()?;
+            if !self.eat('.') {
+                break;
+            }
+            parts.push(self.read_ident()?);
+        }
+        Ok(parts)
+    }
+
+    fn looks_like_ident(&self) -> bool {
+        let ch = self.peek();
+        is_word_start(ch) || ch == '"' || ch == '`'
+    }
+
+    /// True when `nextval` appears before the statement's semicolon.
+    fn statement_has_nextval(&self) -> bool {
+        let mut index = self.index;
+        let mut quote = None;
+        let mut window = String::new();
+        while index < self.text.len() {
+            let ch = self.text[index..].chars().next().unwrap();
+            index += ch.len_utf8();
+            if let Some(mark) = quote {
+                if ch == mark {
+                    quote = None;
+                }
+                continue;
+            }
+            if ch == '\'' || ch == '"' || ch == '`' {
+                quote = Some(ch);
+                continue;
+            }
+            if ch == ';' {
+                break;
+            }
+            window.push(ch.to_ascii_lowercase());
+        }
+        window.contains("nextval")
     }
 
     fn read_type_text(&mut self) -> Result<String, String> {
@@ -881,6 +1262,111 @@ impl Sql<'_> {
     }
 }
 
+fn is_serial_type(sql_type: &str) -> bool {
+    let word = sql_type
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .find(|word| !word.is_empty())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(word.as_str(), "serial" | "bigserial" | "smallserial")
+}
+
+fn default_index_name(fields: &[String]) -> String {
+    fields
+        .iter()
+        .map(|field| format!("{field}_1"))
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+fn index_fields(spec: &Document) -> Vec<String> {
+    spec.get_document("key")
+        .map(|key| key.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn push_index(indexes: &mut Vec<Document>, name: String, fields: Vec<String>, unique: bool) {
+    if fields.is_empty() || fields.iter().any(|field| field.is_empty()) {
+        return;
+    }
+    if fields.len() == 1 && fields[0] == "_id" {
+        return;
+    }
+    if let Some(existing) = indexes.iter_mut().find(|spec| index_fields(spec) == fields) {
+        if unique {
+            existing.insert("unique", true);
+        }
+        return;
+    }
+    let mut name = if name.is_empty() {
+        default_index_name(&fields)
+    } else {
+        name
+    };
+    if indexes
+        .iter()
+        .any(|spec| spec.get_str("name").ok() == Some(name.as_str()))
+    {
+        let base = name.clone();
+        let mut suffix = 2u32;
+        while indexes
+            .iter()
+            .any(|spec| spec.get_str("name").ok() == Some(name.as_str()))
+        {
+            name = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+    }
+    let mut key = Document::new();
+    for field in fields {
+        key.insert(field, 1i32);
+    }
+    let mut spec = doc! { "name": name, "key": key };
+    if unique {
+        spec.insert("unique", true);
+    }
+    indexes.push(spec);
+}
+
+fn adopt_indexes(indexes: &mut Vec<Document>, incoming: Vec<Document>) {
+    for spec in incoming {
+        let name = spec.get_str("name").unwrap_or("").to_string();
+        let unique = spec.get_bool("unique").unwrap_or(false);
+        push_index(indexes, name, index_fields(&spec), unique);
+    }
+}
+
+fn collection_indexes<'a>(dump: &'a mut Dump, name: &str) -> Result<&'a mut Vec<Document>, String> {
+    check_name(name)?;
+    if let Some(position) = dump
+        .collections
+        .iter()
+        .position(|collection| collection.name == name)
+    {
+        return Ok(&mut dump.collections[position].indexes);
+    }
+    dump.collections.push(CollectionDump {
+        name: name.to_string(),
+        documents: Vec::new(),
+        indexes: Vec::new(),
+    });
+    Ok(&mut dump.collections.last_mut().expect("just pushed").indexes)
+}
+
+fn mark_serial(columns: &mut BTreeMap<String, Vec<Column>>, table: &str, field: &str) {
+    let declared = columns.entry(table.to_string()).or_default();
+    if let Some(column) = declared.iter_mut().find(|column| column.name == field) {
+        column.serial = true;
+        return;
+    }
+    declared.push(Column {
+        name: field.to_string(),
+        kind: TypeKind::Int,
+        array: false,
+        serial: true,
+    });
+}
+
 fn matches_modifier(word: &str) -> bool {
     matches!(
         word.to_ascii_lowercase().as_str(),
@@ -933,7 +1419,7 @@ fn type_kind(sql_type: &str) -> TypeKind {
         .to_ascii_lowercase();
     match word.as_str() {
         "int" | "integer" | "bigint" | "smallint" | "tinyint" | "mediumint" | "serial"
-        | "bigserial" => TypeKind::Int,
+        | "bigserial" | "smallserial" => TypeKind::Int,
         "bool" | "boolean" => TypeKind::Bool,
         "float" | "double" | "real" | "numeric" | "decimal" => TypeKind::Float,
         "json" | "jsonb" => TypeKind::Json,
@@ -1063,7 +1549,11 @@ fn unescape_pg_quoted(element: &str) -> Result<String, String> {
     let mut chars = body.chars();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
-            out.push(chars.next().ok_or("trailing backslash in an array element")?);
+            out.push(
+                chars
+                    .next()
+                    .ok_or("trailing backslash in an array element")?,
+            );
             continue;
         }
         out.push(ch);
@@ -1222,7 +1712,9 @@ fn refine(value: &mut Bson) {
 fn parse_sql_datetime(text: &str) -> Result<Bson, String> {
     let text = text.trim();
     let bad = || format!("bad datetime {text}");
-    if text.len() < 10 || text.as_bytes().get(4) != Some(&b'-') || text.as_bytes().get(7) != Some(&b'-')
+    if text.len() < 10
+        || text.as_bytes().get(4) != Some(&b'-')
+        || text.as_bytes().get(7) != Some(&b'-')
     {
         return Err(bad());
     }
@@ -1438,7 +1930,10 @@ INSERT INTO public.proposta_venda VALUES (
         let dump = parse(text, Dialect::Postgres).expect("parse");
         let first = &dump.collections[0].documents[0];
         assert_eq!(
-            first.get_datetime("data_inicio_juros").unwrap().timestamp_millis(),
+            first
+                .get_datetime("data_inicio_juros")
+                .unwrap()
+                .timestamp_millis(),
             1_618_196_400_000
         );
         assert_eq!(
@@ -1534,7 +2029,9 @@ INSERT INTO public.usuario VALUES (3, '{NULL,9}', NULL);
         let rows = &dump.collections[0].documents;
         let ids = rows[0].get_array("empresas_acesso").unwrap();
         assert_eq!(
-            ids.iter().map(|value| value.as_i32().unwrap()).collect::<Vec<_>>(),
+            ids.iter()
+                .map(|value| value.as_i32().unwrap())
+                .collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 5]
         );
         let labels = rows[0].get_array("acesso").unwrap();
@@ -1571,5 +2068,88 @@ UNLOCK TABLES;
             dump.collections[0].documents[1].get_str("ename"),
             Ok("O'Brien")
         );
+        let primary = &dump.collections[0].indexes[0];
+        assert_eq!(primary.get_str("name"), Ok("ename_1"));
+        assert_eq!(primary.get_bool("unique"), Ok(true));
+        assert_eq!(primary.get_document("key").unwrap().get_i32("ename"), Ok(1));
+    }
+
+    #[test]
+    fn postgres_keys_and_serials_become_indexes() {
+        let text = r#"
+-- PostgreSQL database dump
+CREATE SEQUENCE public.cidade_id_seq START WITH 1;
+ALTER SEQUENCE public.cidade_id_seq OWNED BY public.cidade.id;
+CREATE TABLE public.banco (
+    id integer DEFAULT nextval('public.banco_id_seq'::regclass) NOT NULL,
+    codigo text
+);
+CREATE TABLE public.pagamento (
+    id integer NOT NULL,
+    banco_id integer
+);
+CREATE TABLE public.cidade (
+    id integer NOT NULL,
+    nome text
+);
+CREATE TABLE public.pessoa (
+    id integer NOT NULL,
+    cpf_cnpj text
+);
+CREATE UNIQUE INDEX cpf_lookup ON public.pessoa (cpf_cnpj);
+INSERT INTO public.banco VALUES (115, '001');
+ALTER TABLE ONLY public.banco
+    ADD CONSTRAINT banco_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.pagamento
+    ADD CONSTRAINT pagamento_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.pagamento
+    ADD CONSTRAINT pagamento_banco FOREIGN KEY (banco_id) REFERENCES public.banco(id);
+ALTER TABLE ONLY public.cidade ALTER COLUMN id SET DEFAULT nextval('public.cidade_id_seq'::regclass);
+ALTER TABLE ONLY public.pessoa
+    ADD CONSTRAINT cpf_cnpj_unique_pessoa UNIQUE (cpf_cnpj);
+SELECT pg_catalog.setval('public.banco_id_seq', 115, true);
+"#;
+        let dump = parse(text, Dialect::Postgres).expect("parse");
+        let banco = dump
+            .collections
+            .iter()
+            .find(|collection| collection.name == "banco")
+            .unwrap();
+        assert_eq!(banco.documents[0].get_i32("id"), Ok(115));
+        assert_eq!(banco.indexes.len(), 1);
+        assert_eq!(banco.indexes[0].get_str("name"), Ok("banco_pkey"));
+        assert_eq!(banco.indexes[0].get_bool("unique"), Ok(true));
+        let pagamento = dump
+            .collections
+            .iter()
+            .find(|collection| collection.name == "pagamento")
+            .unwrap();
+        assert_eq!(pagamento.indexes.len(), 2);
+        assert_eq!(pagamento.indexes[0].get_str("name"), Ok("pagamento_pkey"));
+        assert_eq!(pagamento.indexes[0].get_bool("unique"), Ok(true));
+        assert_eq!(pagamento.indexes[1].get_str("name"), Ok("pagamento_banco"));
+        assert!(pagamento.indexes[1].get_bool("unique").is_err());
+        assert_eq!(
+            pagamento.indexes[1]
+                .get_document("key")
+                .unwrap()
+                .get_i32("banco_id"),
+            Ok(1)
+        );
+        let cidade = dump
+            .collections
+            .iter()
+            .find(|collection| collection.name == "cidade")
+            .unwrap();
+        assert_eq!(cidade.indexes[0].get_str("name"), Ok("id_1"));
+        assert_eq!(cidade.indexes[0].get_bool("unique"), Ok(true));
+        let pessoa = dump
+            .collections
+            .iter()
+            .find(|collection| collection.name == "pessoa")
+            .unwrap();
+        assert_eq!(pessoa.indexes.len(), 1);
+        assert_eq!(pessoa.indexes[0].get_str("name"), Ok("cpf_lookup"));
+        assert_eq!(pessoa.indexes[0].get_bool("unique"), Ok(true));
     }
 }
