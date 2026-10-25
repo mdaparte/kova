@@ -204,6 +204,9 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 24 — Physical catalog (`admin`):** database `admin` holds
   databases, collections, fields, and indexes. Startup reads those rows
   instead of scanning every document. ✅ Complete.
+- **Phase 25 — Autoincrement:** `admin.counters` stores `last` for the
+  field. `create` can declare it. A SQL restore can seed it from
+  `setval`. Updating the row by hand changes the next insert. ⚪ Planned.
 
 ---
 

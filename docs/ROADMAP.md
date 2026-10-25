@@ -835,16 +835,35 @@ Startup that finds the version-2 root reads those rows. It does not scan user pa
 
 ## Phase 25 — Autoincrement ⚪ Planned
 
-A restored `serial`, `bigserial`, `smallserial`, `AUTO_INCREMENT`, `GENERATED ... AS IDENTITY`, or `DEFAULT nextval` column already gets a unique index, unless the primary key already covers that column. The integers in the dump stay in the field. An insert that leaves the field out does not receive the next number. `_id` is still a new ObjectId.
+The counter belongs to the collection. A SQL restore is one way to set it. Creating the collection in Kova is the other. `_id` stays a new ObjectId.
 
-This phase stores the next value. Restore takes it from `setval`: when the third argument is true, the next value is one past the number in the call; when it is false, the next value is that number. A dump without `setval` uses one past the highest value already stored. An insert that omits the column writes that value and advances the counter. A value the client sends is kept, and the counter moves past it when the sent value is higher. The unique index still refuses a duplicate. The counter is written with the catalog and is still there after restart.
+The last value used is a row in `admin.counters`, next to `admin.fields` and `admin.indexes`. One row per field:
+
+```text
+{ _id: "shop.orders.id", collection: "shop.orders", field: "id", last: 0 }
+```
+
+`last` is the number already handed out. The next insert that omits the field writes `last + 1` and stores that number back in `last`. A fresh field starts at `last: 0`, so the first insert stores 1. Changing the row by hand is the override: set `last` to 500 and the next insert stores 501. A value the client sends is kept, and `last` moves to it when the sent value is higher. The row is ordinary catalog data, so a checkpoint, a restart, and a Kova backup keep it, and a restore of that dump continues from the saved `last`.
+
+`create` accepts `autoincrement` as a field name, or a list of field names:
+
+```text
+{ create: "orders", autoincrement: "id", $db: "shop" }
+```
+
+That writes the `admin.counters` row and adds a unique index when one does not already cover the field. The same insert path serves a driver, SQL, and a document loaded by restore. The unique index still refuses a duplicate.
+
+A restored `serial`, `bigserial`, `smallserial`, `AUTO_INCREMENT`, `GENERATED ... AS IDENTITY`, or `DEFAULT nextval` column already gets a unique index, unless the primary key already covers that column. The integers in the dump stay in the field. This phase also writes `last`. Restore takes it from `setval`: when the third argument is true, `last` is the number in the call; when it is false, `last` is one below that number, so the next insert uses the number itself. A dump without `setval` and without a counter row sets `last` to the highest value already stored.
 
 ### Phase 25 — Sub-tasks
 
-- [ ] Restore records the next value from `setval`, or one past the highest stored value when `setval` is absent.
-- [ ] An insert that omits the column stores the next value and advances the counter. A client-supplied value that is higher moves the counter past it.
-- [ ] The counter is in the catalog and survives restart.
-- [ ] Test: restore a table whose `setval` is 115 with the third argument true. An insert without `id` stores 116. The next insert stores 117. After restart, the next insert stores 118.
+- [ ] `admin.counters` holds one row per autoincrement field: collection, field, and `last`. `create` with `autoincrement` writes `last: 0` and adds a unique index when that field is not already covered.
+- [ ] An update of that row changes `last`. The next insert that omits the field uses `last + 1`.
+- [ ] Restore writes `last` from `setval` (the call's number when the third argument is true, one below it when false). Without `setval` and without a counter row, `last` is the highest value already stored.
+- [ ] An insert that omits the column stores `last + 1` and writes that number into `last`. A client-supplied value that is higher moves `last` to it. The same path serves a collection created in Kova and a column restored from SQL.
+- [ ] The row survives restart, and a Kova backup restores it.
+- [ ] Test: `create` of `orders` with `autoincrement: "id"` leaves `admin.counters` at `last: 0`. An insert without `id` stores 1 and `last` becomes 1. The next stores 2. Setting `last` to 10 by hand makes the following insert store 11. After restart, the next insert stores 12.
+- [ ] Test: restore a table whose `setval` is 115 with the third argument true. `last` is 115. An insert without `id` stores 116. The next insert stores 117. After restart, the next insert stores 118.
 
 ## Architecture Principles
 
@@ -870,7 +889,7 @@ This phase stores the next value. Restore takes it from `setval`: when the third
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| An insert does not continue a `serial` / `AUTO_INCREMENT` column | 25 | Restore keeps the imported numbers and the unique index. The next value is not allocated. |
+| An insert does not continue an autoincrement field | 25 | `admin.counters` will store `last` for a field declared on `create` or restored from SQL. Today the numbers and the unique index are kept. The next value is not allocated. |
 
 ## Architecture Diagram (updated)
 
