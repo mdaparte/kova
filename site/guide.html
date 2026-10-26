@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>
+try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
+</script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="0; url=docs/index.html">
   <title>Guide — KOVA</title>
@@ -11,10 +14,12 @@
 <body>
   <header class="bar">
     <a class="brand" href="index.html">KOVA</a>
-    <nav><a href="docs/index.html">Docs</a></nav>
+    <nav><a href="docs/index.html">Docs</a><button type="button" class="theme" data-theme-toggle>Light</button>
+      </nav>
   </header>
   <main class="wrap" style="padding:48px 0">
     <p>The guide is the documentation. <a href="docs/index.html">Open it</a>, or start at <a href="docs/getting-started.html">Getting started</a>.</p>
   </main>
+  <script src="js/theme.js"></script>
 </body>
 </html>
