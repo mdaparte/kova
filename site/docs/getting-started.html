@@ -42,10 +42,10 @@
       <h1>Getting started</h1>
       <p class="lede">Install Kova, start it on port 27018, insert a document, and read it back after a restart.</p>
       
-<p>The published build is Linux x86_64. It is the optimized server, the backup tool, and the ODBC library. The examples use <code>mongosh</code>, the MongoDB shell. A driver in another language sends the same commands to the same port. The server itself does not need a MongoDB installation.</p>
+<p>Each merge into <code>main</code> publishes a Linux x86_64 build and a container image. Both are the optimized server. The examples use <code>mongosh</code>, the MongoDB shell. A driver in another language sends the same commands to the same port. The server itself does not need a MongoDB installation.</p>
 
 <h2 id="install">Install</h2>
-<p>Each merge into <code>main</code> publishes a new build. This downloads the current one and installs it under your home directory:</p>
+<p>This downloads the current build and installs it under your home directory:</p>
 <pre>curl -fsSL -o install.sh https://github.com/mdaparte/kova/releases/latest/download/install.sh
 sh install.sh</pre>
 <p><code>kova</code> and <code>kovadump</code> land in <code>~/.local/bin</code>. <code>libkova.so</code> lands in <code>~/.local/lib</code>. The config and the sample script land in <code>~/.local/share/kova</code>. If <code>~/.local/bin</code> is not on <code>PATH</code>, the script prints the line to add.</p>
@@ -54,6 +54,13 @@ sh install.sh</pre>
 tar -xzf kova.tar.gz
 PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</pre>
 <p>The archive has a <code>.sha256</code> file next to it on the same release, for checking the download.</p>
+
+<h2 id="docker">Docker</h2>
+<p>The same build is the image <code>ghcr.io/mdaparte/kova</code>. The tag <code>latest</code> is the newest merge. A tag with the commit id is that exact build. Pages and the log stay in the volume <code>kova</code>.</p>
+<pre>docker run --rm -p 27018:27018 -v kova:/var/lib/kova ghcr.io/mdaparte/kova:latest</pre>
+<p>The listener inside the container is on port 27018, published on the same port of the machine. <code>-e KOVA_PORT=27019</code> changes the port inside the container. Publish that port with <code>-p 27019:27019</code>. The rest of this page talks to <code>127.0.0.1:27018</code> either way.</p>
+<p>The sample script is in the image at <code>/usr/share/kova/seed-oracle.js</code>.</p>
+<pre>docker run --rm --entrypoint cat ghcr.io/mdaparte/kova:latest /usr/share/kova/seed-oracle.js > seed-oracle.js</pre>
 
 <h2 id="start">Start the server</h2>
 <p>Start from a directory you want to keep. Pages and the log are created in <code>data/</code> there.</p>
@@ -101,7 +108,7 @@ db.runCommand({
 
       <nav class="pager"><a href="index.html"><span>Previous</span>Welcome</a><a class="next" href="concepts.html"><span>Next</span>How data is stored</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#next">What to open next</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#next">What to open next</a></nav>
   </div>
   <footer>
     <span>KOVA</span>

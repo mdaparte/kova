@@ -1,14 +1,16 @@
 name: Release
 
 # A merge into main is a push. This builds the optimized binaries and
-# publishes them on the GitHub release for that commit. The asset names
-# stay the same, so /releases/latest/download/… is the current build.
+# publishes them on the GitHub release for that commit, and pushes the
+# same binaries as a public image on GHCR. The asset names and the
+# :latest tag stay the same, so both download URLs follow the newest build.
 on:
   push:
     branches: [main]
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   linux:
@@ -37,6 +39,40 @@ jobs:
           cp packaging/get.sh dist/install.sh
           chmod 755 dist/install.sh
 
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ runner.temp }}/kova-x86_64-unknown-linux-gnu
+          file: packaging/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/mdaparte/kova:latest
+            ghcr.io/mdaparte/kova:${{ github.sha }}
+
+      - name: Make the image public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          gh api --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            /user/packages/container/kova \
+            -f visibility=public
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "The image was pushed. If this is the first publish, set the package to Public:"
+            echo "https://github.com/mdaparte/pkgs/container/kova"
+          fi
+
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
@@ -46,7 +82,9 @@ jobs:
           make_latest: true
           body: |
             Optimized Linux x86_64 build of this commit.
-            `install.sh` downloads the archive and installs `kova`, `kovadump`, and `libkova.so` under `$HOME/.local`.
+
+            Install: `install.sh` puts `kova`, `kovadump`, and `libkova.so` under `$HOME/.local`.
+            Image: `docker run --rm -p 27018:27018 -v kova:/var/lib/kova ghcr.io/mdaparte/kova:latest`
           files: |
             dist/kova-x86_64-unknown-linux-gnu.tar.gz
             dist/kova-x86_64-unknown-linux-gnu.tar.gz.sha256
