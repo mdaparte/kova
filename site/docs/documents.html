@@ -11,7 +11,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="../css/site.css">
+  <link rel="stylesheet" href="/css/site.css">
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -25,21 +25,21 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     </defs>
   </svg>
   <header class="bar">
-    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <a class="brand" href="/"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
     <nav>
-      <a href="index.html">Docs</a>
-      <a href="getting-started.html">Start</a>
-      <a href="../index.html#list">Email</a>
+      <a href="/docs">Docs</a>
+      <a href="/docs/getting-started">Start</a>
+      <a href="/#list">Email</a>
       <button type="button" class="theme" data-theme-toggle>Light</button>
     </nav>
   </header>
   <div class="doc-shell">
     <nav class="side" aria-label="Documentation">
-      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
-<div><h2>Work with data</h2><a href="documents.html" class="here">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
-<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
-<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
-<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="/docs/documents" class="here">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
@@ -69,7 +69,7 @@ db.orders.countDocuments({ qty: { $gte: 2 } })</pre>
 <p>A projection includes the fields you name. <code>_id</code> stays unless you set it to <code>0</code>. Sort, skip, and limit page through a result. The reply is a cursor: <code>firstBatch</code> holds the first documents, and the client asks for the rest.</p>
 <p><code>explain</code> tells you how the read ran. <code>IDHACK</code> is a lookup by <code>_id</code> alone. <code>IXSCAN</code> is a secondary index. <code>COLLSCAN</code> walks the pages.</p>
 <pre>db.orders.find({ sku: "kettle" }).explain()</pre>
-<p>Predicates, pipelines, and update operators are on <a href="queries.html">Find and aggregate</a>.</p>
+<p>Predicates, pipelines, and update operators are on <a href="/docs/queries">Find and aggregate</a>.</p>
 
 <h2 id="update">Update</h2>
 <p>A replacement overwrites the document and keeps <code>_id</code>.</p>
@@ -92,7 +92,7 @@ db.dropDatabase()</pre>
 
 <h2 id="create">Create a collection on purpose</h2>
 <pre>db.runCommand({ create: "orders" })</pre>
-<p>Pass <code>autoincrement</code> here when a field should fill itself. That is the whole subject of <a href="counters.html">Autoincrement</a>.</p>
+<p>Pass <code>autoincrement</code> here when a field should fill itself. That is the whole subject of <a href="/docs/counters">Autoincrement</a>.</p>
 <pre>db.runCommand({ create: "orders", autoincrement: "id" })</pre>
 
 <h2 id="validate">Require a field</h2>
@@ -113,17 +113,17 @@ db.runCommand({ listCollections: 1 })
 db.adminCommand({ listDatabases: 1 })</pre>
 <p><code>collStats</code> reports the serialized size and the average document size. <code>dbStats</code> sums the partitions. <code>listCollections</code> includes views, with <code>type: "view"</code>.</p>
 
-      <nav class="pager"><a href="concepts.html"><span>Previous</span>How data is stored</a><a class="next" href="queries.html"><span>Next</span>Find and aggregate</a></nav>
+      <nav class="pager"><a href="/docs/concepts"><span>Previous</span>How data is stored</a><a class="next" href="/docs/queries"><span>Next</span>Find and aggregate</a></nav>
     </article>
     <nav class="onpage"><h2>On this page</h2><a href="#insert">Insert</a><a href="#read">Read</a><a href="#update">Update</a><a href="#delete">Delete and drop</a><a href="#create">Create a collection on purpose</a><a href="#validate">Require a field</a><a href="#stats">Sizes</a></nav>
   </div>
   <footer>
     <span>KOVA</span>
     <nav>
-      <a href="../index.html">Home</a>
-      <a href="getting-started.html">Getting started</a>
+      <a href="/">Home</a>
+      <a href="/docs/getting-started">Getting started</a>
     </nav>
   </footer>
-  <script src="../js/theme.js"></script>
+  <script src="/js/theme.js"></script>
 </body>
 </html>

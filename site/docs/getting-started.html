@@ -11,7 +11,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="../css/site.css">
+  <link rel="stylesheet" href="/css/site.css">
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -25,21 +25,21 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     </defs>
   </svg>
   <header class="bar">
-    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <a class="brand" href="/"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
     <nav>
-      <a href="index.html">Docs</a>
-      <a href="getting-started.html">Start</a>
-      <a href="../index.html#list">Email</a>
+      <a href="/docs">Docs</a>
+      <a href="/docs/getting-started">Start</a>
+      <a href="/#list">Email</a>
       <button type="button" class="theme" data-theme-toggle>Light</button>
     </nav>
   </header>
   <div class="doc-shell">
     <nav class="side" aria-label="Documentation">
-      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html" class="here">Getting started</a><a href="concepts.html">How data is stored</a></div>
-<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
-<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
-<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
-<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started" class="here">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
@@ -100,27 +100,27 @@ db.emp.find({ job: "CLERK" }, { ename: 1, sal: 1, _id: 0 })
 db.runCommand({
   sql: "SELECT ename, job, sal FROM emp WHERE sal > 2000"
 })</pre>
-<p><code>well_paid</code> is the employees with <code>sal</code> above 2000. <code>emp_search</code> is every employee, with a text index on disk. Both are covered on the <a href="views.html">Views</a> and <a href="search.html">Text search</a> pages.</p>
+<p><code>well_paid</code> is the employees with <code>sal</code> above 2000. <code>emp_search</code> is every employee, with a text index on disk. Both are covered on the <a href="/docs/views">Views</a> and <a href="/docs/search">Text search</a> pages.</p>
 
 <h2 id="next">What to open next</h2>
 <div class="cards">
-  <a href="concepts.html"><strong>How data is stored</strong><span>Pages, the log, and why a collection lives on one worker.</span></a>
-  <a href="documents.html"><strong>Documents</strong><span>The write commands, field updates, and validators.</span></a>
-  <a href="configuration.html"><strong>Configuration</strong><span>Every key in <code>kova.toml</code> and the environment variables.</span></a>
-  <a href="security.html"><strong>Security</strong><span>Off until you enable it. Then both a user and a password.</span></a>
+  <a href="/docs/concepts"><strong>How data is stored</strong><span>Pages, the log, and why a collection lives on one worker.</span></a>
+  <a href="/docs/documents"><strong>Documents</strong><span>The write commands, field updates, and validators.</span></a>
+  <a href="/docs/configuration"><strong>Configuration</strong><span>Every key in <code>kova.toml</code> and the environment variables.</span></a>
+  <a href="/docs/security"><strong>Security</strong><span>Off until you enable it. Then both a user and a password.</span></a>
 </div>
 
-      <nav class="pager"><a href="index.html"><span>Previous</span>Welcome</a><a class="next" href="concepts.html"><span>Next</span>How data is stored</a></nav>
+      <nav class="pager"><a href="/docs"><span>Previous</span>Welcome</a><a class="next" href="/docs/concepts"><span>Next</span>How data is stored</a></nav>
     </article>
     <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#next">What to open next</a></nav>
   </div>
   <footer>
     <span>KOVA</span>
     <nav>
-      <a href="../index.html">Home</a>
-      <a href="getting-started.html">Getting started</a>
+      <a href="/">Home</a>
+      <a href="/docs/getting-started">Getting started</a>
     </nav>
   </footer>
-  <script src="../js/theme.js"></script>
+  <script src="/js/theme.js"></script>
 </body>
 </html>

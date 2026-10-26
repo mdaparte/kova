@@ -11,7 +11,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="../css/site.css">
+  <link rel="stylesheet" href="/css/site.css">
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -25,21 +25,21 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     </defs>
   </svg>
   <header class="bar">
-    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <a class="brand" href="/"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
     <nav>
-      <a href="index.html">Docs</a>
-      <a href="getting-started.html">Start</a>
-      <a href="../index.html#list">Email</a>
+      <a href="/docs">Docs</a>
+      <a href="/docs/getting-started">Start</a>
+      <a href="/#list">Email</a>
       <button type="button" class="theme" data-theme-toggle>Light</button>
     </nav>
   </header>
   <div class="doc-shell">
     <nav class="side" aria-label="Documentation">
-      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
-<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
-<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
-<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html" class="here">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
-<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup" class="here">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
@@ -77,22 +77,22 @@ kovadump restore --yes --table orders --table customers --db db db.kdmp</pre>
     <tr><td><code>mongodump</code> directory or archive</td><td>A directory is <code>&lt;db&gt;/&lt;collection&gt;.bson</code> plus an optional metadata file. The dump root uses the subdirectory named by <code>--db</code>, or the only database subdirectory. An archive starts with magic <code>0x8199e26d</code>. <code>timeseries</code> is refused. Names starting with <code>system.</code> are skipped.</td></tr>
   </tbody>
 </table>
-<p><code>setval</code> with the third argument true stores that number as <code>last</code>. False stores one below it, so the next insert uses the number in the call. A dump with neither <code>setval</code> nor a counter row sets <code>last</code> to the highest value already stored. The integers in the file stay in the field. See <a href="counters.html">Autoincrement</a>.</p>
+<p><code>setval</code> with the third argument true stores that number as <code>last</code>. False stores one below it, so the next insert uses the number in the call. A dump with neither <code>setval</code> nor a counter row sets <code>last</code> to the highest value already stored. The integers in the file stay in the field. See <a href="/docs/counters">Autoincrement</a>.</p>
 
 <h2 id="where">Router, shard, or one process</h2>
 <p>Point the dump at the address you want to read. Against a router, the file has the whole database when every shard answers. If a shard is down, the dump fails and no partial file is written. Against one shard, the file has that piece. A shard with no replica is silent while its process is down. The other shards still answer their own finds. Restarting that process on the same data directory brings the piece back.</p>
 
-      <nav class="pager"><a href="status.html"><span>Previous</span>Status</a><a class="next" href="replication.html"><span>Next</span>Replica sets</a></nav>
+      <nav class="pager"><a href="/docs/status"><span>Previous</span>Status</a><a class="next" href="/docs/replication"><span>Next</span>Replica sets</a></nav>
     </article>
     <nav class="onpage"><h2>On this page</h2><a href="#flags">Flags</a><a href="#formats">What restore reads</a><a href="#where">Router, shard, or one process</a></nav>
   </div>
   <footer>
     <span>KOVA</span>
     <nav>
-      <a href="../index.html">Home</a>
-      <a href="getting-started.html">Getting started</a>
+      <a href="/">Home</a>
+      <a href="/docs/getting-started">Getting started</a>
     </nav>
   </footer>
-  <script src="../js/theme.js"></script>
+  <script src="/js/theme.js"></script>
 </body>
 </html>
