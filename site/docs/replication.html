@@ -11,7 +11,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="../css/site.css">
+  <link rel="stylesheet" href="/css/site.css">
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -25,21 +25,21 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     </defs>
   </svg>
   <header class="bar">
-    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <a class="brand" href="/"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
     <nav>
-      <a href="index.html">Docs</a>
-      <a href="getting-started.html">Start</a>
-      <a href="../index.html#list">Email</a>
+      <a href="/docs">Docs</a>
+      <a href="/docs/getting-started">Start</a>
+      <a href="/#list">Email</a>
       <button type="button" class="theme" data-theme-toggle>Light</button>
     </nav>
   </header>
   <div class="doc-shell">
     <nav class="side" aria-label="Documentation">
-      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
-<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
-<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
-<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html" class="here">Replica sets</a><a href="sharding.html">Sharding</a></div>
-<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication" class="here">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
@@ -77,23 +77,23 @@ members = [
 
 <h2 id="oplog">The oplog and a follower that fell behind</h2>
 <p><code>find</code> on <code>local.oplog.rs</code> returns entries after <code>ts</code> (<code>$gt</code> or <code>$gte</code>). <code>ts</code> is the log index. Inserts without <code>_id</code> receive one before the command is logged, so every replica stores the same id.</p>
-<p>A committed auto-commit command is applied on the leader and on every follower. A transaction's begin and its staged statements stay on the primary. Commit ships one entry. Abort ships nothing. Details are on <a href="transactions.html">Transactions</a>.</p>
+<p>A committed auto-commit command is applied on the leader and on every follower. A transaction's begin and its staged statements stay on the primary. Commit ships one entry. Abort ships nothing. Details are on <a href="/docs/transactions">Transactions</a>.</p>
 <p>After 64 log entries the primary builds a snapshot of the page files. A follower whose log no longer overlaps installs that snapshot and applies only the later entries. The snapshot is the pages, the catalog, and the view routes, at one oplog index. The write-ahead log is not in it. An arbiter stores the oplog and does not install document pages. With no <code>[replication]</code> section the process does not build or ship a snapshot.</p>
 
 <h2 id="with-shards">With shards</h2>
-<p>A replica set copies one notebook. A shard splits the notebook. The durable shape is several shards, and each shard is its own replica set: a primary and copies of that piece only. One process is the router, or a member of a set. It is not both. The router configuration is on <a href="sharding.html">Sharding</a>.</p>
+<p>A replica set copies one notebook. A shard splits the notebook. The durable shape is several shards, and each shard is its own replica set: a primary and copies of that piece only. One process is the router, or a member of a set. It is not both. The router configuration is on <a href="/docs/sharding">Sharding</a>.</p>
 
-      <nav class="pager"><a href="backup.html"><span>Previous</span>Backup and restore</a><a class="next" href="sharding.html"><span>Next</span>Sharding</a></nav>
+      <nav class="pager"><a href="/docs/backup"><span>Previous</span>Backup and restore</a><a class="next" href="/docs/sharding"><span>Next</span>Sharding</a></nav>
     </article>
     <nav class="onpage"><h2>On this page</h2><a href="#members">Three members on one machine</a><a href="#hello">What hello tells the driver</a><a href="#oplog">The oplog and a follower that fell behind</a><a href="#with-shards">With shards</a></nav>
   </div>
   <footer>
     <span>KOVA</span>
     <nav>
-      <a href="../index.html">Home</a>
-      <a href="getting-started.html">Getting started</a>
+      <a href="/">Home</a>
+      <a href="/docs/getting-started">Getting started</a>
     </nav>
   </footer>
-  <script src="../js/theme.js"></script>
+  <script src="/js/theme.js"></script>
 </body>
 </html>

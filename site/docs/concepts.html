@@ -11,7 +11,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="../css/site.css">
+  <link rel="stylesheet" href="/css/site.css">
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -25,21 +25,21 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     </defs>
   </svg>
   <header class="bar">
-    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <a class="brand" href="/"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
     <nav>
-      <a href="index.html">Docs</a>
-      <a href="getting-started.html">Start</a>
-      <a href="../index.html#list">Email</a>
+      <a href="/docs">Docs</a>
+      <a href="/docs/getting-started">Start</a>
+      <a href="/#list">Email</a>
       <button type="button" class="theme" data-theme-toggle>Light</button>
     </nav>
   </header>
   <div class="doc-shell">
     <nav class="side" aria-label="Documentation">
-      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html" class="here">How data is stored</a></div>
-<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
-<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
-<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
-<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts" class="here">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
@@ -64,26 +64,26 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 
 <h2 id="partitions">Four workers inside one process</h2>
 <p>One Kova process runs four partition workers. The collection name is hashed, and every document of that collection on this process lives on one worker. <code>shop.orders</code> is entirely on one partition. <code>shop.customers</code> may land on another. Commands for different collections run in parallel. Commands for one collection are ordered on that worker.</p>
-<p>This split is inside the process. It is not sharding. Sharding sends different documents of the <em>same</em> collection to different processes, by hashing <code>_id</code>. That is a separate configuration, described on <a href="sharding.html">Sharding</a>.</p>
+<p>This split is inside the process. It is not sharding. Sharding sends different documents of the <em>same</em> collection to different processes, by hashing <code>_id</code>. That is a separate configuration, described on <a href="/docs/sharding">Sharding</a>.</p>
 
 <h2 id="indexes-and-text">Indexes sit beside the pages</h2>
 <p>The pages are the database. A B-tree or hash index is rebuilt from those pages when the process starts, and kept up to date on every write. The catalog remembers which indexes exist. A text index (Tantivy) is the same idea for words: updated on write, rebuilt from the pages on startup, unless a view asked for an on-disk text index.</p>
-<p>A point lookup by <code>_id</code> uses the id index. A predicate the planner can cover uses a secondary index. Anything else walks the collection's pages. <code>explain</code> reports which path ran. Details are on <a href="indexes.html">Indexes</a>.</p>
+<p>A point lookup by <code>_id</code> uses the id index. A predicate the planner can cover uses a secondary index. Anything else walks the collection's pages. <code>explain</code> reports which path ran. Details are on <a href="/docs/indexes">Indexes</a>.</p>
 
 <h2 id="catalog">The catalog is queryable</h2>
-<p>Database names, collections, field types, indexes, users, roles, views, and autoincrement counters are rows in <code>admin</code>. You can <code>find</code> them. They are written at checkpoint from the memory the process already keeps, and read back on startup so the process does not scan every document to remember the schema. The <a href="catalog.html">Catalog</a> page lists each collection and the fields on its rows.</p>
+<p>Database names, collections, field types, indexes, users, roles, views, and autoincrement counters are rows in <code>admin</code>. You can <code>find</code> them. They are written at checkpoint from the memory the process already keeps, and read back on startup so the process does not scan every document to remember the schema. The <a href="/docs/catalog">Catalog</a> page lists each collection and the fields on its rows.</p>
 
-      <nav class="pager"><a href="getting-started.html"><span>Previous</span>Getting started</a><a class="next" href="documents.html"><span>Next</span>Documents</a></nav>
+      <nav class="pager"><a href="/docs/getting-started"><span>Previous</span>Getting started</a><a class="next" href="/docs/documents"><span>Next</span>Documents</a></nav>
     </article>
     <nav class="onpage"><h2>On this page</h2><a href="#names">Names</a><a href="#durability">What survives a crash</a><a href="#partitions">Four workers inside one process</a><a href="#indexes-and-text">Indexes sit beside the pages</a><a href="#catalog">The catalog is queryable</a></nav>
   </div>
   <footer>
     <span>KOVA</span>
     <nav>
-      <a href="../index.html">Home</a>
-      <a href="getting-started.html">Getting started</a>
+      <a href="/">Home</a>
+      <a href="/docs/getting-started">Getting started</a>
     </nav>
   </footer>
-  <script src="../js/theme.js"></script>
+  <script src="/js/theme.js"></script>
 </body>
 </html>

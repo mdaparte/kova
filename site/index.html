@@ -11,7 +11,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/site.css">
+  <link rel="stylesheet" href="/css/site.css">
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -33,10 +33,10 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     </defs>
   </svg>
   <header class="bar">
-    <a class="brand" href="index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <a class="brand" href="/"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
     <nav>
-      <a href="docs/index.html">Docs</a>
-      <a href="docs/getting-started.html">Start</a>
+      <a href="/docs">Docs</a>
+      <a href="/docs/getting-started">Start</a>
       <a href="#list">Email</a>
       <button type="button" class="theme" data-theme-toggle>Light</button>
     </nav>
@@ -52,7 +52,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>KOVA</h1>
       <p class="lead">One process stores the documents, answers SQL, and searches text.</p>
       <div class="row">
-        <a class="button" href="docs/getting-started.html">Getting started</a>
+        <a class="button" href="/docs/getting-started">Getting started</a>
         <a class="button quiet" href="#list">Leave your email</a>
       </div>
     </div>
@@ -73,12 +73,12 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       </article>
     </section>
     <section class="cards">
-      <a href="docs/getting-started.html"><strong>Getting started</strong><span>Install the Linux build, start the listener, write a document, read it after a restart.</span></a>
-      <a href="docs/concepts.html"><strong>How data is stored</strong><span>Databases, collections, pages, and the log that makes a write durable.</span></a>
-      <a href="docs/documents.html"><strong>Documents</strong><span>Insert, update, delete, and the commands a driver sends.</span></a>
-      <a href="docs/sql.html"><strong>SQL</strong><span>One SELECT over the same collections, from a shell or from ODBC.</span></a>
-      <a href="docs/backup.html"><strong>Backup</strong><span>kovadump writes a file and reads SQL and MongoDB dumps back in.</span></a>
-      <a href="docs/replication.html"><strong>Copies and shards</strong><span>A replica set copies the data. Shards split it across processes.</span></a>
+      <a href="/docs/getting-started"><strong>Getting started</strong><span>Install the Linux build, start the listener, write a document, read it after a restart.</span></a>
+      <a href="/docs/concepts"><strong>How data is stored</strong><span>Databases, collections, pages, and the log that makes a write durable.</span></a>
+      <a href="/docs/documents"><strong>Documents</strong><span>Insert, update, delete, and the commands a driver sends.</span></a>
+      <a href="/docs/sql"><strong>SQL</strong><span>One SELECT over the same collections, from a shell or from ODBC.</span></a>
+      <a href="/docs/backup"><strong>Backup</strong><span>kovadump writes a file and reads SQL and MongoDB dumps back in.</span></a>
+      <a href="/docs/replication"><strong>Copies and shards</strong><span>A replica set copies the data. Shards split it across processes.</span></a>
     </section>
     <section class="signup" id="list">
       <div>
@@ -96,9 +96,9 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   </main>
   <footer>
     <span>KOVA</span>
-    <a href="docs/index.html">Docs</a>
+    <a href="/docs">Docs</a>
   </footer>
-  <script src="js/signup.js"></script>
-  <script src="js/theme.js"></script>
+  <script src="/js/signup.js"></script>
+  <script src="/js/theme.js"></script>
 </body>
 </html>
