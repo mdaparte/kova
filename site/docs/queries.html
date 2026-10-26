@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Find and aggregate — KOVA</title>
+  <meta name="description" content="Filters, projections, and a pipeline of stages over the pages of a collection.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html" class="here">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Find and aggregate</h1>
+      <p class="lede">Filters, projections, and a pipeline of stages over the pages of a collection.</p>
+      
+<p><code>find</code> and the aggregation pipeline share one matcher. A leading <code>$match</code> runs while the pages are scanned. The pipeline is the BSON array a MongoDB shell already sends. There is no second syntax.</p>
+
+<h2 id="predicates">Predicates</h2>
+<p>Equality is <code>{ job: "CLERK" }</code>. These operators work on <code>find</code> and inside <code>$match</code>. Numbers compare across int and double. Dates compare by instant.</p>
+<table class="grid">
+  <thead><tr><th>Operator</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>$eq</code> <code>$ne</code></td><td>Equal, or not equal.</td></tr>
+    <tr><td><code>$gt</code> <code>$gte</code> <code>$lt</code> <code>$lte</code></td><td>Ordered comparison.</td></tr>
+    <tr><td><code>$in</code> <code>$nin</code></td><td>Value is in a list, or outside it.</td></tr>
+    <tr><td><code>$exists</code></td><td>The field is present, or absent.</td></tr>
+    <tr><td><code>$and</code> <code>$or</code> <code>$nor</code></td><td>Combine predicates.</td></tr>
+    <tr><td><code>$not</code></td><td>Negate one operator document.</td></tr>
+    <tr><td><code>$regex</code></td><td>Match a string field.</td></tr>
+    <tr><td><code>$type</code></td><td>Match the BSON type of a field.</td></tr>
+    <tr><td><code>$elemMatch</code></td><td>One array element satisfies every predicate in the subdocument.</td></tr>
+  </tbody>
+</table>
+<pre>db.emp.find({
+  sal: { $gte: 1000, $lt: 2000 },
+  job: { $in: ["CLERK", "SALESMAN"] }
+})</pre>
+<pre>db.emp.find({ ename: { $regex: "^S" } })</pre>
+
+<h2 id="shape">Shape the rows</h2>
+<p>Projection, sort, skip, and limit work on <code>find</code> and as pipeline stages. Include fields, or exclude them. Mixing include and exclude in one projection is limited the way MongoDB limits it: <code>_id</code> is the field you may turn off while including others.</p>
+<pre>db.emp.aggregate([
+  { $match: { deptno: 20 } },
+  { $project: { ename: 1, sal: 1, _id: 0 } },
+  { $sort: { sal: -1 } },
+  { $skip: 1 },
+  { $limit: 3 }
+])</pre>
+<p><code>$addFields</code> keeps the document and adds fields. <code>$replaceRoot</code> makes a subdocument the new root. <code>$unwind</code> emits one document per array element. <code>$count</code> emits one document with the number of rows that reached that stage.</p>
+
+<h2 id="group">Group</h2>
+<p><code>$group</code> buckets documents by <code>_id</code>. Accumulators:</p>
+<table class="grid">
+  <thead><tr><th>Accumulator</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td><code>$sum</code> <code>$avg</code></td><td>Total, or mean, of a numeric expression.</td></tr>
+    <tr><td><code>$min</code> <code>$max</code></td><td>Smallest or largest value.</td></tr>
+    <tr><td><code>$count</code></td><td>How many documents landed in the bucket. Write <code>{ $sum: 1 }</code>.</td></tr>
+    <tr><td><code>$first</code> <code>$last</code></td><td>The first or last value seen in the bucket.</td></tr>
+    <tr><td><code>$push</code> <code>$addToSet</code></td><td>An array of values. <code>$addToSet</code> keeps each value once.</td></tr>
+  </tbody>
+</table>
+<pre>db.emp.aggregate([
+  { $group: {
+      _id: "$job",
+      headcount: { $sum: 1 },
+      payroll: { $sum: "$sal" }
+  }},
+  { $sort: { payroll: -1 } }
+])</pre>
+<p>The same question in SQL is <code>SELECT job, COUNT(*), SUM(sal) FROM emp GROUP BY job</code>. The rows match. SQL is one statement. The pipeline is how you add a lookup or write the result out.</p>
+
+<h2 id="lookup">Look up another collection</h2>
+<p><code>$lookup</code> reads a second collection through the buffer pool. Equality uses <code>localField</code> and <code>foreignField</code>. The two collections are not copied into one big list first.</p>
+<pre>db.emp.aggregate([
+  { $match: { ename: "SMITH" } },
+  { $lookup: {
+      from: "dept",
+      localField: "deptno",
+      foreignField: "deptno",
+      as: "department"
+  }}
+])</pre>
+<p><code>let</code> plus a nested <code>pipeline</code> runs that pipeline for each local document. A <code>$match</code> inside it accepts <code>$expr</code>.</p>
+<p>On a shard router, a stage other than <code>$match</code>, <code>$project</code>, or <code>$unwind</code> is refused. A <code>$group</code> inside each shard is not the group of the whole collection. Run the group against one shard, or against a process that holds the collection.</p>
+
+<h2 id="out">Write the result</h2>
+<p><code>$out</code> inserts the pipeline result into a collection. That write goes through the log, like any other insert.</p>
+<pre>db.emp.aggregate([
+  { $match: { sal: { $gt: 2000 } } },
+  { $project: { ename: 1, sal: 1 } },
+  { $out: "high_earners" }
+])</pre>
+<p>Inside a transaction, <code>$out</code> is refused. The transaction page explains what a transaction can see.</p>
+
+<h2 id="empty">An empty pipeline</h2>
+<p><code>aggregate</code> with an empty <code>pipeline</code> returns the collection. An unknown stage or operator fails the command and names what it rejected.</p>
+
+      <nav class="pager"><a href="documents.html"><span>Previous</span>Documents</a><a class="next" href="indexes.html"><span>Next</span>Indexes</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#predicates">Predicates</a><a href="#shape">Shape the rows</a><a href="#group">Group</a><a href="#lookup">Look up another collection</a><a href="#out">Write the result</a><a href="#empty">An empty pipeline</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

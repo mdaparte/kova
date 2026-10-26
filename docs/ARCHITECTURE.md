@@ -324,7 +324,7 @@ about and ignored.
 | 24 | Physical catalog: database `admin` holds databases, collections, fields, and indexes. Startup reads those rows |
 | 25 | Autoincrement: `admin.counters.last` is the last value handed out. `create` declares the field. A hand update of the row changes the next insert |
 | 26 | Feed: a committed write can publish `before` and `after` to Apache Iggy. The listener applies its own condition. Off unless `[feed]` is enabled |
-| 27 | User guide: a README and a guide for the running server. The engineering documents stay as they are |
+| 27 | User guide: `site/docs/` for the running server, from Getting started through backup, ODBC, replica sets, and sharding. The home page asks for an email. The engineering documents stay as they are |
 
 ---
 

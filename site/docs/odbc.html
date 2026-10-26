@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ODBC — KOVA</title>
+  <meta name="description" content="On Linux, libkova.so is a unixODBC driver. It sends SQL to a Kova server and returns the rows.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html" class="here">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>ODBC</h1>
+      <p class="lede">On Linux, libkova.so is a unixODBC driver. It sends SQL to a Kova server and returns the rows.</p>
+      
+<p>The install puts the driver at <code>~/.local/lib/libkova.so</code>, next to the directory that holds <code>kova</code>. It speaks unixODBC. A client loads that library, connects, and runs SQL. The server runs the same <code>{ sql }</code> command a shell would send.</p>
+<div class="note"><p>The driver is Linux. A client maps <code>libkova.so</code> for the life of its process, so a rebuilt library loads after that process quits and opens again.</p></div>
+
+<h2 id="register">Register the driver</h2>
+<p>Install unixODBC (<code>unixodbc</code> on Debian and Ubuntu). Point the driver manager at the library. In <code>~/.odbcinst.ini</code>:</p>
+<pre>[Kova]
+Driver=/home/you/.local/lib/libkova.so</pre>
+<p>The installer writes that section for you, with your home directory in the path. In <code>~/.odbc.ini</code>, a data source names the host, the port, and the database:</p>
+<pre>[Kova]
+Driver=Kova
+SERVER=127.0.0.1
+PORT=27018
+DATABASE=db</pre>
+<p>The connection string is the same keys in one line:</p>
+<pre>DRIVER=Kova;SERVER=127.0.0.1;PORT=27018;DATABASE=db</pre>
+<table class="grid">
+  <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>SERVER</code></td><td>Host of the Kova listener. A machine on the network is fine.</td></tr>
+    <tr><td><code>PORT</code></td><td>Defaults to 27018.</td></tr>
+    <tr><td><code>DATABASE</code></td><td>The <code>$db</code> of every SQL command on this connection.</td></tr>
+    <tr><td><code>UID</code> and <code>PWD</code></td><td>Sent together as <code>authenticate</code> before any SQL. Leave both empty while security is off. Set both when it is on. One of the two is refused. A wrong password is refused with the server's authentication error.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="catalog">What a client can list</h2>
+<p>A client asks the driver for tables and columns. Tables are the collections and views of <code>DATABASE</code>. The type column is <code>TABLE</code> or <code>VIEW</code>. Columns come from <code>admin.fields</code>. A collection the catalog has not typed yet is sampled from its documents. <code>COLUMN_NAME</code> is the fourth column of that result and <code>DATA_TYPE</code> is the fifth, which is the order ODBC clients read.</p>
+<p>Quoted identifiers are case-sensitive. <code>emp</code> and <code>EMP</code> are different names, matching the server.</p>
+<p>Parameter markers (<code>?</code>) are not bound. Write the values into the SQL text. Primary-key and statistics calls wait until a client error names them. Until then, list tables, list columns, and run the statement.</p>
+
+<h2 id="query">Run a statement</h2>
+<p>With the server up and the sample loaded, a client connected to DSN <code>Kova</code> can run:</p>
+<pre>SELECT ename, job, sal FROM emp WHERE sal > 2000
+SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'</pre>
+<p>The rows match <code>db.runCommand({ sql })</code> on database <code>db</code>.</p>
+
+      <nav class="pager"><a href="sql.html"><span>Previous</span>SQL</a><a class="next" href="configuration.html"><span>Next</span>Configuration</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#register">Register the driver</a><a href="#catalog">What a client can list</a><a href="#query">Run a statement</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

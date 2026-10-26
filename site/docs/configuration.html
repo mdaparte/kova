@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Configuration — KOVA</title>
+  <meta name="description" content="kova.toml sets the port, the data directory, and the optional security, replica, and shard sections.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html" class="here">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Configuration</h1>
+      <p class="lede">kova.toml sets the port, the data directory, and the optional security, replica, and shard sections.</p>
+      
+<p>The server reads <code>kova.toml</code> from the working directory. Point <code>KOVA_CONFIG</code> at another file to load a different profile. Every key can also be set with an environment variable. The environment wins over the file, and the file wins over the built-in default.</p>
+<p>Sections you leave commented stay off. A default file is one process, security off, no replicas, no shards.</p>
+
+<h2 id="listener">Listener</h2>
+<table class="grid">
+  <thead><tr><th>Key</th><th>Default</th><th>Environment</th></tr></thead>
+  <tbody>
+    <tr><td><code>port</code></td><td>27018</td><td><code>KOVA_PORT</code></td></tr>
+    <tr><td><code>max_connections</code></td><td>128</td><td><code>KOVA_MAX_CONNECTIONS</code></td></tr>
+    <tr><td><code>max_connection_idle_ms</code></td><td>0, idle close off</td><td><code>KOVA_MAX_CONNECTION_IDLE_MS</code></td></tr>
+    <tr><td><code>log_level</code></td><td><code>info</code></td><td><code>KOVA_LOG_LEVEL</code> (<code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>)</td></tr>
+    <tr><td><code>warn_on_non_mongo_queries</code></td><td>true</td><td><code>KOVA_WARN_NON_MONGO_QUERIES</code></td></tr>
+  </tbody>
+</table>
+<p>Past <code>max_connections</code> the listener accepts the socket, replies with an error, and closes it. That socket is not counted in <code>connectionsActive</code>. <code>KOVA_LOG_LEVEL=debug kova</code> raises the log level for that run.</p>
+<p>The warning flag logs a WARN when a query uses a Kova extension such as <code>$text.$boost</code> or <code>$text.$decay</code>, or an operator the engine does not implement. Set it to false to silence those lines. The query still runs when the extension is supported.</p>
+
+<h2 id="search">Search</h2>
+<pre>[search]
+analyzer = "default"
+stopwords = []</pre>
+<p><code>default</code> splits on punctuation and whitespace, then lowercases. <code>en_stem</code> adds English stemming. <code>stopwords</code> is an extra list removed at index time and at query time. The analyzer is fixed when the text index is built.</p>
+
+<h2 id="storage">Storage</h2>
+<table class="grid">
+  <thead><tr><th>Key</th><th>Default</th><th>What it changes</th></tr></thead>
+  <tbody>
+    <tr><td><code>data_dir</code></td><td><code>data</code></td><td>Root for pages, the log, and replica state. Environment <code>KOVA_DATA_DIR</code>.</td></tr>
+    <tr><td><code>page_size</code></td><td>16384</td><td>Page envelope in bytes. The payload inside is zstd-compressed, so the file is often shorter. <code>KOVA_PAGE_SIZE</code>.</td></tr>
+    <tr><td><code>buffer_pool_pages</code></td><td>4096</td><td>Pages kept in RAM per partition. <code>KOVA_BUFFER_POOL_PAGES</code>.</td></tr>
+    <tr><td><code>wal_fsync</code></td><td>true</td><td>Flush every log append before the page changes. <code>KOVA_WAL_FSYNC</code>.</td></tr>
+    <tr><td><code>wal_segment_bytes</code></td><td>16777216</td><td>Roll the log to a new file around this size.</td></tr>
+    <tr><td><code>checkpoint_every</code></td><td>128</td><td>Snapshot after this many mutations. Shutdown also checkpoints. 0 disables the periodic snapshot.</td></tr>
+  </tbody>
+</table>
+<p>Give each process its own <code>data_dir</code> when you run more than one. Sharing a directory between two processes corrupts the pages.</p>
+
+<h2 id="optional">Sections that start off</h2>
+<p><code>[security]</code>, <code>[replication]</code>, and <code>[sharding]</code> are commented in the shipped file. Uncomment a section only when you want that behavior. The pages for them have the keys and a worked layout:</p>
+<ul>
+  <li><a href="security.html">Security</a></li>
+  <li><a href="replication.html">Replica sets</a></li>
+  <li><a href="sharding.html">Sharding</a></li>
+</ul>
+<p><code>[feed]</code> is reserved for a later release. Leaving it out changes nothing. The intended keys are on <a href="feed.html">Feed</a>.</p>
+
+      <nav class="pager"><a href="odbc.html"><span>Previous</span>ODBC</a><a class="next" href="security.html"><span>Next</span>Security</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#listener">Listener</a><a href="#search">Search</a><a href="#storage">Storage</a><a href="#optional">Sections that start off</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

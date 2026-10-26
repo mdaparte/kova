@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KOVA</title>
+  <meta name="description" content="Kova stores documents, answers SQL, and searches text. One process, one port, the MongoDB wire.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html" class="here">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Welcome</h1>
+      <p class="lede">Kova stores documents, answers SQL, and searches text. One process, one port, the MongoDB wire.</p>
+      
+<p>You talk to Kova with a MongoDB driver. The listener speaks the MongoDB wire protocol on port <code>27018</code>. Insert a document, find it, run a SQL string over the same rows, or search the text. The files on disk are the database. Restart the process and the documents are still there.</p>
+<div class="cards">
+  <a href="getting-started.html"><strong>Getting started</strong><span>Build the binary, start the listener, write the first document.</span></a>
+  <a href="concepts.html"><strong>How data is stored</strong><span>Databases, collections, pages, and what a restart keeps.</span></a>
+  <a href="documents.html"><strong>Documents</strong><span>Insert, update, delete, and the commands a driver sends.</span></a>
+  <a href="sql.html"><strong>SQL</strong><span>One SELECT against a collection, on the same server.</span></a>
+</div>
+
+<h2 id="what-you-can-do">What you can do today</h2>
+<table class="grid">
+  <thead><tr><th>You want to</th><th>You use</th></tr></thead>
+  <tbody>
+    <tr><td>Store and read documents</td><td>A MongoDB driver. <a href="documents.html">Documents</a>.</td></tr>
+    <tr><td>Filter, group, and join collections</td><td><code>find</code> and <code>aggregate</code>. <a href="queries.html">Find and aggregate</a>.</td></tr>
+    <tr><td>Ask a SQL question</td><td><code>db.runCommand({ sql })</code>. <a href="sql.html">SQL</a>.</td></tr>
+    <tr><td>Search words, including a typo</td><td><code>$text</code>, or <code>WHERE TEXT</code>. <a href="search.html">Text search</a>.</td></tr>
+    <tr><td>Speed up a field lookup</td><td><code>createIndex</code>. <a href="indexes.html">Indexes</a>.</td></tr>
+    <tr><td>Name a saved pipeline</td><td>A view. <a href="views.html">Views</a>.</td></tr>
+    <tr><td>Number a field on insert</td><td><code>autoincrement</code>. <a href="counters.html">Autoincrement</a>.</td></tr>
+    <tr><td>Commit several writes together</td><td><code>beginTransaction</code>. <a href="transactions.html">Transactions</a>.</td></tr>
+    <tr><td>Require a user and a password</td><td><code>[security]</code>. <a href="security.html">Security</a>.</td></tr>
+    <tr><td>Copy the database to a file</td><td><code>kovadump</code>. <a href="backup.html">Backup and restore</a>.</td></tr>
+    <tr><td>Open the data from a SQL client</td><td>The ODBC driver. <a href="odbc.html">ODBC</a>.</td></tr>
+    <tr><td>Keep a copy if a machine dies</td><td>A replica set. <a href="replication.html">Replica sets</a>.</td></tr>
+    <tr><td>Split one collection across machines</td><td>Shards and a router. <a href="sharding.html">Sharding</a>.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="how-a-write-lands">How a write lands</h2>
+<p>A client sends a command. Kova appends that change to a log on disk, then updates the page that holds the document. The reply means the log has the change. A checkpoint later folds those pages into the data directory and shortens the log. If the process stops in between, startup replays the log and the document comes back.</p>
+<p>RAM holds a cache of pages, called the buffer pool. A find that misses the cache reads the page from disk. The collection does not have to fit in memory.</p>
+
+<h2 id="one-process">One process, until you ask for more</h2>
+<p>The default <code>kova.toml</code> is one writable process. It stores every document you insert. Security is off, so a client connects and sends commands. Turn security on when you want a user and a password. Add a replica set when you want copies of the same data. Add shards when one machine cannot hold the collection or the writes.</p>
+<div class="note later"><p>A feed of committed writes, published to <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, is planned. It is off. The shape of the record is on the <a href="feed.html">Feed</a> page. Today a program reads with <code>find</code>, or tails <code>local.oplog.rs</code> on a replica set.</p></div>
+
+<h2 id="where-the-files-are">Where the files are</h2>
+<table class="grid">
+  <thead><tr><th>Path</th><th>What it is</th></tr></thead>
+  <tbody>
+    <tr><td><code>kova.toml</code></td><td>Port, data directory, security, replication, sharding.</td></tr>
+    <tr><td><code>data/</code></td><td>Pages, the write-ahead log, and replica logs for this process.</td></tr>
+    <tr><td><code>~/.local/bin/kova</code></td><td>The server, after the install.</td></tr>
+    <tr><td><code>~/.local/bin/kovadump</code></td><td>Backup and restore. It talks to a server that is already running.</td></tr>
+    <tr><td><code>~/.local/lib/libkova.so</code></td><td>The ODBC driver on Linux.</td></tr>
+  </tbody>
+</table>
+<p>The engineering notes stay in <code>docs/</code> inside the repository. This site is the guide for people running the server.</p>
+
+      <nav class="pager"><a class="next" href="getting-started.html"><span>Next</span>Getting started</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#what-you-can-do">What you can do today</a><a href="#how-a-write-lands">How a write lands</a><a href="#one-process">One process, until you ask for more</a><a href="#where-the-files-are">Where the files are</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

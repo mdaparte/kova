@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Text search — KOVA</title>
+  <meta name="description" content="Find documents by the words in them. Typos, field weights, and recency live on the same query.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html" class="here">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Text search</h1>
+      <p class="lede">Find documents by the words in them. Typos, field weights, and recency live on the same query.</p>
+      
+<p>Every string field is tokenized when the document is written. The index updates on insert, update, delete, and drop. On startup it is rebuilt by scanning pages, unless you created a view with an on-disk index. The BSON stays in the pages. The text index stores tokens.</p>
+<p>The analyzer is fixed in <code>kova.toml</code> under <code>[search]</code>. <code>default</code> splits on punctuation and whitespace, then lowercases. <code>en_stem</code> also stems English words, which finds <code>clerk</code> and <code>clerks</code> together. <code>stopwords</code> lists extra words to drop at index time and at query time. Changing the analyzer later does not rewrite tokens already stored. Create the index with the analyzer you want.</p>
+
+<h2 id="find">Find with $text</h2>
+<p>After the sample is loaded, database <code>db</code> has the view <code>emp_search</code> over every employee, with stemming and an index on disk.</p>
+<pre>db.emp_search.find({
+  $text: { $search: "clerk" }
+})</pre>
+<p>A filter can combine <code>$text</code> with ordinary predicates. The text part is scored. The rest of the filter still has to match.</p>
+<pre>db.emp.find({
+  deptno: 20,
+  $text: { $search: "analyst" }
+})</pre>
+<p>Wildcards use <code>*</code> for a run of characters and <code>?</code> for one character: <code>cl*</code>, <code>cl?rk</code>.</p>
+
+<h2 id="fuzzy">A misspelling</h2>
+<p><code>$fuzzy</code> is a fraction of each word's length, from 0 to 1. <code>0.3</code> lets a short word miss a character.</p>
+<pre>db.emp_search.find({
+  $text: { $search: "clrek", $fuzzy: 0.3 }
+})</pre>
+<p>The same search in SQL, which is what a command-line SQL client prints:</p>
+<pre>db.runCommand({
+  sql: "SELECT ename, job, sal FROM emp_search WHERE TEXT 'clrek' FUZZY 0.3"
+})</pre>
+<p>Without <code>FUZZY</code>, the word has to match a token:</p>
+<pre>SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'</pre>
+
+<h2 id="rank">Weights and recency</h2>
+<p><code>$boost</code> multiplies the score of a field. <code>$decay</code> pulls newer dates forward. Both are Kova extensions. With <code>warn_on_non_mongo_queries</code> left on, the server logs a warning when a query uses them. The query still runs.</p>
+<pre>db.articles.find({
+  $text: {
+    $search: "kiln",
+    $boost: { title: 3, body: 1 },
+    $decay: { field: "published", halfLifeSeconds: 604800 }
+  }
+})</pre>
+<p><code>halfLifeSeconds</code> is the age at which the date contribution drops by half. The field is a BSON date. <code>$analyzer</code> inside a query is ignored: the pipeline was chosen when the index was built.</p>
+
+<h2 id="facets">Facets</h2>
+<p>SQL can turn the same search into buckets. Each row is a facet name, a bucket, and a count.</p>
+<pre>db.runCommand({
+  sql: "SELECT facet, bucket, doc_count FROM emp_search WHERE TEXT 'clerk' FACETS job TERMS, sal RANGES (1500), (1500, 3000), (3000)"
+})</pre>
+<p><code>TERMS</code> groups by the distinct values of a field. <code>RANGES</code> groups a number. <code>(1500)</code> is everything up to 1500. <code>(1500, 3000)</code> is the span between them. <code>(3000)</code> at the end is everything above 3000.</p>
+
+<h2 id="disk">An index that stays on disk</h2>
+<p>The default text index is in memory and rebuilt from pages on startup. A view with <code>kova.inverted: true</code> writes a Tantivy index under <code>data/partition-N/search/&lt;view&gt;/</code>. It survives a restart, and writes to the source collection keep it current. Field types are learned from the documents that pass the pipeline. The first type seen for a field stays. How to create that view is on <a href="views.html">Views</a>.</p>
+
+      <nav class="pager"><a href="indexes.html"><span>Previous</span>Indexes</a><a class="next" href="views.html"><span>Next</span>Views</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#find">Find with $text</a><a href="#fuzzy">A misspelling</a><a href="#rank">Weights and recency</a><a href="#facets">Facets</a><a href="#disk">An index that stays on disk</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

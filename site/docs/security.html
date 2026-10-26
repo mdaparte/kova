@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Security — KOVA</title>
+  <meta name="description" content="Off by default. Turn it on and the first command on a connection is authenticate, with both a user and a password.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html" class="here">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Security</h1>
+      <p class="lede">Off by default. Turn it on and the first command on a connection is authenticate, with both a user and a password.</p>
+      
+<p>With <code>[security]</code> commented, or <code>enabled</code> false, every command is accepted. That is the server the install starts. Turn it on when a connection must prove who it is, and when you want page files and the log encrypted.</p>
+<pre>[security]
+enabled = true
+encryption_key = ""</pre>
+<p><code>KOVA_SECURITY_ENABLED</code> overrides <code>enabled</code>. <code>KOVA_ENCRYPTION_KEY</code> overrides the key. The key is 64 hex characters (32 bytes). Empty leaves the files compressed and readable. Set it and each page file and each log record is AES-256-GCM, with a fresh nonce per write. The buffer pool and your queries still see plaintext. Startup with encrypted files and no key fails. A data directory does not mix encrypted and plaintext pages.</p>
+
+<h2 id="first-user">The first user</h2>
+<p>The catalog starts empty. The first <code>createUser</code> has to be <code>root</code>. After that, a connection authenticates before any other command.</p>
+<pre>db.getSiblingDB("admin").runCommand({
+  createUser: "root",
+  pwd: "secret",
+  roles: ["root"]
+})
+db.getSiblingDB("admin").runCommand({
+  authenticate: 1,
+  user: "root",
+  pwd: "secret"
+})</pre>
+<p>The password is stored as an Argon2id hash. The plaintext is not written to the catalog or the log. <code>authenticate</code> checks the hash and binds the connection to that user. Later commands on the same connection are checked against the user's roles. A disabled user and an unknown user fail the same way. A wrong password fails the same way.</p>
+<p><code>secret</code> for <code>root</code> and <code>ada-secret</code> for <code>ada</code> are sample values. Pick your own before anyone else can reach the port.</p>
+
+<h2 id="roles">Roles</h2>
+<p>Five built-in roles. A custom role is a name plus a subset of the actions below. A custom role cannot name an action outside the list. The command fails and names the rejected action. A built-in role cannot be dropped.</p>
+<table class="grid">
+  <thead><tr><th>Role</th><th>Actions</th></tr></thead>
+  <tbody>
+    <tr><td><code>read</code></td><td><code>find</code> (find, count, aggregate, search, <code>sql</code>)</td></tr>
+    <tr><td><code>readWrite</code></td><td><code>read</code>, plus <code>insert</code>, <code>update</code>, <code>remove</code></td></tr>
+    <tr><td><code>dbAdmin</code></td><td><code>readWrite</code>, plus <code>createCollection</code>, <code>dropCollection</code>, <code>createIndex</code>, <code>dropIndex</code>, <code>viewStatus</code></td></tr>
+    <tr><td><code>userAdmin</code></td><td><code>createUser</code>, <code>grantRole</code></td></tr>
+    <tr><td><code>root</code></td><td>All eleven actions</td></tr>
+  </tbody>
+</table>
+<table class="grid">
+  <thead><tr><th>Action</th><th>Commands</th></tr></thead>
+  <tbody>
+    <tr><td><code>find</code></td><td>find, count, aggregate, search, <code>sql</code></td></tr>
+    <tr><td><code>insert</code></td><td>insert</td></tr>
+    <tr><td><code>update</code></td><td>update</td></tr>
+    <tr><td><code>remove</code></td><td>delete</td></tr>
+    <tr><td><code>createCollection</code></td><td>create</td></tr>
+    <tr><td><code>dropCollection</code></td><td>drop, dropDatabase</td></tr>
+    <tr><td><code>createIndex</code></td><td>createIndexes</td></tr>
+    <tr><td><code>dropIndex</code></td><td>dropIndexes, deleteIndexes</td></tr>
+    <tr><td><code>viewStatus</code></td><td>collStats, dbStats, listCollections, listIndexes, listDatabases, serverStatus</td></tr>
+    <tr><td><code>createUser</code></td><td>createUser, updateUser</td></tr>
+    <tr><td><code>grantRole</code></td><td>createRole, dropRole, grantRolesToUser, revokeRolesFromUser</td></tr>
+  </tbody>
+</table>
+
+<h2 id="more-users">More users</h2>
+<pre>db.runCommand({
+  createUser: "ada",
+  pwd: "ada-secret",
+  roles: ["read"]
+})
+db.runCommand({
+  createRole: "payroll",
+  actions: ["find", "insert", "update"]
+})
+db.runCommand({
+  grantRolesToUser: "ada",
+  roles: ["payroll"]
+})
+db.runCommand({ updateUser: "ada", enabled: false })
+db.runCommand({
+  revokeRolesFromUser: "ada",
+  roles: ["payroll"]
+})
+db.runCommand({ dropRole: "payroll" })</pre>
+<p><code>updateUser</code> enables or disables the account. Disabling closes that user's open connections. <code>root</code> can be granted. The last <code>root</code> cannot be revoked or disabled.</p>
+<p>ODBC sends <code>UID</code> and <code>PWD</code> as this same <code>authenticate</code> before SQL. Both empty stays anonymous, which matches security left off. Both set logs in. One of the two is refused.</p>
+
+      <nav class="pager"><a href="configuration.html"><span>Previous</span>Configuration</a><a class="next" href="status.html"><span>Next</span>Status</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#first-user">The first user</a><a href="#roles">Roles</a><a href="#more-users">More users</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

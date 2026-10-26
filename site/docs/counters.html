@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Autoincrement — KOVA</title>
+  <meta name="description" content="A field that fills itself. The last number handed out is a row you can read and edit.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html" class="here">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Autoincrement</h1>
+      <p class="lede">A field that fills itself. The last number handed out is a row you can read and edit.</p>
+      
+<p>The counter belongs to the collection. <code>_id</code> stays an ObjectId. You name the extra field. The next insert that omits it stores the next integer.</p>
+
+<h2 id="create">Declare it</h2>
+<pre>db.getSiblingDB("shop").runCommand({
+  create: "orders",
+  autoincrement: "id"
+})</pre>
+<p><code>autoincrement</code> is one field name, or a list of names. Each name is a single identifier, without a dot.</p>
+<pre>db.runCommand({
+  create: "orders",
+  autoincrement: ["id", "ticket"]
+})</pre>
+<p>Create writes a row in <code>admin.counters</code> and adds a unique index on that field when no index already covers it exactly. The unique index still refuses a duplicate.</p>
+<pre>db.getSiblingDB("admin").counters.find({ collection: "shop.orders" })</pre>
+<pre>{ _id: "shop.orders.id", collection: "shop.orders", field: "id", last: 0 }</pre>
+<p><code>last</code> is the number already handed out. <code>0</code> means nothing has been issued. The <code>_id</code> of the row is <code>database.collection.field</code>.</p>
+
+<h2 id="insert">What an insert does</h2>
+<pre>db.orders.insertOne({ sku: "kettle" })
+db.orders.insertOne({ sku: "mug" })</pre>
+<p>The first document stores <code>id: 1</code> and <code>last</code> becomes 1. The second stores <code>id: 2</code>. The value is an int when it fits in 32 bits, and a 64-bit int after that.</p>
+<p>A value you send is kept. When it is higher than <code>last</code>, <code>last</code> moves up to it.</p>
+<pre>db.orders.insertOne({ sku: "bowl", id: 50 })</pre>
+<p>That document keeps <code>id: 50</code>. The next insert that omits <code>id</code> stores 51. A lower value you send is kept too, and <code>last</code> stays where it was. The unique index rejects a duplicate of a number already stored.</p>
+
+<h2 id="edit">Move the counter by hand</h2>
+<pre>db.getSiblingDB("admin").runCommand({
+  update: "counters",
+  updates: [{
+    q: { _id: "shop.orders.id" },
+    u: { $set: { last: 10 } },
+    multi: false
+  }]
+})</pre>
+<p>The next insert that omits <code>id</code> stores 11. Set <code>last</code> to 500 and the next insert stores 501. The row is ordinary catalog data: a checkpoint, a restart, and a Kova backup keep it.</p>
+
+<h2 id="sql">From a SQL restore</h2>
+<p>A <code>serial</code>, <code>bigserial</code>, <code>smallserial</code>, <code>AUTO_INCREMENT</code>, identity, or <code>DEFAULT nextval</code> column becomes an autoincrement field when you restore that dump. The numbers already in the file stay in the field. <code>SELECT pg_catalog.setval('seq', n, called)</code> sets <code>last</code>:</p>
+<ul>
+  <li>The third argument true: <code>last</code> is <code>n</code>. The next insert stores <code>n + 1</code>.</li>
+  <li>The third argument false: <code>last</code> is one below <code>n</code>. The next insert stores <code>n</code>.</li>
+</ul>
+<p>A dump with neither <code>setval</code> nor a counter row sets <code>last</code> to the highest value already stored. Restore details are on <a href="backup.html">Backup and restore</a>.</p>
+
+<h2 id="shards">Across shards</h2>
+<p>Each process keeps its own <code>admin.counters</code>. <code>create</code> on a router starts every shard at <code>last: 0</code>. An insert advances only the shard that stores the document. Two shards can hand out the same number. The unique index is local to the shard that holds the document. Use autoincrement on one process, or treat the numbers as per-shard sequences. A find of <code>admin.counters</code> through the router keeps one row per <code>_id</code>, so it shows a single <code>last</code> for that name.</p>
+
+      <nav class="pager"><a href="map.html"><span>Previous</span>Map</a><a class="next" href="transactions.html"><span>Next</span>Transactions</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#create">Declare it</a><a href="#insert">What an insert does</a><a href="#edit">Move the counter by hand</a><a href="#sql">From a SQL restore</a><a href="#shards">Across shards</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

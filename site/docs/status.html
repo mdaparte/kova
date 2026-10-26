@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Status — KOVA</title>
+  <meta name="description" content="serverStatus returns seventeen counters and the uptime. They move as commands run.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html" class="here">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Status</h1>
+      <p class="lede">serverStatus returns seventeen counters and the uptime. They move as commands run.</p>
+      
+<p>Counters are updated on the command path. <code>serverStatus</code> returns the current values.</p>
+<pre>db.runCommand({ serverStatus: 1 })</pre>
+<p>Run that against a server that is already listening. One insert, one indexed find, and one scan each move a counter.</p>
+
+<h2 id="counters">The counters</h2>
+<table class="grid">
+  <thead><tr><th>Field</th><th>What it counts</th></tr></thead>
+  <tbody>
+    <tr><td><code>queries</code></td><td>find, count, aggregate, search, and <code>sql</code></td></tr>
+    <tr><td><code>inserts</code></td><td>insert commands</td></tr>
+    <tr><td><code>updates</code></td><td>update commands</td></tr>
+    <tr><td><code>deletes</code></td><td>delete commands</td></tr>
+    <tr><td><code>connectionsActive</code></td><td>sockets open now</td></tr>
+    <tr><td><code>connectionsTotal</code></td><td>sockets accepted since start</td></tr>
+    <tr><td><code>bytesIn</code> <code>bytesOut</code></td><td>bytes read from clients, bytes written to clients</td></tr>
+    <tr><td><code>walWrites</code></td><td>log records appended</td></tr>
+    <tr><td><code>bufferPoolHits</code></td><td>page fetches served from RAM</td></tr>
+    <tr><td><code>bufferPoolMisses</code></td><td>page fetches read from disk</td></tr>
+    <tr><td><code>bufferPoolEvictions</code></td><td>pages dropped from the pool</td></tr>
+    <tr><td><code>indexLookups</code></td><td>plans that used <code>IDHACK</code> or <code>IXSCAN</code></td></tr>
+    <tr><td><code>collectionScans</code></td><td>plans that walked the pages (<code>COLLSCAN</code>)</td></tr>
+    <tr><td><code>transactionsStarted</code></td><td><code>beginTransaction</code></td></tr>
+    <tr><td><code>transactionsCommitted</code></td><td><code>commitTransaction</code></td></tr>
+    <tr><td><code>transactionsAborted</code></td><td><code>abortTransaction</code>, including timeout</td></tr>
+  </tbody>
+</table>
+<p>The reply also includes uptime. A rising <code>bufferPoolMisses</code> means finds are reading pages from disk, which is expected once the collection is larger than the pool. A rising <code>collectionScans</code> next to a predicate you run often is a hint to add the index on <a href="indexes.html">Indexes</a>.</p>
+
+<h2 id="connections">Connections</h2>
+<p><code>max_connections</code> in <code>kova.toml</code> caps how many clients can be connected. The default is 128. The socket past the cap gets an error and is closed, and it does not increment <code>connectionsActive</code>. Each accepted connection records the peer address, the start time, and the authenticated user when security is on. <code>max_connection_idle_ms</code> closes a connection that has sent nothing for that long. <code>0</code> leaves idle connections open. Shutdown, and disabling a user, close the matching connections and free the slots.</p>
+
+      <nav class="pager"><a href="security.html"><span>Previous</span>Security</a><a class="next" href="backup.html"><span>Next</span>Backup and restore</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#counters">The counters</a><a href="#connections">Connections</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

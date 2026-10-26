@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sharding — KOVA</title>
+  <meta name="description" content="The router hashes _id and sends the document to the process that owns it. Use it when one machine cannot hold the data.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html" class="here">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Sharding</h1>
+      <p class="lede">The router hashes _id and sends the document to the process that owns it. Use it when one machine cannot hold the data.</p>
+      
+<p>Leave <code>[sharding]</code> commented and every document stays in this process. Uncomment it when one machine cannot hold the collection or the writes. The router does not store the documents. A shard is a normal Kova process. The router speaks the MongoDB protocol to the address in <code>shards[].client</code>.</p>
+<pre>[sharding]
+enabled = true
+role = "router"
+shards = [
+  { id = 1, client = "127.0.0.1:27101" },
+  { id = 2, client = "127.0.0.1:27102" },
+]</pre>
+<p>Each shard has its own config, its own port, and its own data directory. <code>role = "shard"</code> on those processes is a normal server. The example ports stay off <code>27018</code>, so the single server you already run is left alone.</p>
+<div class="note"><p>A router cannot also enable <code>[replication]</code>. That combination is a config error. Put replication on the shard, and put the primary's address in <code>shards[].client</code>. The router does not join that replica set, and it does not follow an election. After a primary changes, edit the address in the router's <code>kova.toml</code> and restart the router.</p></div>
+
+<h2 id="where">Where a command goes</h2>
+<p>The router hashes <code>_id</code> onto a ring of 128 virtual nodes per shard.</p>
+<ul>
+  <li>An insert with no <code>_id</code> receives one on the router, then goes to one shard.</li>
+  <li>A find, count, update, or delete whose filter is one <code>_id</code> goes to that shard.</li>
+  <li>The same commands without a single <code>_id</code> visit every shard. The router merges the batches or sums <code>n</code>.</li>
+  <li>A single-document update or delete that is not one <code>_id</code> stops at the first shard that changes a row.</li>
+  <li><code>create</code>, <code>drop</code>, <code>createIndexes</code>, and <code>dropDatabase</code> visit every shard, so the collection and its indexes exist wherever a document lands.</li>
+  <li><code>listCollections</code> and <code>listDatabases</code> merge the names.</li>
+  <li>SQL on the router loads each named collection from every shard and runs the statement there.</li>
+  <li>An aggregate stage other than match, project, or unwind is refused on the router. A group inside each shard is not the group of the whole collection.</li>
+  <li><code>mapReduce</code> visits every shard and the batches are concatenated.</li>
+  <li>A transaction is refused on the router.</li>
+  <li>An update of <code>admin.counters</code> is sent to every shard. See <a href="counters.html">Autoincrement</a> for why each shard has its own <code>last</code>.</li>
+</ul>
+
+<h2 id="ring">Adding a shard</h2>
+<p>The shard list is fixed for data already written. Adding a shard changes the ring and leaves existing documents where they were stored. A find by an <code>_id</code> that now hashes to the new shard misses that document. A find with no <code>_id</code> still walks every shard and finds it. Plan the shard list before the collection is large, or move documents yourself.</p>
+
+<h2 id="inside">Inside each shard</h2>
+<p>Each shard is a full Kova process. It still has four local workers, and a collection name still hashes to one of them. All documents of one collection on that process live on one worker. Sharding is what splits the same collection across processes, by document <code>_id</code>.</p>
+<p>A shard may enable <code>[replication]</code> on its own. Voters of that set are copies of that piece. They are not other shards. Losing a shard that has no copy silences that piece. The other shards still answer. Restarting the process on the same data directory brings the piece back. If the disk is gone and there is no copy, that piece is gone.</p>
+<p>A dump pointed at the router reads every shard, and fails with no partial file if one shard is down. A dump pointed at one shard reads that piece. See <a href="backup.html">Backup and restore</a>.</p>
+
+      <nav class="pager"><a href="replication.html"><span>Previous</span>Replica sets</a><a class="next" href="feed.html"><span>Next</span>Feed</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#where">Where a command goes</a><a href="#ring">Adding a shard</a><a href="#inside">Inside each shard</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

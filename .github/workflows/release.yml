@@ -1,0 +1,53 @@
+name: Release
+
+# A merge into main is a push. This builds the optimized binaries and
+# publishes them on the GitHub release for that commit. The asset names
+# stay the same, so /releases/latest/download/… is the current build.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Pack
+        run: |
+          set -eu
+          name=kova-x86_64-unknown-linux-gnu
+          stage="$RUNNER_TEMP/$name"
+          mkdir -p "$stage" dist
+          cp target/release/kova target/release/kovadump target/release/libkova.so "$stage/"
+          cp kova.toml scripts/seed-oracle.js packaging/install.sh "$stage/"
+          chmod 755 "$stage/kova" "$stage/kovadump" "$stage/libkova.so" "$stage/install.sh"
+          tar -C "$RUNNER_TEMP" -czf "dist/$name.tar.gz" "$name"
+          sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+          cp packaging/get.sh dist/install.sh
+          chmod 755 dist/install.sh
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.0-${{ github.sha }}
+          name: Kova ${{ github.sha }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          body: |
+            Optimized Linux x86_64 build of this commit.
+            `install.sh` downloads the archive and installs `kova`, `kovadump`, and `libkova.so` under `$HOME/.local`.
+          files: |
+            dist/kova-x86_64-unknown-linux-gnu.tar.gz
+            dist/kova-x86_64-unknown-linux-gnu.tar.gz.sha256
+            dist/install.sh

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transactions — KOVA</title>
+  <meta name="description" content="Several writes on one collection commit together, or none of them do.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html" class="here">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Transactions</h1>
+      <p class="lede">Several writes on one collection commit together, or none of them do.</p>
+      
+<p>A transaction names the collection whose partition owns it. Later inserts, finds, updates, deletes, counts, and aggregates on that collection pass the same <code>txnId</code>. A collection that hashes to another partition does not see the transaction. Commit and abort name the same collection.</p>
+<p>Uncommitted writes stay off the pages. Commit is one log record, so a crash publishes every write in the transaction or none of them. Abort discards them. With a replica set, followers receive that one commit record and apply it. They do not open the transaction. Abort writes nothing to the oplog.</p>
+
+<h2 id="session">A short session</h2>
+<pre>db.runCommand({
+  beginTransaction: 1,
+  collection: "orders",
+  txnId: NumberLong(1),
+  isolation: "snapshot"
+})
+db.runCommand({
+  insert: "orders",
+  documents: [{ sku: "kettle", qty: 1 }],
+  txnId: NumberLong(1)
+})
+db.runCommand({
+  commitTransaction: 1,
+  collection: "orders",
+  txnId: NumberLong(1)
+})</pre>
+<p><code>abortTransaction</code> takes the same <code>collection</code> and <code>txnId</code>. Another client’s find sees the kettle only after commit.</p>
+<p><code>$out</code> inside a transaction is refused. <code>mapReduce</code> with <code>txnId</code> is refused. A transaction on a shard router is refused: the router does not own the documents.</p>
+
+<h2 id="isolation">Isolation</h2>
+<p>The default is <code>snapshot</code>. Pass <code>isolation</code> on begin.</p>
+<table class="grid">
+  <thead><tr><th>Name</th><th>What a statement sees</th></tr></thead>
+  <tbody>
+    <tr><td><code>readUncommitted</code></td><td>The latest pages, including other transactions' writes that are not committed yet.</td></tr>
+    <tr><td><code>readCommitted</code></td><td>The latest committed version, taken again on each statement.</td></tr>
+    <tr><td><code>repeatableRead</code></td><td>A stable view of the rows this transaction has read.</td></tr>
+    <tr><td><code>snapshot</code></td><td>The database as of the moment the transaction began.</td></tr>
+    <tr><td><code>serializable</code></td><td>The snapshot, and the transaction aborts when a document it read was committed by someone else.</td></tr>
+  </tbody>
+</table>
+<p>Two transactions that write the same document: the later commit aborts. <code>timeoutMs: 0</code> expires the transaction on its next statement. Omit the timeout and the transaction waits until you commit or abort.</p>
+
+<h2 id="replica">On a replica set</h2>
+<p>Begin, each staged statement, and abort stay on the primary. Commit proposes one oplog entry, <code>applyTransaction</code>, carrying the writes. Followers apply that entry as one log record. An arbiter stores the entry and applies no documents. With no <code>[replication]</code> section, commit is the local log record it always was.</p>
+
+      <nav class="pager"><a href="counters.html"><span>Previous</span>Autoincrement</a><a class="next" href="catalog.html"><span>Next</span>Catalog</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#session">A short session</a><a href="#isolation">Isolation</a><a href="#replica">On a replica set</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

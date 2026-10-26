@@ -912,28 +912,29 @@ If Iggy is down, the database write still stands. The publisher retries. The sam
 
 ## Phase 27 — User guide ⚪ Planned
 
-The repository explains the engine to a contributor. `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/CONTRACT.md`, and `docs/CONTRIBUTING.md` stay that. A person who wants to run Kova has no guide. `make doc` stays the generated API reference.
+The repository explains the engine to a contributor. `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/CONTRACT.md`, and `docs/CONTRIBUTING.md` stay that. `make doc` stays the generated API reference.
 
-This phase adds a README and a user guide in English, for what is already shipped. The README says what Kova is and how to build and run it: `make build`, `make run-debug`, port `27018`, `kova.toml`, and security off unless it is turned on. The commands match the Makefile.
+The end-user guide is the static site in `site/docs/`, in English, for what is already shipped. The home page links into it and has a place to leave an email. The host serves the files. The addresses go to a form endpoint, set in `site/js/signup.js`, because the host does not store them. That endpoint is still empty, so the phase stays open. The README tells a user to install the Linux build published on a merge into `main`, then run `kova` on port `27018`. Security is off unless `[security]` is enabled. The Makefile stays the path for people changing the code.
 
-The guide covers the rest of the running server:
+The guide is a set of pages, on the pattern of a product manual: a welcome, Getting started, how the data is stored, then one page per surface.
 
-- The MongoDB commands a client sends, and SQL through `db.runCommand({ sql })`.
-- The ODBC connection keys `SERVER`, `PORT`, `DATABASE`, `UID`, and `PWD`.
-- `kovadump` backup and restore, and the dump shapes it reads.
-- The `admin` catalog, including `admin.counters` and `last`.
-- A replica set and sharding: when each one is for, and that one process is not both the router and a voter.
-- Autoincrement: `create` with `autoincrement`, and an update of the counter row.
+- Welcome, Getting started, and how data is stored.
+- Documents, find and aggregate, indexes, text search, views, map, autoincrement, transactions, and the `admin` catalog.
+- SQL, and the ODBC keys `SERVER`, `PORT`, `DATABASE`, `UID`, and `PWD`.
+- Configuration, security, `serverStatus`, and `kovadump` (including the dump shapes it reads).
+- Replica sets and sharding: when each one is for, and that one process is not both the router and a voter.
+- The feed is a planned page. It describes the record and points at Phase 26. It does not claim the publisher is running.
 
-The feed is a planned note that points at Phase 26. The guide describes it after that phase lands. The guide does not rename a client product, and it does not copy the roadmap phase by phase.
+The guide does not rename a client product, and it does not copy the roadmap phase by phase.
 
 ### Phase 27 — Sub-tasks
 
-- [ ] A README at the repository root explains what Kova is, how to build it, how to run it, the default port, the config file, and that security is off unless enabled.
-- [ ] A user guide in `docs/` covers the wire commands, SQL, the ODBC connection keys, `kovadump`, the `admin` catalog and counters, replica sets, and sharding.
-- [ ] The text is English and describes what is shipped. The feed is a pointer to Phase 26 until that phase is done.
-- [ ] `ROADMAP`, `ARCHITECTURE`, `CONTRACT`, and `CONTRIBUTING` stay the engineering documents. `make doc` stays the API reference.
-- [ ] The README commands match the Makefile targets and port `27018`.
+- [x] A README at the repository root explains what Kova is, how to build it, how to run it, the default port, the config file, and that security is off unless enabled.
+- [x] The site in `site/docs/` covers the wire commands, SQL, the ODBC connection keys, `kovadump`, the `admin` catalog and counters, replica sets, and sharding. The home page asks for an email.
+- [ ] The form endpoint in `site/js/signup.js` is set before the page is public.
+- [x] The text is English and describes what is shipped. The feed is a pointer to Phase 26 until that phase is done.
+- [x] `ROADMAP`, `ARCHITECTURE`, `CONTRACT`, and `CONTRIBUTING` stay the engineering documents. `make doc` stays the API reference.
+- [x] The README tells a user to install the published build and run `kova` on port `27018`. The Makefile stays the contributor path.
 
 ## Architecture Principles
 
@@ -960,7 +961,7 @@ The feed is a planned note that points at Phase 26. The guide describes it after
 | Gap | Phase | Notes |
 |-----|-------|-------|
 | A committed write has no feed for other programs | 26 | `[feed]` will publish one JSON record per committed insert, update, or delete to Apache Iggy. The listener decides what to do with `before` and `after`. Today a program tails a collection or the oplog. |
-| A person who wants to run Kova has no user guide | 27 | A README and a guide in `docs/` will cover the running server. The engineering documents stay as they are. |
+| The email form on the site has no endpoint yet | 27 | The guide is `site/docs/`. `SIGNUP_URL` in `site/js/signup.js` is empty until a form endpoint is pasted. |
 
 ## Architecture Diagram (updated)
 

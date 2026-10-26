@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Map — KOVA</title>
+  <meta name="description" content="mapReduce returns one { key, value } document per match. It writes nothing.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html" class="here">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Map</h1>
+      <p class="lede">mapReduce returns one { key, value } document per match. It writes nothing.</p>
+      
+<p><code>mapReduce</code> reads one collection and returns a cursor of pairs. The read stays on the process that received the command. On a replica set every voter already stores every document, so the command does not fan out. On a shard router it visits every shard and the batches are concatenated.</p>
+
+<h2 id="shape">The command</h2>
+<pre>db.runCommand({
+  mapReduce: "emp",
+  query: { deptno: 20 },
+  map: { key: "$job", value: "$sal" }
+})</pre>
+<p><code>query</code> is a find filter. Leave it out and every document matches. <code>map</code> is a document with <code>key</code> and <code>value</code>. A string that starts with <code>$</code> reads that field, including a dotted path. Any other value is a literal. A missing field becomes null.</p>
+<p>The reply is <code>firstBatch</code>, the same cursor shape as <code>find</code>. Each document is <code>{ key, value }</code>. For the employees in department 20, the pairs are the job and the salary of each person.</p>
+
+<h2 id="refused">What is refused</h2>
+<ul>
+  <li>A JavaScript function in <code>map</code>. The error names it. Pass the <code>{ key, value }</code> document.</li>
+  <li><code>reduce</code>. The error names the field. Grouping belongs to <a href="queries.html">aggregate</a>.</li>
+  <li><code>out</code>. The error names the field. Nothing is written, and <code>listCollections</code> still shows only the source.</li>
+  <li>A command that carries <code>txnId</code>. Map runs outside a transaction.</li>
+</ul>
+<p>A shell helper that always sends <code>out</code> will get that refusal. Send <code>runCommand</code> as written above.</p>
+
+      <nav class="pager"><a href="views.html"><span>Previous</span>Views</a><a class="next" href="counters.html"><span>Next</span>Autoincrement</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#shape">The command</a><a href="#refused">What is refused</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

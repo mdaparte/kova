@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Getting started — KOVA</title>
+  <meta name="description" content="Install Kova, start it on port 27018, insert a document, and read it back after a restart.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html" class="here">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Getting started</h1>
+      <p class="lede">Install Kova, start it on port 27018, insert a document, and read it back after a restart.</p>
+      
+<p>The published build is Linux x86_64. It is the optimized server, the backup tool, and the ODBC library. The examples use <code>mongosh</code>, the MongoDB shell. A driver in another language sends the same commands to the same port. The server itself does not need a MongoDB installation.</p>
+
+<h2 id="install">Install</h2>
+<p>Each merge into <code>main</code> publishes a new build. This downloads the current one and installs it under your home directory:</p>
+<pre>curl -fsSL -o install.sh https://github.com/mdaparte/kova/releases/latest/download/install.sh
+sh install.sh</pre>
+<p><code>kova</code> and <code>kovadump</code> land in <code>~/.local/bin</code>. <code>libkova.so</code> lands in <code>~/.local/lib</code>. The config and the sample script land in <code>~/.local/share/kova</code>. If <code>~/.local/bin</code> is not on <code>PATH</code>, the script prints the line to add.</p>
+<p>To put the files somewhere else, download the archive and run its installer with <code>PREFIX</code> set:</p>
+<pre>curl -fsSL -o kova.tar.gz https://github.com/mdaparte/kova/releases/latest/download/kova-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf kova.tar.gz
+PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</pre>
+<p>The archive has a <code>.sha256</code> file next to it on the same release, for checking the download.</p>
+
+<h2 id="start">Start the server</h2>
+<p>Start from a directory you want to keep. Pages and the log are created in <code>data/</code> there.</p>
+<pre>mkdir -p "$HOME/kova-data" && cd "$HOME/kova-data"
+KOVA_CONFIG="$HOME/.local/share/kova/kova.toml" kova</pre>
+<p>The listener binds <code>0.0.0.0:27018</code>. Leave that process running. A second terminal is where you send commands.</p>
+<p>Port <code>27018</code> is deliberate, so a local MongoDB on <code>27017</code> can stay up beside Kova. Override it for one run with <code>KOVA_PORT=27019</code> in front of <code>kova</code>. The matching client then uses that port too. <code>KOVA_LOG_LEVEL=debug</code> raises the log for that run.</p>
+
+<h2 id="first-document">Write the first document</h2>
+<p>Open a shell against database <code>shop</code>:</p>
+<pre>mongosh "mongodb://127.0.0.1:27018/shop"</pre>
+<p>Insert one order and read it back.</p>
+<pre>db.orders.insertOne({ sku: "kettle", qty: 2 })
+db.orders.find({ sku: "kettle" })</pre>
+<p>Kova fills <code>_id</code> with an ObjectId when you omit it. The reply from <code>insertOne</code> includes that id. <code>find</code> returns the document you stored.</p>
+<p>The same question in SQL, on the same collection:</p>
+<pre>db.runCommand({
+  sql: "SELECT sku, qty FROM orders WHERE qty > 1"
+})</pre>
+<p>The cursor rows are the documents DataFusion produced. One <code>FROM</code>. The database is the one in the connection, here <code>shop</code>.</p>
+
+<h2 id="restart">Stop, start, read again</h2>
+<p>Stop the server with Ctrl-C in the terminal that runs it. Start it again with the same <code>kova</code> command, from the same directory.</p>
+<p>Open the shell and run the find once more. The kettle is still there. The write was appended to the log under <code>data/</code> before the insert reply, and startup replays anything a checkpoint had not folded into the pages yet.</p>
+<p>Deleting <code>data/</code> starts empty. Keep that directory if you want the documents.</p>
+
+<h2 id="sample">Load the sample</h2>
+<p>The install includes a small company sample: employees, departments, salary grades, and a few bonuses. With the server already listening:</p>
+<pre>mongosh --quiet "mongodb://127.0.0.1:27018/db" --file "$HOME/.local/share/kova/seed-oracle.js"</pre>
+<p>That drops database <code>db</code> and loads it again. It also creates five indexes on <code>emp</code> and two views, <code>well_paid</code> and <code>emp_search</code>. Your <code>shop</code> database is untouched.</p>
+<pre>mongosh "mongodb://127.0.0.1:27018/db"
+db.emp.find({ job: "CLERK" }, { ename: 1, sal: 1, _id: 0 })
+db.runCommand({
+  sql: "SELECT ename, job, sal FROM emp WHERE sal > 2000"
+})</pre>
+<p><code>well_paid</code> is the employees with <code>sal</code> above 2000. <code>emp_search</code> is every employee, with a text index on disk. Both are covered on the <a href="views.html">Views</a> and <a href="search.html">Text search</a> pages.</p>
+
+<h2 id="next">What to open next</h2>
+<div class="cards">
+  <a href="concepts.html"><strong>How data is stored</strong><span>Pages, the log, and why a collection lives on one worker.</span></a>
+  <a href="documents.html"><strong>Documents</strong><span>The write commands, field updates, and validators.</span></a>
+  <a href="configuration.html"><strong>Configuration</strong><span>Every key in <code>kova.toml</code> and the environment variables.</span></a>
+  <a href="security.html"><strong>Security</strong><span>Off until you enable it. Then both a user and a password.</span></a>
+</div>
+
+      <nav class="pager"><a href="index.html"><span>Previous</span>Welcome</a><a class="next" href="concepts.html"><span>Next</span>How data is stored</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#next">What to open next</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

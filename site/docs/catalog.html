@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Catalog — KOVA</title>
+  <meta name="description" content="admin is a database of rows about the server: collections, fields, indexes, users, views, and counters.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html" class="here">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Catalog</h1>
+      <p class="lede">admin is a database of rows about the server: collections, fields, indexes, users, views, and counters.</p>
+      
+<p>A fresh process already has database <code>admin</code>. <code>listDatabases</code> returns it before you create anything else. The rows describe the server. They are not a second copy of your documents. A find still reads each user document from its page.</p>
+<p>Applying a command updates the catalog in memory. The checkpoint writes the rows, then truncates the log. A crash before the checkpoint replays the command. Startup reads the catalog and does not walk every document to rebuild the list of collections, the secondary indexes, or the text index.</p>
+
+<h2 id="collections">The collections</h2>
+<table class="grid">
+  <thead><tr><th>Collection</th><th>One row is</th></tr></thead>
+  <tbody>
+    <tr><td><code>admin.databases</code></td><td>A database name.</td></tr>
+    <tr><td><code>admin.collections</code></td><td>A collection: its pages, its document count, and its id set.</td></tr>
+    <tr><td><code>admin.fields</code></td><td>A field name and its type. The ODBC driver reads this when a client asks for columns. A collection the catalog does not know yet is sampled from its documents.</td></tr>
+    <tr><td><code>admin.indexes</code></td><td>An index spec.</td></tr>
+    <tr><td><code>admin.counters</code></td><td>An autoincrement field and <code>last</code>. See <a href="counters.html">Autoincrement</a>.</td></tr>
+    <tr><td><code>admin.users</code></td><td>A user. The password is an Argon2id hash. See <a href="security.html">Security</a>.</td></tr>
+    <tr><td><code>admin.roles</code></td><td>A custom role and its actions.</td></tr>
+    <tr><td><code>admin.views</code></td><td>A view: name, source, pipeline, and the <code>kova</code> options.</td></tr>
+  </tbody>
+</table>
+<pre>mongosh "mongodb://127.0.0.1:27018/admin"
+db.fields.find({ collection: "db.emp" })
+db.indexes.find({ collection: "db.emp" })
+db.counters.find()</pre>
+<p>Field rows appear as documents are written and the type is learned. A collection whose field list is empty is filled on startup by reading that collection once.</p>
+
+<h2 id="writes">What you may write</h2>
+<p>The catalog is maintained by commands: <code>create</code>, <code>createIndexes</code>, <code>createUser</code>, and the rest. A direct insert into these collections is refused. The exception is an update of <code>admin.counters</code>, which is how you move <code>last</code>.</p>
+<p>Users, roles, and views are read from <code>admin</code> on startup. Dropping a built-in role is refused. The last <code>root</code> user cannot be revoked or disabled.</p>
+
+      <nav class="pager"><a href="transactions.html"><span>Previous</span>Transactions</a><a class="next" href="sql.html"><span>Next</span>SQL</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#collections">The collections</a><a href="#writes">What you may write</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

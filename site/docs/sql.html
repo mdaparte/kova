@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SQL — KOVA</title>
+  <meta name="description" content="Send a SQL string to the same server that stores the documents. One FROM, the database you connected to.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html" class="here">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>SQL</h1>
+      <p class="lede">Send a SQL string to the same server that stores the documents. One FROM, the database you connected to.</p>
+      
+<p>SQL runs inside the server. DataFusion plans it. The collections are the tables. A command-line client, a driver, and the ODBC driver all end up at this command:</p>
+<pre>db.runCommand({
+  sql: "SELECT ename, job, sal FROM emp WHERE sal > 2000"
+})</pre>
+<p>The database is <code>$db</code>. In the shell, that is the database you opened. There is one <code>FROM</code>. A join is outside this statement. Combine collections with <code>$lookup</code> in the pipeline, then read the result, or write it with <code>$out</code> and select from that collection.</p>
+
+<h2 id="statements">What a statement can do</h2>
+<ul>
+  <li><code>SELECT</code> with a target list, including <code>SELECT 1 AS n</code> with no <code>FROM</code>.</li>
+  <li><code>WHERE</code> with comparisons. One comparison, such as <code>sal &gt; 1000</code> or <code>job = 'CLERK'</code>, uses the same index a find would use. DataFusion checks the predicate again.</li>
+  <li><code>COUNT(*)</code> and <code>GROUP BY</code>.</li>
+  <li><code>SHOW INDEXES FROM emp</code>, also <code>SHOW INDEX</code> and <code>SHOW KEYS</code>.</li>
+</ul>
+<p>Names are case-sensitive, and they are the collection names. The sample uses lowercase <code>emp</code> so <code>FROM emp</code> hits those rows. <code>FROM EMP</code> is a different collection.</p>
+<pre>db.runCommand({
+  sql: "SELECT job, COUNT(*) AS n, SUM(sal) AS payroll FROM emp GROUP BY job"
+})</pre>
+<p>The cursor rows use the column names from the statement. Integers you stored as BSON ints come back as integers.</p>
+
+<h2 id="text">Text in the WHERE clause</h2>
+<p><code>WHERE TEXT '…'</code> is handled before the SQL planner, because a bare <code>TEXT</code> token is not standard SQL. It is the same search as <code>$text</code>. The view or collection needs the text index. After the sample is loaded, that view is <code>emp_search</code>.</p>
+<pre>SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'
+SELECT ename, job, sal FROM emp_search WHERE TEXT 'clrek' FUZZY 0.3
+SELECT facet, bucket, doc_count
+FROM emp_search
+WHERE TEXT 'clerk'
+FACETS job TERMS, sal RANGES (1500), (1500, 3000), (3000)</pre>
+<p><code>FUZZY</code> takes a fraction from 0 to 1. <code>FACETS</code> replaces the selected columns with three: <code>facet</code>, <code>bucket</code>, <code>doc_count</code>. <code>TERMS</code> buckets by value. <code>RANGES</code> buckets a number. The open end <code>(1500)</code> is everything up to 1500, and a trailing <code>(3000)</code> is everything above 3000. The full rules are on <a href="search.html">Text search</a>.</p>
+
+<h2 id="from-a-client">From a client that only speaks SQL</h2>
+<p>The ODBC driver sends the string you typed and returns the rows. Connection keys are on the <a href="odbc.html">ODBC</a> page. The server must already be running. SQL does not start it.</p>
+
+      <nav class="pager"><a href="catalog.html"><span>Previous</span>Catalog</a><a class="next" href="odbc.html"><span>Next</span>ODBC</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#statements">What a statement can do</a><a href="#text">Text in the WHERE clause</a><a href="#from-a-client">From a client that only speaks SQL</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

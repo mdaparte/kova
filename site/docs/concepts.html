@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How data is stored — KOVA</title>
+  <meta name="description" content="A database holds collections. A collection holds documents. Documents live in pages on disk.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html" class="here">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>How data is stored</h1>
+      <p class="lede">A database holds collections. A collection holds documents. Documents live in pages on disk.</p>
+      
+<p>Kova looks like a document database to the client and like a page store on disk. You name databases and collections. The server decides the files.</p>
+
+<h2 id="names">Names</h2>
+<ol class="stack">
+  <li><strong>Database</strong>The <code>$db</code> on every command. <code>shop</code> and <code>db</code> are different databases. <code>admin</code> exists on a fresh process and holds the catalog.</li>
+  <li><strong>Collection</strong>A named set of documents, stored as <code>database.collection</code>. <code>shop.orders</code> and <code>db.orders</code> do not share rows. Names are case-sensitive: <code>emp</code> and <code>EMP</code> are two collections.</li>
+  <li><strong>Document</strong>One BSON object. Nested documents and arrays are stored as you send them. <code>_id</code> identifies the document inside the collection. Omit it on insert and Kova assigns an ObjectId.</li>
+  <li><strong>Page</strong>The unit on disk. Many documents share a page. A document larger than the page continues onto overflow pages. The default page envelope is 16 KB, set by <code>page_size</code>.</li>
+  <li><strong>Buffer pool</strong>The only cache that grows with what you read. A miss reads the page from disk. When the pool is full, the least recently used page is written back if it changed, then dropped. The default is 4096 pages per partition.</li>
+</ol>
+
+<h2 id="durability">What survives a crash</h2>
+<p>Every insert, update, and delete is appended to a write-ahead log before the page changes. <code>wal_fsync</code> defaults to true, so the append is flushed. A checkpoint writes the dirty pages, records how far the log has been applied, and deletes the log segments behind that point. Startup opens the pages and replays only the tail of the log.</p>
+<p>The layout under <code>data/</code> is one directory per partition: <code>partition-0</code>, <code>partition-1</code>, and so on. Each has its pages and its log. A replica set also writes <code>raft-&lt;id&gt;/</code>.</p>
+<p>Page payloads are compressed with zstd. The cache and your queries see the plain documents. The log stays uncompressed. If you set an encryption key, the page file and the log record are encrypted after compression. Startup with encrypted files and no key fails.</p>
+
+<h2 id="partitions">Four workers inside one process</h2>
+<p>One Kova process runs four partition workers. The collection name is hashed, and every document of that collection on this process lives on one worker. <code>shop.orders</code> is entirely on one partition. <code>shop.customers</code> may land on another. Commands for different collections run in parallel. Commands for one collection are ordered on that worker.</p>
+<p>This split is inside the process. It is not sharding. Sharding sends different documents of the <em>same</em> collection to different processes, by hashing <code>_id</code>. That is a separate configuration, described on <a href="sharding.html">Sharding</a>.</p>
+
+<h2 id="indexes-and-text">Indexes sit beside the pages</h2>
+<p>The pages are the database. A B-tree or hash index is rebuilt from those pages when the process starts, and kept up to date on every write. The catalog remembers which indexes exist. A text index (Tantivy) is the same idea for words: updated on write, rebuilt from the pages on startup, unless a view asked for an on-disk text index.</p>
+<p>A point lookup by <code>_id</code> uses the id index. A predicate the planner can cover uses a secondary index. Anything else walks the collection's pages. <code>explain</code> reports which path ran. Details are on <a href="indexes.html">Indexes</a>.</p>
+
+<h2 id="catalog">The catalog is queryable</h2>
+<p>Database names, collections, field types, indexes, users, roles, views, and autoincrement counters are rows in <code>admin</code>. You can <code>find</code> them. They are written at checkpoint from the memory the process already keeps, and read back on startup so the process does not scan every document to remember the schema. The <a href="catalog.html">Catalog</a> page lists each collection and the fields on its rows.</p>
+
+      <nav class="pager"><a href="getting-started.html"><span>Previous</span>Getting started</a><a class="next" href="documents.html"><span>Next</span>Documents</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#names">Names</a><a href="#durability">What survives a crash</a><a href="#partitions">Four workers inside one process</a><a href="#indexes-and-text">Indexes sit beside the pages</a><a href="#catalog">The catalog is queryable</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

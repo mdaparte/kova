@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Indexes — KOVA</title>
+  <meta name="description" content="B-tree for ranges, hash for equality, unique and sparse when you ask. The pages stay the source of truth.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="../index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="index.html">Docs</a>
+      <a href="getting-started.html">Start</a>
+      <a href="../index.html#list">Email</a>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="index.html">Welcome</a><a href="getting-started.html">Getting started</a><a href="concepts.html">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="documents.html">Documents</a><a href="queries.html">Find and aggregate</a><a href="indexes.html" class="here">Indexes</a><a href="search.html">Text search</a><a href="views.html">Views</a><a href="map.html">Map</a><a href="counters.html">Autoincrement</a><a href="transactions.html">Transactions</a><a href="catalog.html">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="sql.html">SQL</a><a href="odbc.html">ODBC</a></div>
+<div><h2>Run the server</h2><a href="configuration.html">Configuration</a><a href="security.html">Security</a><a href="status.html">Status</a><a href="backup.html">Backup and restore</a><a href="replication.html">Replica sets</a><a href="sharding.html">Sharding</a></div>
+<div><h2>Later</h2><a href="feed.html">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Indexes</h1>
+      <p class="lede">B-tree for ranges, hash for equality, unique and sparse when you ask. The pages stay the source of truth.</p>
+      
+<p>An index speeds a predicate. It is rebuilt from the document pages when the process starts, and maintained on insert, update, and delete. Index entries store the document id. An update may move the document to another page, and the id still finds it.</p>
+<p>The sample load creates five indexes on <code>emp</code>. You can create the same ones yourself.</p>
+
+<h2 id="create">Create and drop</h2>
+<pre>db.emp.createIndex({ sal: 1 }, { name: "sal_1" })
+db.emp.createIndex({ job: "hashed" }, { name: "job_hashed" })
+db.emp.createIndex({ ename: 1 }, { name: "ename_1", unique: true })
+db.emp.createIndex({ deptno: 1, sal: 1 }, { name: "deptno_1_sal_1" })
+db.emp.createIndex({ comm: 1 }, { name: "comm_1", sparse: true })
+db.emp.getIndexes()
+db.emp.dropIndex("sal_1")</pre>
+<p><code>dropIndexes</code> with <code>"*"</code> drops every secondary index. The <code>_id_</code> index stays. A unique violation while building rolls the spec back and writes nothing to the log.</p>
+<p>A text index is separate. <code>createIndexes</code> with <code>"text"</code> is rejected. Word search uses the text index described on <a href="search.html">Text search</a>, including <code>kova.inverted</code> on a view.</p>
+
+<h2 id="kinds">Which kind</h2>
+<table class="grid">
+  <thead><tr><th>Spec</th><th>Use it for</th></tr></thead>
+  <tbody>
+    <tr><td><code>{ field: 1 }</code> or a compound key</td><td>Equality on a prefix, then one range (<code>$gt</code>, <code>$gte</code>, <code>$lt</code>, <code>$lte</code>) on the next field. Keys are stored ascending. Declaring <code>-1</code> does not change which documents match.</td></tr>
+    <tr><td><code>{ field: "hashed" }</code></td><td>One field, exact match only.</td></tr>
+    <tr><td><code>unique: true</code></td><td>A second document with the same key is rejected before the log append. The error contains <code>duplicate</code>.</td></tr>
+    <tr><td><code>sparse: true</code></td><td>A document missing any indexed field is left out of that index. A normal index stores a missing field as null.</td></tr>
+  </tbody>
+</table>
+<p>Numbers compare as ordered floating-point values, so <code>10</code> and <code>10.0</code> share a key. Array fields are not indexed element by element. Index the scalar you filter on.</p>
+
+<h2 id="planner">What the planner picks</h2>
+<ol>
+  <li>Equality on <code>_id</code> alone is <code>IDHACK</code>.</li>
+  <li>A predicate a secondary index covers is <code>IXSCAN</code>. The name comes back as <code>indexName</code>.</li>
+  <li>Anything else is <code>COLLSCAN</code>.</li>
+</ol>
+<p>After the index returns ids, Kova reads those documents from the pages and applies the rest of the filter. An empty id list is an empty answer. <code>find</code>, <code>count</code>, and a leading <code>$match</code> use this path. A read inside an open transaction stays on that transaction's snapshot and does not switch to the index mid-flight.</p>
+<pre>db.emp.find({ sal: { $gt: 2000 } }).explain()</pre>
+<p>A SQL <code>WHERE</code> that is one comparison, such as <code>sal &gt; 1000</code> or <code>job = 'CLERK'</code>, is planned the same way. DataFusion checks the predicate again. The SQL reply includes the stage that won.</p>
+
+<h2 id="show">List them from SQL</h2>
+<p>A SQL client can ask:</p>
+<pre>SHOW INDEXES FROM emp</pre>
+<p><code>SHOW KEYS</code> and <code>SHOW INDEX</code> are the same question. The rows are the indexes on that collection.</p>
+
+      <nav class="pager"><a href="queries.html"><span>Previous</span>Find and aggregate</a><a class="next" href="search.html"><span>Next</span>Text search</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#create">Create and drop</a><a href="#kinds">Which kind</a><a href="#planner">What the planner picks</a><a href="#show">List them from SQL</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="getting-started.html">Getting started</a>
+    </nav>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KOVA</title>
+  <meta name="description" content="Kova is a database you talk to with a MongoDB driver. Documents, SQL, and text search in one process.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k" viewBox="0 0 120 120">
+        <rect x="0" y="0" width="20" height="120" fill="currentColor"/>
+        <rect x="70" y="0" width="50" height="20" fill="currentColor"/>
+        <rect x="50" y="25" width="50" height="20" fill="currentColor"/>
+        <rect x="30" y="50" width="50" height="20" style="fill:var(--core,#C2461B)"/>
+        <rect x="50" y="75" width="50" height="20" fill="currentColor"/>
+        <rect x="70" y="100" width="50" height="20" fill="currentColor"/>
+      </symbol>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="index.html"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="docs/index.html">Docs</a>
+      <a href="docs/getting-started.html">Start</a>
+      <a href="#list">Email</a>
+    </nav>
+  </header>
+  <section class="cover">
+    <svg class="cover-strata" viewBox="0 0 120 120" aria-hidden="true">
+      <rect x="70" y="0" width="80" height="20"/><rect x="50" y="25" width="90" height="20"/><rect class="core" x="30" y="50" width="50" height="20"/><rect x="50" y="75" width="90" height="20"/><rect x="70" y="100" width="80" height="20"/>
+    </svg>
+    <div class="cover-lines"></div>
+    <div class="wrap">
+      <div class="eyebrow"><span class="slab"></span><span>Database engine</span></div>
+      <svg class="mark" width="64" height="64" aria-hidden="true"><use href="#k"/></svg>
+      <h1>KOVA</h1>
+      <p class="lead">One process stores the documents, answers SQL, and searches text.</p>
+      <div class="row">
+        <a class="button" href="docs/getting-started.html">Getting started</a>
+        <a class="button quiet" href="#list">Leave your email</a>
+      </div>
+    </div>
+  </section>
+  <main class="wrap">
+    <section class="facts">
+      <article>
+        <h2>Connect</h2>
+        <p>Any MongoDB driver. Host <code>127.0.0.1</code>, port <code>27018</code>.</p>
+      </article>
+      <article>
+        <h2>Run</h2>
+        <p>Install the Linux build, then run <code>kova</code>. Data stays in <code>data/</code>.</p>
+      </article>
+      <article>
+        <h2>Open by default</h2>
+        <p>Security is off until you enable it. Then the client sends both a user and a password.</p>
+      </article>
+    </section>
+    <section class="cards">
+      <a href="docs/getting-started.html"><strong>Getting started</strong><span>Install the Linux build, start the listener, write a document, read it after a restart.</span></a>
+      <a href="docs/concepts.html"><strong>How data is stored</strong><span>Databases, collections, pages, and the log that makes a write durable.</span></a>
+      <a href="docs/documents.html"><strong>Documents</strong><span>Insert, update, delete, and the commands a driver sends.</span></a>
+      <a href="docs/sql.html"><strong>SQL</strong><span>One SELECT over the same collections, from a shell or from ODBC.</span></a>
+      <a href="docs/backup.html"><strong>Backup</strong><span>kovadump writes a file and reads SQL and MongoDB dumps back in.</span></a>
+      <a href="docs/replication.html"><strong>Copies and shards</strong><span>A replica set copies the data. Shards split it across processes.</span></a>
+    </section>
+    <section class="signup" id="list">
+      <div>
+        <div class="eyebrow"><span class="slab"></span><span>List</span></div>
+        <h2>Leave an email.</h2>
+        <p>One address, for when there is a release or a note worth sending. Nothing else.</p>
+      </div>
+      <form class="list">
+        <label class="hp">Leave this empty<input type="text" name="_gotcha" tabindex="-1" autocomplete="off"></label>
+        <input type="email" name="email" required autocomplete="email" placeholder="you@example.com" aria-label="Email">
+        <button type="submit">Send</button>
+        <p class="status" role="status"></p>
+      </form>
+    </section>
+  </main>
+  <footer>
+    <span>KOVA</span>
+    <a href="docs/index.html">Docs</a>
+  </footer>
+  <script src="js/signup.js"></script>
+</body>
+</html>
