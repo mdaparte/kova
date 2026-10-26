@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>
+try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
+</script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sharding — KOVA</title>
   <meta name="description" content="The router hashes _id and sends the document to the process that owns it. Use it when one machine cannot hold the data.">
@@ -27,6 +30,7 @@
       <a href="index.html">Docs</a>
       <a href="getting-started.html">Start</a>
       <a href="../index.html#list">Email</a>
+      <button type="button" class="theme" data-theme-toggle>Light</button>
     </nav>
   </header>
   <div class="doc-shell">
@@ -88,5 +92,6 @@ shards = [
       <a href="getting-started.html">Getting started</a>
     </nav>
   </footer>
+  <script src="../js/theme.js"></script>
 </body>
 </html>

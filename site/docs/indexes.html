@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>
+try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
+</script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Indexes — KOVA</title>
   <meta name="description" content="B-tree for ranges, hash for equality, unique and sparse when you ask. The pages stay the source of truth.">
@@ -27,6 +30,7 @@
       <a href="index.html">Docs</a>
       <a href="getting-started.html">Start</a>
       <a href="../index.html#list">Email</a>
+      <button type="button" class="theme" data-theme-toggle>Light</button>
     </nav>
   </header>
   <div class="doc-shell">
@@ -94,5 +98,6 @@ db.emp.dropIndex("sal_1")</pre>
       <a href="getting-started.html">Getting started</a>
     </nav>
   </footer>
+  <script src="../js/theme.js"></script>
 </body>
 </html>

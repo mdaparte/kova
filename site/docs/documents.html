@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>
+try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
+</script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Documents — KOVA</title>
   <meta name="description" content="Insert, replace, update, and delete documents with the commands a MongoDB driver already sends.">
@@ -27,6 +30,7 @@
       <a href="index.html">Docs</a>
       <a href="getting-started.html">Start</a>
       <a href="../index.html#list">Email</a>
+      <button type="button" class="theme" data-theme-toggle>Light</button>
     </nav>
   </header>
   <div class="doc-shell">
@@ -120,5 +124,6 @@ db.adminCommand({ listDatabases: 1 })</pre>
       <a href="getting-started.html">Getting started</a>
     </nav>
   </footer>
+  <script src="../js/theme.js"></script>
 </body>
 </html>

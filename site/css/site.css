@@ -28,8 +28,20 @@
   background: var(--bg);
 }
 
+html[data-theme="dark"] {
+  --bg: var(--k-granito);
+  --surface: #1f2225;
+  --fg: var(--k-feldspato);
+  --muted: var(--k-xisto);
+  --line: var(--k-basalto);
+  --line-strong: var(--k-ardosia);
+  --accent: var(--k-oxido-claro);
+  --plate: #24272b;
+  color-scheme: dark;
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  html:not([data-theme]) {
     --bg: var(--k-granito);
     --surface: #1f2225;
     --fg: var(--k-feldspato);
@@ -147,8 +159,11 @@ footer {
   font-size: 12px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--k-xisto);
+  color: var(--muted);
 }
+
+.cover .eyebrow,
+.signup .eyebrow { color: var(--k-xisto); }
 
 .eyebrow .slab { width: 28px; height: 6px; background: var(--k-oxido); }
 
@@ -179,7 +194,7 @@ footer {
   border: 1px solid transparent;
   border-radius: 2px;
   padding: 10px 16px;
-  background: var(--k-oxido);
+  background: var(--k-oxido-prof);
   color: var(--k-feldspato);
   font-family: var(--f-mono);
   font-size: 13px;
@@ -551,7 +566,16 @@ input[type="email"] {
   font: inherit;
 }
 
-.signup button { background: var(--k-oxido); color: var(--k-feldspato); }
+.signup button { background: var(--k-oxido-prof); color: var(--k-feldspato); }
+
+button.theme {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--line-strong);
+  padding: 6px 10px;
+}
+
+button.theme[aria-pressed="true"] { border-color: var(--k-oxido); }
 
 .status { flex-basis: 100%; min-height: 1.3rem; margin: 4px 0 0; font-family: var(--f-mono); font-size: 12px; }
 
