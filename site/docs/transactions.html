@@ -10,7 +10,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>Transactions — KOVA</title>
-  <meta name="description" content="Several writes on one collection commit together, or none of them do.">
+  <meta name="description" content="Several writes commit together, or none of them do.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
@@ -47,9 +47,9 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
       <h1>Transactions</h1>
-      <p class="lede">Several writes on one collection commit together, or none of them do.</p>
+      <p class="lede">Several writes commit together, or none of them do.</p>
       
-<p>A transaction names the collection whose partition owns it. Later inserts, finds, updates, deletes, counts, and aggregates on that collection pass the same <code>txnId</code>. A collection that hashes to another partition does not see the transaction. Commit and abort name the same collection.</p>
+<p>A transaction opens on the partition that owns the named collection. Later inserts, finds, updates, deletes, counts, and aggregates on collections that hash to that same partition pass the same <code>txnId</code> and commit as one log record. A collection on another partition does not see the transaction. Commit and abort name the collection that opened it.</p>
 <p>Uncommitted writes stay off the pages. Commit is one log record, so a crash publishes every write in the transaction or none of them. Abort discards them. With a replica set, followers receive that one commit record and apply it. They do not open the transaction. Abort writes nothing to the oplog.</p>
 
 <h2 id="session">A short session</h2>

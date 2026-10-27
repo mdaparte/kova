@@ -76,14 +76,14 @@ shards = [</code></pre>
   <li><code>create</code>, <code>drop</code>, <code>createIndexes</code>, and <code>dropDatabase</code> visit every shard, so the collection and its indexes exist wherever a document lands.</li>
   <li><code>listCollections</code> and <code>listDatabases</code> merge the names.</li>
   <li>SQL on the router loads each named collection from every shard and runs the statement there.</li>
-  <li>An aggregate stage other than match, project, or unwind is refused on the router. A group inside each shard is not the group of the whole collection.</li>
+  <li>An aggregate <code>$group</code> whose accumulators combine is merged from the shards. Equality <code>$lookup</code> sends the join keys to the shards that hold the other collection. An accumulator or a stage that cannot merge is refused by name.</li>
   <li><code>mapReduce</code> visits every shard and the batches are concatenated.</li>
   <li>A transaction is refused on the router.</li>
   <li>An update of <code>admin.counters</code> is sent to every shard. See <a href="/docs/counters">Autoincrement</a> for why each shard has its own <code>last</code>.</li>
 </ul>
 
 <h2 id="ring">Adding a shard</h2>
-<p>The shard list is fixed for data already written. Adding a shard changes the ring and leaves existing documents where they were stored. A find by an <code>_id</code> that now hashes to the new shard misses that document. A find with no <code>_id</code> still walks every shard and finds it. Plan the shard list before the collection is large, or move documents yourself.</p>
+<p>Adding a shard to the router's list and restarting the router moves each document whose <code>_id</code> now falls on the new arc. A document that stays on its current shard is not rewritten. During the move, a find by <code>_id</code> returns the document once. The previous shard ids are kept in <code>shard-ring.txt</code> in the data directory. Removing a shard does not move documents.</p>
 
 <h2 id="inside">Inside each shard</h2>
 <p>Each shard is a full Kova process. It still has four local workers, and a collection name still hashes to one of them. All documents of one collection on that process live on one worker. Sharding is what splits the same collection across processes, by document <code>_id</code>.</p>

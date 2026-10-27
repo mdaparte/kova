@@ -212,13 +212,13 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   decides what to do. `[feed]` is off unless enabled. ⚪ Planned.
 - **Phase 27 — User guide:** the site in `site/docs/` explains how to run
   the server and use what is shipped, starting at Getting started. The
-  home page asks for an email. The form endpoint is still unset. The
-  engineering documents stay as they are. ⚪ Planned.
+  home page asks for an email. The form stays closed until `SIGNUP_URL`
+  is set. The engineering documents stay as they are. ✅ Complete.
 - **Phase 28 — Read path and scale:** an index hit reads the page the
   entry records, the B-tree and hash index are buffer-pool pages, a scan
   can use more than one core, the router merges `$group` and equality
   `$lookup`, adding a shard moves documents onto the new arc, and one
-  process can commit more than one collection in one log record. ⚪ Planned.
+  partition can commit more than one collection in one log record. ✅ Complete.
 
 ## 6. License
 

@@ -49,7 +49,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>Indexes</h1>
       <p class="lede">B-tree for ranges, hash for equality, unique and sparse when you ask. The pages stay the source of truth.</p>
       
-<p>An index speeds a predicate. It is rebuilt from the document pages when the process starts, and maintained on insert, update, and delete. Index entries store the document id. An update may move the document to another page, and the id still finds it.</p>
+<p>An index speeds a predicate. The B-tree and the hash index are stored as pages and opened on startup, so the process does not walk the documents to rebuild them. Insert, update, and delete keep the entries current. Each entry records the page that holds the document. When an update moves the document, that page moves with the entry. A missing id reads no page.</p>
 <p>The sample load creates five indexes on <code>emp</code>. You can create the same ones yourself.</p>
 
 <h2 id="create">Create and drop</h2>

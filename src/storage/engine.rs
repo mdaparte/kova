@@ -160,8 +160,18 @@ impl StorageEngine {
     /// The document bodies are already in the page files. This does not
     /// build a second BSON image of the collections.
     pub fn checkpoint_pages(&mut self) -> Result<(), String> {
+        self.checkpoint_with_indexes(None)
+    }
+
+    /// Same checkpoint, and writes `index` as buffer-pool pages named by
+    /// the catalog root. `index` is the B-tree and hash snapshot.
+    pub fn checkpoint_with_indexes(&mut self, index: Option<&[u8]>) -> Result<(), String> {
         let lsn = self.wal.last_lsn();
         self.heap.set_applied_lsn(lsn);
+        if let Some(bytes) = index {
+            self.heap
+                .store_index_bytes(&mut self.pool, &self.disk, bytes)?;
+        }
         self.heap.publish(&mut self.pool, &self.disk)?;
         self.heap.write_root(&mut self.pool)?;
         self.pool.flush()?;
@@ -295,6 +305,11 @@ impl StorageEngine {
         filter: &bson::Document,
     ) -> Result<Vec<bson::Document>, String> {
         self.heap.find_ids(&mut self.pool, collection, ids, filter)
+    }
+
+    /// Index snapshot pages, when a checkpoint has written them.
+    pub fn read_index_bytes(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.heap.read_index_bytes(&mut self.pool)
     }
 
     pub fn for_each_document(

@@ -211,6 +211,30 @@ FORD    ANALYST   3000</code></pre>
 </div>
 <p><code>well_paid</code> is the employees with <code>sal</code> above 2000. <code>emp_search</code> is every employee, with a text index on disk. Both are covered on the <a href="/docs/views">Views</a> and <a href="/docs/search">Text search</a> pages.</p>
 
+<h2 id="crate">Rust crate</h2>
+<p>The crates.io package name is <code>kovadb</code>. The library name stays <code>kova</code>. After version 0.1.0 is published, <code>cargo install kovadb</code> installs the <code>kova</code> and <code>kovadump</code> binaries. A program that embeds the server depends on the package and calls <code>kova::serve()</code>.</p>
+<p>That version is published from GitHub Actions when a merge into <code>main</code> changes the crate sources. It is not on crates.io yet.</p>
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">kovadb = "0.1"</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">cargo install kovadb</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">Installed package `kovadb v0.1.0`
+binary: kova
+binary: kovadump</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">Rust</div>
+<pre><code class="lang-rs">#[tokio::main]
+async fn main() {
+    kova::serve().await;
+}</code></pre>
+</div>
+<p>The dependency uses the package name <code>kovadb</code>. The code uses the library name <code>kova</code>. <code>serve</code> is the same process the <code>kova</code> binary starts.</p>
+
 <h2 id="next">What to open next</h2>
 <div class="cards">
   <a href="/docs/concepts"><strong>How data is stored</strong><span>Pages, the log, and why a collection lives on one worker.</span></a>
@@ -221,7 +245,7 @@ FORD    ANALYST   3000</code></pre>
 
       <nav class="pager"><a href="/docs"><span>Previous</span>Welcome</a><a class="next" href="/docs/concepts"><span>Next</span>How data is stored</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#next">What to open next</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#crate">Rust crate</a><a href="#next">What to open next</a></nav>
   </div>
   <footer>
     <span>KOVA</span>

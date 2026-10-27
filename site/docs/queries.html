@@ -202,7 +202,7 @@ CLERK      4          4150</code></pre>
 ]</code></pre>
 </div>
 <p><code>let</code> plus a nested <code>pipeline</code> runs that pipeline for each local document. A <code>$match</code> inside it accepts <code>$expr</code>.</p>
-<p>On a shard router, a stage other than <code>$match</code>, <code>$project</code>, or <code>$unwind</code> is refused. A <code>$group</code> inside each shard is not the group of the whole collection. Run the group against one shard, or against a process that holds the collection.</p>
+<p>On a shard router, <code>$group</code> runs on each shard and the router merges <code>$sum</code>, <code>$min</code>, <code>$max</code>, <code>$avg</code>, and <code>$count</code>. An accumulator that cannot merge is refused, and the error names it. Equality <code>$lookup</code> sends the join keys to the shards that hold the other collection. A stage after the group or the lookup is refused by name. A <code>$group</code> sent to one shard is only that shard's group.</p>
 
 <h2 id="out">Write the result</h2>
 <p><a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/out/"><code>$out</code></a> inserts the pipeline result into a collection. That write goes through the log, like any other insert.</p>
