@@ -64,10 +64,10 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <table class="grid">
   <thead><tr><th>You want to</th><th>You use</th></tr></thead>
   <tbody>
-    <tr><td>Store and read documents</td><td>A MongoDB driver. <a href="/docs/documents">Documents</a>.</td></tr>
+    <tr><td>Create a collection, insert, update, delete</td><td><code>createCollection</code>, <code>insertOne</code>, <code>updateOne</code>, <code>deleteOne</code>. <a href="/docs/documents">Documents</a>.</td></tr>
     <tr><td>Filter, group, and join collections</td><td><code>find</code> and <code>aggregate</code>. <a href="/docs/queries">Find and aggregate</a>.</td></tr>
     <tr><td>Ask a SQL question</td><td><code>db.runCommand({ sql })</code>. <a href="/docs/sql">SQL</a>.</td></tr>
-    <tr><td>Search words, including a typo</td><td><code>$text</code>, or <code>WHERE TEXT</code>. <a href="/docs/search">Text search</a>.</td></tr>
+    <tr><td>Search words, allow a typo, and count by group</td><td><code>$text</code>, or <code>WHERE TEXT</code> with <code>FUZZY</code> and <code>FACETS</code>. <a href="/docs/search">Text search</a>.</td></tr>
     <tr><td>Speed up a field lookup</td><td><code>createIndex</code>. <a href="/docs/indexes">Indexes</a>.</td></tr>
     <tr><td>Name a saved pipeline</td><td>A view. <a href="/docs/views">Views</a>.</td></tr>
     <tr><td>Number a field on insert</td><td><code>autoincrement</code>. <a href="/docs/counters">Autoincrement</a>.</td></tr>

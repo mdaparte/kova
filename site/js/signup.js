@@ -1,7 +1,7 @@
 // Paste the address of a form that accepts a field named "email".
 // A free Formspree form looks like https://formspree.io/f/xxxxxxxx
 // Until this is set, the button tells the visitor the list is closed.
-const SIGNUP_URL = "";
+const SIGNUP_URL = "https://formspree.io/f/mbgggvog";
 
 document.querySelectorAll("form.list").forEach((form) => {
   const status = form.querySelector(".status");
@@ -20,7 +20,7 @@ document.querySelectorAll("form.list").forEach((form) => {
     });
     if (response.ok) {
       form.reset();
-      status.textContent = "Saved. We'll write when there is something new.";
+      status.textContent = "Saved. We'll write about the next release.";
       status.classList.add("ok");
       return;
     }

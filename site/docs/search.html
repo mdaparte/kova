@@ -136,8 +136,8 @@ MILLER  CLERK   1300</code></pre>
 </div>
 <p><code>halfLifeSeconds</code> is the age at which the date contribution drops by half. The field is a BSON date. <code>$analyzer</code> inside a query is ignored: the pipeline was chosen when the index was built.</p>
 
-<h2 id="facets">Facets</h2>
-<p>SQL can turn the same search into buckets. Each row is a facet name, a bucket, and a count.</p>
+<h2 id="facets">Groups</h2>
+<p>A group is a count of the matches that share a value, or that fall in a band of numbers. Job title is a group. A salary band is a group. SQL asks for this with <code>FACETS</code>. Each row is the group name, the bucket, and a count.</p>
 <div class="ex" data-switch>
 <div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="true">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="false">SQL</button></span></div>
 <div class="ex-pane" data-lang="mql">
@@ -179,7 +179,7 @@ sal    3000..      0</code></pre>
 
       <nav class="pager"><a href="/docs/indexes"><span>Previous</span>Indexes</a><a class="next" href="/docs/views"><span>Next</span>Views</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#find">Find with $text</a><a href="#fuzzy">A misspelling</a><a href="#rank">Weights and recency</a><a href="#facets">Facets</a><a href="#disk">An index that stays on disk</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#find">Find with $text</a><a href="#fuzzy">A misspelling</a><a href="#rank">Weights and recency</a><a href="#facets">Groups</a><a href="#disk">An index that stays on disk</a></nav>
   </div>
   <footer>
     <span>KOVA</span>

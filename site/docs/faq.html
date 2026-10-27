@@ -79,6 +79,19 @@ async fn main() {
 <h3 id="sql-and-documents">Can SQL and document commands see the same rows?</h3>
 <p>Yes. A collection is the table. <code>db.emp.find({ sal: { $gt: 2000 } })</code> and <code>SELECT ename, sal FROM emp WHERE sal &gt; 2000</code> read the same pages. SQL runs in <a href="https://datafusion.apache.org/">DataFusion</a>. The statement is one <code>FROM</code>. A join in SQL is outside that statement. Use <code>$lookup</code> in the pipeline, or write the result with <code>$out</code> and select from that collection. See <a href="/docs/sql">SQL</a>.</p>
 
+<h3 id="writes">How do I create a table, insert, and update?</h3>
+<p>The collection is the table. The first insert creates it. <code>db.createCollection("orders")</code> creates it empty, which is also how you attach an autoincrement field. <code>insertOne</code> and <code>insertMany</code> add rows. <code>updateOne</code> and <code>updateMany</code> change them. <code>deleteOne</code> removes one. <code>createIndex</code> adds an index on a field you look up. A later <code>SELECT</code> reads those rows.</p>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.createCollection("orders")
+db.orders.insertOne({ sku: "kettle", qty: 2 })
+db.orders.updateOne({ sku: "kettle" }, { $set: { qty: 3 } })
+db.orders.createIndex({ sku: 1 })</code></pre>
+<div class="ex-label">SQL</div>
+<pre><code class="lang-sql">SELECT sku, qty FROM orders WHERE qty &gt; 1</code></pre>
+</div>
+<p>A SQL string does the reading. <code>CREATE TABLE</code>, <code>INSERT</code>, and <code>UPDATE</code> sent as SQL are not stored. The writes above are. Details are on <a href="/docs/documents">Documents</a>, <a href="/docs/indexes">Indexes</a>, and <a href="/docs/sql">SQL</a>.</p>
+
 <h3 id="restart">What survives a restart?</h3>
 <p>Committed documents, indexes, views, users, and autoincrement counters. They are in the page files under <code>data/</code>. An open transaction that had not committed is gone: its writes never reached a page. Start the process again from the same directory and the listener answers with the same data.</p>
 
@@ -147,7 +160,7 @@ async fn main() {
 
       <nav class="pager"><a href="/docs"><span>Previous</span>Welcome</a><a class="next" href="/docs/powered-by"><span>Next</span>Powered by</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#running">Running the server</a><a href="#crate">The crate</a><a href="#storage">How a document is stored</a><a href="#backup">How backup works</a><a href="#copies">Copies, and what is still planned</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#running">Running the server</a><a href="#writes">Creating and changing rows</a><a href="#storage">How a document is stored</a><a href="#backup">How backup works</a><a href="#copies">Copies, and what is still planned</a></nav>
   </div>
   <footer>
     <span>KOVA</span>

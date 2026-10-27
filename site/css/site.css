@@ -146,7 +146,8 @@ footer {
 .cover .wrap {
   position: relative;
   z-index: 1;
-  min-height: min(720px, 86vh);
+  min-height: calc(100svh - 48px);
+  min-height: calc(100dvh - 48px);
   display: grid;
   align-content: end;
   gap: 28px;
@@ -189,6 +190,12 @@ footer {
   color: var(--k-calcario);
 }
 
+.cover .lead a {
+  color: var(--k-feldspato);
+  text-decoration-color: var(--k-oxido);
+  text-underline-offset: 4px;
+}
+
 .row { display: flex; flex-wrap: wrap; gap: 10px; }
 
 .button, button {
@@ -219,10 +226,30 @@ footer {
   padding: 48px 0;
 }
 
-.facts article, .guide section {
+.facts article, .facts a, .guide section {
   background: var(--surface);
   border: 1px solid var(--line);
   padding: 24px;
+}
+
+.facts a {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 0 22px;
+  color: inherit;
+  text-decoration: none;
+  min-width: 0;
+}
+
+.facts a:hover { border-color: var(--k-oxido); }
+
+.fact-mark {
+  display: block;
+  width: 100%;
+  height: 96px;
+  background: var(--plate);
+  color: var(--k-granito);
 }
 
 .facts h2, .guide h2, .signup h2 {
@@ -235,6 +262,8 @@ footer {
 }
 
 .facts h2 { font-size: 22px; }
+
+.facts a h2, .facts a p { padding-inline: 22px; }
 
 .facts p, .guide p { margin: 0 0 12px; max-width: 65ch; }
 
