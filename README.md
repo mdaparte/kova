@@ -26,4 +26,17 @@ The end-user guide is the static site in [`site/`](site/index.html). Start at [G
 
 People changing Kova build from this repository with the Makefile (`make release`, `make test`). `make doc` builds the API reference.
 
+The crates.io package is `kovadb`. The library name stays `kova`, and `cargo install kovadb` installs the `kova` and `kovadump` binaries.
+
+```toml
+kovadb = "0.1"
+```
+
+```rust
+#[tokio::main]
+async fn main() {
+    kova::serve().await;
+}
+```
+
 Kova is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
