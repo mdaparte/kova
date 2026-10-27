@@ -41,7 +41,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
-<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status" class="here">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status" class="here">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
 <div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
@@ -50,7 +50,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>Status</h1>
       <p class="lede">serverStatus returns seventeen counters and the uptime. They move as commands run.</p>
       
-<p>Counters are updated on the command path. <code>serverStatus</code> returns the current values.</p>
+<p>Counters are updated on the command path. <code>serverStatus</code> returns the current values. A timed pass over the same counters is on <a href="/docs/benchmark">Benchmark</a>.</p>
 <div class="ex">
 <div class="ex-label">MQL</div>
 <pre><code class="lang-mql">db.runCommand({ serverStatus: 1 })</code></pre>
@@ -98,7 +98,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <h2 id="connections">Connections</h2>
 <p><code>max_connections</code> in <code>kova.toml</code> caps how many clients can be connected. The default is 128. The socket past the cap gets an error and is closed, and it does not increment <code>connectionsActive</code>. Each accepted connection records the peer address, the start time, and the authenticated user when security is on. <code>max_connection_idle_ms</code> closes a connection that has sent nothing for that long. <code>0</code> leaves idle connections open. Shutdown, and disabling a user, close the matching connections and free the slots.</p>
 
-      <nav class="pager"><a href="/docs/security"><span>Previous</span>Security</a><a class="next" href="/docs/backup"><span>Next</span>Backup and restore</a></nav>
+      <nav class="pager"><a href="/docs/security"><span>Previous</span>Security</a><a class="next" href="/docs/benchmark"><span>Next</span>Benchmark</a></nav>
     </article>
     <nav class="onpage"><h2>On this page</h2><a href="#counters">The counters</a><a href="#connections">Connections</a></nav>
   </div>

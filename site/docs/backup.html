@@ -41,7 +41,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
-<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup" class="here">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup" class="here">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
 <div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
@@ -92,7 +92,7 @@ restored 1 collections, 3 documents, 0 views into shop</code></pre>
 <h2 id="where">Router, shard, or one process</h2>
 <p>Point the dump at the address you want to read. Against a router, the file has the whole database when every shard answers. If a shard is down, the dump fails and no partial file is written. Against one shard, the file has that piece. A shard with no replica is silent while its process is down. The other shards still answer their own finds. Restarting that process on the same data directory brings the piece back.</p>
 
-      <nav class="pager"><a href="/docs/status"><span>Previous</span>Status</a><a class="next" href="/docs/replication"><span>Next</span>Replica sets</a></nav>
+      <nav class="pager"><a href="/docs/benchmark"><span>Previous</span>Benchmark</a><a class="next" href="/docs/replication"><span>Next</span>Replica sets</a></nav>
     </article>
     <nav class="onpage"><h2>On this page</h2><a href="#flags">Flags</a><a href="#formats">What restore reads</a><a href="#where">Router, shard, or one process</a></nav>
   </div>
