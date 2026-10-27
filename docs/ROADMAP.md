@@ -41,6 +41,7 @@ replication, and multi-model indexing.
 | 25 | Autoincrement | ✅ Complete |
 | 26 | Feed (Apache Iggy) | ⚪ Planned |
 | 27 | User guide | ⚪ Planned |
+| 28 | Read path and scale | ⚪ Planned |
 
 ## Phase 1 — Networking & Interception ✅
 
@@ -936,6 +937,32 @@ The guide does not rename a client product, and it does not copy the roadmap pha
 - [x] `ROADMAP`, `ARCHITECTURE`, `CONTRACT`, and `CONTRIBUTING` stay the engineering documents. `make doc` stays the API reference.
 - [x] The README tells a user to install the published build and run `kova` on port `27018`. The Makefile stays the contributor path.
 
+## Phase 28 — Read path and scale ⚪ Planned
+
+An index hit still reads every page of the collection. The B-tree and the hash index live entirely in RAM. A collection on one process scans on one core. The router refuses `$group` and `$lookup`. Adding a shard does not move the documents already stored. A transaction names one collection. This phase closes those gaps. It does not add two-phase commit, and it does not make one process both the router and a replica-set voter.
+
+`IDHACK` and `IXSCAN` choose ids, then the fetch walks the collection and keeps those ids. An empty id list already reads nothing. A hit will read the page that holds the document. The index entry records that page. When an update moves the document, the entry moves with it. A missing id reads no page. A snapshot read inside an open transaction still uses the version chain.
+
+The B-tree and the hash index become pages in the buffer pool. The top of the tree stays cached, so a point lookup reads the height of the tree plus the data page. `indexes.bin` stops being the resident copy. A directory that still has that snapshot loads it once. The next checkpoint writes the pages. Startup that finds those pages does not walk documents to rebuild the index.
+
+A collection that lives on one process can scan on more than one core. Writes to that collection stay on one worker, so the log order does not fork. The four local partitions stay. Sharding is still what splits one collection across processes, by `_id`.
+
+On the router, `$group` runs on each shard and the router merges the pieces. Accumulators that combine are `$sum`, `$min`, `$max`, and a count. `$avg` merges as a sum and a count. An accumulator that cannot merge is still refused, and the error names it. `$lookup` with `localField` and `foreignField` runs too: the router sends the join keys to the shards that hold the other collection and merges the matches. A `$group` sent to one shard is still only that shard's group.
+
+Adding a shard moves each document whose `_id` now falls on the new arc. A document that stays on its current shard is not rewritten. During the move, a find by `_id` returns the document once. Removing a shard is not part of this phase.
+
+A transaction on one process can name more than one collection. The commit is still one log record. A transaction that would span shards, or replica-set members, stays refused.
+
+### Phase 28 — Sub-tasks
+
+- [ ] An index hit reads the page recorded on the index entry. A missing id, and an empty id list, read no page. A move of the document updates the entry.
+- [ ] The B-tree and the hash index are pages in the buffer pool. Startup opens those pages and does not rebuild them from documents. An old `indexes.bin` is loaded once and replaced at the next checkpoint.
+- [ ] A scan of one collection on one process can use more than one core. Writes to that collection stay on one worker.
+- [ ] The router merges a `$group` whose accumulators combine, and runs an equality `$lookup`. A stage that cannot merge is refused by name.
+- [ ] Adding a shard moves documents whose `_id` belongs on the new arc. A find by `_id` during the move returns the document once.
+- [ ] One transaction on one process can write more than one collection, as one log record. A transaction across shards or replica-set members is refused.
+- [ ] Test: a selective `IXSCAN` on a collection larger than the buffer pool does not read every page. After a restart, the index pages are opened and documents are not scanned to rebuild them. A `$group` through the router matches a `$group` on one process that holds the whole collection. Adding a shard moves a document whose `_id` changed arc, and a find returns it once.
+
 ## Architecture Principles
 
 1. **Hybrid memory+disk**: documents live in pages. RAM holds the buffer
@@ -962,6 +989,12 @@ The guide does not rename a client product, and it does not copy the roadmap pha
 |-----|-------|-------|
 | A committed write has no feed for other programs | 26 | `[feed]` will publish one JSON record per committed insert, update, or delete to Apache Iggy. The listener decides what to do with `before` and `after`. Today a program tails a collection or the oplog. |
 | The email form on the site has no endpoint yet | 27 | The guide is `site/docs/`. `SIGNUP_URL` in `site/js/signup.js` is empty until a form endpoint is pasted. |
+| An index hit reads every page of the collection | 28 | `IDHACK` and `IXSCAN` choose ids, then the fetch walks the collection. The entry will record the page, and a hit will read that page. |
+| The B-tree and the hash index live entirely in RAM | 28 | They become buffer-pool pages. `indexes.bin` is loaded once from an old directory and replaced at the next checkpoint. |
+| A collection scan uses one core | 28 | A scan on one process can use more than one core. Writes to that collection stay on one worker. |
+| The router refuses `$group` and `$lookup` | 28 | `$group` is merged from the shards when the accumulators combine. Equality `$lookup` sends the join keys to the shards that hold the other collection. |
+| Adding a shard does not move existing documents | 28 | Documents whose `_id` falls on the new arc move. A find by `_id` during the move returns the document once. |
+| A transaction names one collection | 28 | One process can commit writes to more than one collection as one log record. A transaction across shards or replica-set members stays refused. |
 
 ## Architecture Diagram (updated)
 
@@ -1019,4 +1052,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–25 are complete. Still open: the feed (Phase 26) and the user guide (Phase 27).*
+*Phases 1–25 are complete. Still open: the feed (Phase 26), the user guide (Phase 27), and the read path (Phase 28).*

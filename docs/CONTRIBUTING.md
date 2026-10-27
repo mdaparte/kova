@@ -214,6 +214,11 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   the server and use what is shipped, starting at Getting started. The
   home page asks for an email. The form endpoint is still unset. The
   engineering documents stay as they are. ⚪ Planned.
+- **Phase 28 — Read path and scale:** an index hit reads the page the
+  entry records, the B-tree and hash index are buffer-pool pages, a scan
+  can use more than one core, the router merges `$group` and equality
+  `$lookup`, adding a shard moves documents onto the new arc, and one
+  process can commit more than one collection in one log record. ⚪ Planned.
 
 ## 6. License
 
