@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script>
+try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
+</script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>License - KOVA</title>
+  <meta name="description" content="Kova is licensed under the Apache License, Version 2.0.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="/"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="/docs">Docs</a>
+      <a href="/docs/getting-started">Start</a>
+      <a href="/#list">Email</a>
+      <button type="button" class="theme" data-theme-toggle>Light</button>
+    </nav>
+  </header>
+  <main class="wrap" style="padding:48px 0 72px">
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>License</span></div>
+      <h1>Apache License 2.0</h1>
+      <p class="lede">Copyright 2026 Marcelo Daparte.</p>
+      <p>Kova is released under the <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache License, Version 2.0</a>. You can run it, change it, and ship it, including inside another product. Keep this license and the copyright notice with the copy you distribute.</p>
+      <p>The same text is in the <code>LICENSE</code> file of the repository. The release archive and the container image carry <code>LICENSE</code> and <code>NOTICE</code>.</p>
+    </article>
+  </main>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/docs">Docs</a>
+    </nav>
+  </footer>
+  <script src="/js/theme.js"></script>
+</body>
+</html>

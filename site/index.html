@@ -6,8 +6,11 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>KOVA</title>
-  <meta name="description" content="Kova is a database you talk to with a MongoDB driver. Documents, SQL, and text search in one process.">
+  <meta name="description" content="Kova is open source database software under the Apache License 2.0. Documents, SQL, and text search in one process.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
@@ -50,7 +53,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <div class="eyebrow"><span class="slab"></span><span>Database engine</span></div>
       <svg class="mark" width="64" height="64" aria-hidden="true"><use href="#k"/></svg>
       <h1>KOVA</h1>
-      <p class="lead">One process stores the documents, answers SQL, and searches text.</p>
+      <p class="lead">One process stores the documents, answers SQL, and searches text. Open source, under the <a href="/license">Apache License 2.0</a>.</p>
       <div class="row">
         <a class="button" href="/docs/getting-started">Getting started</a>
         <a class="button quiet" href="#list">Leave your email</a>
@@ -59,18 +62,21 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   </section>
   <main class="wrap">
     <section class="facts">
-      <article>
-        <h2>Connect</h2>
-        <p>Any MongoDB driver. Host <code>127.0.0.1</code>, port <code>27018</code>.</p>
-      </article>
-      <article>
-        <h2>Run</h2>
-        <p>Install the Linux build, then run <code>kova</code>. Data stays in <code>data/</code>.</p>
-      </article>
-      <article>
-        <h2>Open by default</h2>
-        <p>Security is off until you enable it. Then the client sends both a user and a password.</p>
-      </article>
+      <a href="/docs/search">
+        <svg class="fact-mark" viewBox="0 0 320 88" fill="currentColor" aria-hidden="true"><rect x="24" y="22" width="148" height="8"/><rect x="24" y="40" width="104" height="8" fill="var(--k-oxido)"/><rect x="24" y="58" width="128" height="8"/><rect x="196" y="48" width="28" height="18"/><rect x="232" y="34" width="28" height="32" fill="var(--k-oxido)"/><rect x="268" y="22" width="28" height="44"/></svg>
+        <h2>Search the words</h2>
+        <p>Find a word in what you stored. A typo still matches. The same search can count the results by a group, such as job, or by a band of numbers, such as salary.</p>
+      </a>
+      <a href="/docs/documents">
+        <svg class="fact-mark" viewBox="0 0 320 88" fill="currentColor" aria-hidden="true"><rect x="28" y="16" width="8" height="56"/><rect x="28" y="16" width="72" height="8"/><rect x="92" y="16" width="8" height="56"/><rect x="28" y="64" width="72" height="8"/><rect x="44" y="32" width="40" height="8" fill="var(--k-oxido)"/><rect x="44" y="48" width="28" height="8"/><rect x="132" y="22" width="156" height="8"/><rect x="132" y="40" width="156" height="8" fill="var(--k-oxido)"/><rect x="132" y="58" width="112" height="8"/></svg>
+        <h2>Add a row, then query it</h2>
+        <p>Create the collection, insert a document, change it, and add an index on a field you look up. A SQL query reads those same rows.</p>
+      </a>
+      <a href="/docs/backup">
+        <svg class="fact-mark" viewBox="0 0 320 88" fill="currentColor" aria-hidden="true"><rect x="28" y="16" width="8" height="56"/><rect x="28" y="16" width="88" height="8"/><rect x="108" y="16" width="8" height="56"/><rect x="28" y="64" width="88" height="8"/><rect x="148" y="22" width="140" height="8"/><rect x="148" y="40" width="96" height="8" fill="var(--k-oxido)"/><rect x="148" y="58" width="72" height="8"/></svg>
+        <h2>Take a copy</h2>
+        <p>Save the database to a file and load that file back. The file holds the documents, the indexes, and the views.</p>
+      </a>
     </section>
     <section class="cards">
       <a href="/docs/getting-started"><strong>Getting started</strong><span>Install the Linux build, start the listener, write a document, read it after a restart.</span></a>
@@ -79,12 +85,14 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <a href="/docs/sql"><strong>SQL</strong><span>One SELECT over the same collections, from a shell or from ODBC.</span></a>
       <a href="/docs/backup"><strong>Backup</strong><span>kovadump writes a file and reads SQL and MongoDB dumps back in.</span></a>
       <a href="/docs/replication"><strong>Copies and shards</strong><span>A replica set copies the data. Shards split it across processes.</span></a>
+      <a href="/docs/faq"><strong>FAQ</strong><span>How the engine stores a document, and how kovadump builds a backup.</span></a>
+      <a href="/docs/powered-by"><strong>Powered by</strong><span>Rust, DataFusion, Tantivy, OpenRaft, and Apache Iggy for the planned feed.</span></a>
     </section>
     <section class="signup" id="list">
       <div>
         <div class="eyebrow"><span class="slab"></span><span>List</span></div>
         <h2>Leave an email.</h2>
-        <p>One address, for when there is a release or a note worth sending. Nothing else.</p>
+        <p>We'll write when a new release is out, and when there is something else about Kova worth knowing. One address.</p>
       </div>
       <form class="list">
         <label class="hp">Leave this empty<input type="text" name="_gotcha" tabindex="-1" autocomplete="off"></label>
@@ -96,9 +104,14 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   </main>
   <footer>
     <span>KOVA</span>
-    <a href="/docs">Docs</a>
+    <nav>
+      <a href="/docs">Docs</a>
+      <a href="/docs/faq">FAQ</a>
+      <a href="/docs/powered-by">Powered by</a>
+      <a href="/license">License</a>
+    </nav>
   </footer>
-  <script src="/js/signup.js"></script>
+  <script src="/js/signup.js?v=2"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

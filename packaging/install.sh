@@ -12,6 +12,8 @@ install -m 755 "$root/kovadump" "$prefix/bin/kovadump"
 install -m 755 "$root/libkova.so" "$prefix/lib/libkova.so"
 install -m 644 "$root/kova.toml" "$prefix/share/kova/kova.toml"
 install -m 644 "$root/seed-oracle.js" "$prefix/share/kova/seed-oracle.js"
+install -m 644 "$root/LICENSE" "$prefix/share/kova/LICENSE"
+install -m 644 "$root/NOTICE" "$prefix/share/kova/NOTICE"
 
 odbcinst="$HOME/.odbcinst.ini"
 if [ ! -f "$odbcinst" ] || ! grep -q '^\[Kova\]' "$odbcinst"; then

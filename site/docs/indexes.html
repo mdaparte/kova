@@ -6,7 +6,10 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Indexes — KOVA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Indexes - KOVA</title>
   <meta name="description" content="B-tree for ranges, hash for equality, unique and sparse when you ask. The pages stay the source of truth.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,6 +42,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes" class="here">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
@@ -46,17 +50,30 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>Indexes</h1>
       <p class="lede">B-tree for ranges, hash for equality, unique and sparse when you ask. The pages stay the source of truth.</p>
       
-<p>An index speeds a predicate. It is rebuilt from the document pages when the process starts, and maintained on insert, update, and delete. Index entries store the document id. An update may move the document to another page, and the id still finds it.</p>
+<p>An index speeds a predicate. The B-tree and the hash index are stored as pages and opened on startup, so the process does not walk the documents to rebuild them. Insert, update, and delete keep the entries current. Each entry records the page that holds the document. When an update moves the document, that page moves with the entry. A missing id reads no page.</p>
 <p>The sample load creates five indexes on <code>emp</code>. You can create the same ones yourself.</p>
 
 <h2 id="create">Create and drop</h2>
-<pre>db.emp.createIndex({ sal: 1 }, { name: "sal_1" })
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.emp.createIndex({ sal: 1 }, { name: "sal_1" })
 db.emp.createIndex({ job: "hashed" }, { name: "job_hashed" })
 db.emp.createIndex({ ename: 1 }, { name: "ename_1", unique: true })
 db.emp.createIndex({ deptno: 1, sal: 1 }, { name: "deptno_1_sal_1" })
 db.emp.createIndex({ comm: 1 }, { name: "comm_1", sparse: true })
 db.emp.getIndexes()
-db.emp.dropIndex("sal_1")</pre>
+db.emp.dropIndex("sal_1")</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { name: '_id_', key: { _id: 1 } },
+  { name: 'sal_1', key: { sal: 1 } },
+  { name: 'job_hashed', key: { job: 'hashed' } },
+  { name: 'ename_1', key: { ename: 1 }, unique: true },
+  { name: 'deptno_1_sal_1', key: { deptno: 1, sal: 1 } },
+  { name: 'comm_1', key: { comm: 1 }, sparse: true }
+]
+{ nIndexesWas: 6, ok: 1 }</code></pre>
+</div>
 <p><code>dropIndexes</code> with <code>"*"</code> drops every secondary index. The <code>_id_</code> index stays. A unique violation while building rolls the spec back and writes nothing to the log.</p>
 <p>A text index is separate. <code>createIndexes</code> with <code>"text"</code> is rejected. Word search uses the text index described on <a href="/docs/search">Text search</a>, including <code>kova.inverted</code> on a view.</p>
 
@@ -79,12 +96,46 @@ db.emp.dropIndex("sal_1")</pre>
   <li>Anything else is <code>COLLSCAN</code>.</li>
 </ol>
 <p>After the index returns ids, Kova reads those documents from the pages and applies the rest of the filter. An empty id list is an empty answer. <code>find</code>, <code>count</code>, and a leading <code>$match</code> use this path. A read inside an open transaction stays on that transaction's snapshot and does not switch to the index mid-flight.</p>
-<pre>db.emp.find({ sal: { $gt: 2000 } }).explain()</pre>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.emp.find({ sal: { $gt: 2000 } }).explain()</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{
+  ok: 1,
+  queryPlanner: {
+    namespace: 'db.emp',
+    winningPlan: {
+      stage: 'IXSCAN',
+      indexName: 'sal_1',
+      filter: { sal: { $gt: 2000 } }
+    }
+  }
+}</code></pre>
+</div>
 <p>A SQL <code>WHERE</code> that is one comparison, such as <code>sal &gt; 1000</code> or <code>job = 'CLERK'</code>, is planned the same way. DataFusion checks the predicate again. The SQL reply includes the stage that won.</p>
 
 <h2 id="show">List them from SQL</h2>
 <p>A SQL client can ask:</p>
-<pre>SHOW INDEXES FROM emp</pre>
+<div class="ex" data-switch>
+<div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="true">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="false">SQL</button></span></div>
+<div class="ex-pane" data-lang="mql">
+<pre><code class="lang-mql">db.emp.getIndexes()</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { name: '_id_', key: { _id: 1 } },
+  { name: 'sal_1', key: { sal: 1 } },
+  { name: 'ename_1', key: { ename: 1 }, unique: true }
+]</code></pre>
+</div>
+<div class="ex-pane" data-lang="sql" hidden>
+<pre><code class="lang-sql">SHOW INDEXES FROM emp</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">table  name     seq  column  order  unique  sparse
+emp    _id_     1    _id     asc    true    false
+emp    sal_1    1    sal     asc    false   false
+emp    ename_1  1    ename   asc    true    false</code></pre>
+</div>
+</div>
 <p><code>SHOW KEYS</code> and <code>SHOW INDEX</code> are the same question. The rows are the indexes on that collection.</p>
 
       <nav class="pager"><a href="/docs/queries"><span>Previous</span>Find and aggregate</a><a class="next" href="/docs/search"><span>Next</span>Text search</a></nav>
@@ -96,8 +147,10 @@ db.emp.dropIndex("sal_1")</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

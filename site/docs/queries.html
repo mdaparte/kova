@@ -6,7 +6,10 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Find and aggregate — KOVA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Find and aggregate - KOVA</title>
   <meta name="description" content="Filters, projections, and a pipeline of stages over the pages of a collection.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,6 +42,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries" class="here">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
@@ -46,43 +50,90 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>Find and aggregate</h1>
       <p class="lede">Filters, projections, and a pipeline of stages over the pages of a collection.</p>
       
-<p><code>find</code> and the aggregation pipeline share one matcher. A leading <code>$match</code> runs while the pages are scanned. The pipeline is the BSON array a MongoDB shell already sends. There is no second syntax.</p>
+<p><a href="https://www.mongodb.com/docs/manual/reference/method/db.collection.find/"><code>find</code></a> and the <a href="https://www.mongodb.com/docs/manual/reference/method/db.collection.aggregate/">aggregation pipeline</a> share one matcher. A leading <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/match/"><code>$match</code></a> runs while the pages are scanned. The pipeline is the BSON array a MongoDB shell already sends. There is no second syntax. The names are MongoDB's. Each link below is that operator in the MongoDB manual. Kova runs the operators on this page.</p>
 
 <h2 id="predicates">Predicates</h2>
 <p>Equality is <code>{ job: "CLERK" }</code>. These operators work on <code>find</code> and inside <code>$match</code>. Numbers compare across int and double. Dates compare by instant.</p>
 <table class="grid">
   <thead><tr><th>Operator</th><th>Meaning</th></tr></thead>
   <tbody>
-    <tr><td><code>$eq</code> <code>$ne</code></td><td>Equal, or not equal.</td></tr>
-    <tr><td><code>$gt</code> <code>$gte</code> <code>$lt</code> <code>$lte</code></td><td>Ordered comparison.</td></tr>
-    <tr><td><code>$in</code> <code>$nin</code></td><td>Value is in a list, or outside it.</td></tr>
-    <tr><td><code>$exists</code></td><td>The field is present, or absent.</td></tr>
-    <tr><td><code>$and</code> <code>$or</code> <code>$nor</code></td><td>Combine predicates.</td></tr>
-    <tr><td><code>$not</code></td><td>Negate one operator document.</td></tr>
-    <tr><td><code>$regex</code></td><td>Match a string field.</td></tr>
-    <tr><td><code>$type</code></td><td>Match the BSON type of a field.</td></tr>
-    <tr><td><code>$elemMatch</code></td><td>One array element satisfies every predicate in the subdocument.</td></tr>
+    <tr><td><a href="https://www.mongodb.com/docs/manual/reference/operator/query/eq/"><code>$eq</code></a> <a href="https://www.mongodb.com/docs/manual/reference/operator/query/ne/"><code>$ne</code></a></td><td>Equal, or not equal.</td></tr>
+    <tr><td><a href="https://www.mongodb.com/docs/manual/reference/operator/query/gt/"><code>$gt</code></a> <a href="https://www.mongodb.com/docs/manual/reference/operator/query/gte/"><code>$gte</code></a> <a href="https://www.mongodb.com/docs/manual/reference/operator/query/lt/"><code>$lt</code></a> <a href="https://www.mongodb.com/docs/manual/reference/operator/query/lte/"><code>$lte</code></a></td><td>Ordered comparison.</td></tr>
+    <tr><td><a href="https://www.mongodb.com/docs/manual/reference/operator/query/in/"><code>$in</code></a> <a href="https://www.mongodb.com/docs/manual/reference/operator/query/nin/"><code>$nin</code></a></td><td>Value is in a list, or outside it.</td></tr>
+    <tr><td><a href="https://www.mongodb.com/docs/manual/reference/operator/query/exists/"><code>$exists</code></a></td><td>The field is present, or absent.</td></tr>
+    <tr><td><a href="https://www.mongodb.com/docs/manual/reference/operator/query/and/"><code>$and</code></a> <a href="https://www.mongodb.com/docs/manual/reference/operator/query/or/"><code>$or</code></a> <a href="https://www.mongodb.com/docs/manual/reference/operator/query/nor/"><code>$nor</code></a></td><td>Combine predicates.</td></tr>
+    <tr><td><a href="https://www.mongodb.com/docs/manual/reference/operator/query/not/"><code>$not</code></a></td><td>Negate one operator document.</td></tr>
+    <tr><td><a href="https://www.mongodb.com/docs/manual/reference/operator/query/regex/"><code>$regex</code></a></td><td>Match a string field.</td></tr>
+    <tr><td><a href="https://www.mongodb.com/docs/manual/reference/operator/query/type/"><code>$type</code></a></td><td>Match the BSON type of a field.</td></tr>
+    <tr><td><a href="https://www.mongodb.com/docs/manual/reference/operator/query/elemMatch/"><code>$elemMatch</code></a></td><td>One array element satisfies every predicate in the subdocument.</td></tr>
   </tbody>
 </table>
-<pre>db.emp.find({
+<div class="ex" data-switch>
+<div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="true">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="false">SQL</button></span></div>
+<div class="ex-pane" data-lang="mql">
+<pre><code class="lang-mql">db.emp.find({
   sal: { $gte: 1000, $lt: 2000 },
   job: { $in: ["CLERK", "SALESMAN"] }
-})</pre>
-<pre>db.emp.find({ ename: { $regex: "^S" } })</pre>
+})</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { empno: 7499, ename: 'ALLEN', job: 'SALESMAN', sal: 1600 },
+  { empno: 7521, ename: 'WARD', job: 'SALESMAN', sal: 1250 },
+  { empno: 7654, ename: 'MARTIN', job: 'SALESMAN', sal: 1250 },
+  { empno: 7844, ename: 'TURNER', job: 'SALESMAN', sal: 1500 },
+  { empno: 7876, ename: 'ADAMS', job: 'CLERK', sal: 1100 },
+  { empno: 7934, ename: 'MILLER', job: 'CLERK', sal: 1300 }
+]</code></pre>
+</div>
+<div class="ex-pane" data-lang="sql" hidden>
+<pre><code class="lang-sql">SELECT empno, ename, job, sal
+FROM emp
+WHERE sal >= 1000 AND sal < 2000
+  AND job IN ('CLERK', 'SALESMAN')</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">empno  ename    job       sal
+7499   ALLEN    SALESMAN  1600
+7521   WARD     SALESMAN  1250
+7654   MARTIN   SALESMAN  1250
+7844   TURNER   SALESMAN  1500
+7876   ADAMS    CLERK     1100
+7934   MILLER   CLERK     1300</code></pre>
+</div>
+</div>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.emp.find({ ename: { $regex: "^S" } })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { empno: 7369, ename: 'SMITH', job: 'CLERK', sal: 800 },
+  { empno: 7788, ename: 'SCOTT', job: 'ANALYST', sal: 3000 }
+]</code></pre>
+</div>
+<p>A find with no projection returns every stored field, including <code>_id</code>. The rows above keep the fields the predicate is about.</p>
 
 <h2 id="shape">Shape the rows</h2>
-<p>Projection, sort, skip, and limit work on <code>find</code> and as pipeline stages. Include fields, or exclude them. Mixing include and exclude in one projection is limited the way MongoDB limits it: <code>_id</code> is the field you may turn off while including others.</p>
-<pre>db.emp.aggregate([
+<p>Projection, sort, skip, and limit work on <code>find</code> and as pipeline stages. Include fields, or exclude them. Mixing include and exclude in one projection is limited the way MongoDB limits it: <code>_id</code> is the field you may turn off while including others. The stages are <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/project/"><code>$project</code></a>, <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/sort/"><code>$sort</code></a>, <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/skip/"><code>$skip</code></a>, and <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/limit/"><code>$limit</code></a>.</p>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.emp.aggregate([
   { $match: { deptno: 20 } },
   { $project: { ename: 1, sal: 1, _id: 0 } },
   { $sort: { sal: -1 } },
   { $skip: 1 },
   { $limit: 3 }
-])</pre>
-<p><code>$addFields</code> keeps the document and adds fields. <code>$replaceRoot</code> makes a subdocument the new root. <code>$unwind</code> emits one document per array element. <code>$count</code> emits one document with the number of rows that reached that stage.</p>
+])</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { ename: 'FORD', sal: 3000 },
+  { ename: 'JONES', sal: 2975 },
+  { ename: 'ADAMS', sal: 1100 }
+]</code></pre>
+</div>
+<p>SCOTT and FORD both have <code>sal</code> 3000, so the skipped row is one of those two. The three rows above are the rest, highest salary first.</p>
+<p><a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/addFields/"><code>$addFields</code></a> keeps the document and adds fields. <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/replaceRoot/"><code>$replaceRoot</code></a> makes a subdocument the new root. <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/unwind/"><code>$unwind</code></a> emits one document per array element. <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/count/"><code>$count</code></a> emits one document with the number of rows that reached that stage.</p>
 
 <h2 id="group">Group</h2>
-<p><code>$group</code> buckets documents by <code>_id</code>. Accumulators:</p>
+<p><a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/group/"><code>$group</code></a> buckets documents by <code>_id</code>. Accumulators:</p>
 <table class="grid">
   <thead><tr><th>Accumulator</th><th>Result</th></tr></thead>
   <tbody>
@@ -93,19 +144,47 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <tr><td><code>$push</code> <code>$addToSet</code></td><td>An array of values. <code>$addToSet</code> keeps each value once.</td></tr>
   </tbody>
 </table>
-<pre>db.emp.aggregate([
+<div class="ex" data-switch>
+<div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="true">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="false">SQL</button></span></div>
+<div class="ex-pane" data-lang="mql">
+<pre><code class="lang-mql">db.emp.aggregate([
   { $group: {
       _id: "$job",
       headcount: { $sum: 1 },
       payroll: { $sum: "$sal" }
   }},
   { $sort: { payroll: -1 } }
-])</pre>
-<p>The same question in SQL is <code>SELECT job, COUNT(*), SUM(sal) FROM emp GROUP BY job</code>. The rows match. SQL is one statement. The pipeline is how you add a lookup or write the result out.</p>
+])</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { _id: 'MANAGER', headcount: 3, payroll: 8275 },
+  { _id: 'ANALYST', headcount: 2, payroll: 6000 },
+  { _id: 'SALESMAN', headcount: 4, payroll: 5600 },
+  { _id: 'PRESIDENT', headcount: 1, payroll: 5000 },
+  { _id: 'CLERK', headcount: 4, payroll: 4150 }
+]</code></pre>
+</div>
+<div class="ex-pane" data-lang="sql" hidden>
+<pre><code class="lang-sql">SELECT job, COUNT(*) AS headcount, SUM(sal) AS payroll
+FROM emp
+GROUP BY job
+ORDER BY payroll DESC</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">job        headcount  payroll
+MANAGER    3          8275
+ANALYST    2          6000
+SALESMAN   4          5600
+PRESIDENT  1          5000
+CLERK      4          4150</code></pre>
+</div>
+</div>
+<p>The rows match. SQL is one statement. The pipeline is how you add a lookup or write the result out.</p>
 
 <h2 id="lookup">Look up another collection</h2>
-<p><code>$lookup</code> reads a second collection through the buffer pool. Equality uses <code>localField</code> and <code>foreignField</code>. The two collections are not copied into one big list first.</p>
-<pre>db.emp.aggregate([
+<p><a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/lookup/"><code>$lookup</code></a> reads a second collection through the buffer pool. Equality uses <code>localField</code> and <code>foreignField</code>. The two collections are not copied into one big list first.</p>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.emp.aggregate([
   { $match: { ename: "SMITH" } },
   { $lookup: {
       from: "dept",
@@ -113,17 +192,31 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       foreignField: "deptno",
       as: "department"
   }}
-])</pre>
+])</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  {
+    ename: 'SMITH',
+    deptno: 20,
+    department: [ { deptno: 20, dname: 'RESEARCH', loc: 'DALLAS' } ]
+  }
+]</code></pre>
+</div>
 <p><code>let</code> plus a nested <code>pipeline</code> runs that pipeline for each local document. A <code>$match</code> inside it accepts <code>$expr</code>.</p>
-<p>On a shard router, a stage other than <code>$match</code>, <code>$project</code>, or <code>$unwind</code> is refused. A <code>$group</code> inside each shard is not the group of the whole collection. Run the group against one shard, or against a process that holds the collection.</p>
+<p>On a shard router, <code>$group</code> runs on each shard and the router merges <code>$sum</code>, <code>$min</code>, <code>$max</code>, <code>$avg</code>, and <code>$count</code>. An accumulator that cannot merge is refused, and the error names it. Equality <code>$lookup</code> sends the join keys to the shards that hold the other collection. A stage after the group or the lookup is refused by name. A <code>$group</code> sent to one shard is only that shard's group.</p>
 
 <h2 id="out">Write the result</h2>
-<p><code>$out</code> inserts the pipeline result into a collection. That write goes through the log, like any other insert.</p>
-<pre>db.emp.aggregate([
+<p><a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/out/"><code>$out</code></a> inserts the pipeline result into a collection. That write goes through the log, like any other insert.</p>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.emp.aggregate([
   { $match: { sal: { $gt: 2000 } } },
   { $project: { ename: 1, sal: 1 } },
   { $out: "high_earners" }
-])</pre>
+])</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{ ok: 1 }</code></pre>
+</div>
 <p>Inside a transaction, <code>$out</code> is refused. The transaction page explains what a transaction can see.</p>
 
 <h2 id="empty">An empty pipeline</h2>
@@ -138,8 +231,10 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

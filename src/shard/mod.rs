@@ -53,16 +53,22 @@ impl Ring {
         self.order.len()
     }
 
-    /// Index into the config list of the shard that stores `id`.
-    pub fn owner_index(&self, id: &Bson) -> usize {
+    /// Shard id that stores `id`. The id is stable when the config list is reordered.
+    pub fn owner_id(&self, id: &Bson) -> u64 {
         let point = hash_id(id);
         let slot = self.nodes.partition_point(|(node, _)| *node < point);
         let slot = if slot == self.nodes.len() { 0 } else { slot };
-        let shard_id = self.nodes[slot].1;
-        self.order
-            .iter()
-            .position(|candidate| *candidate == shard_id)
+        self.nodes[slot].1
+    }
+
+    /// Index into the config list of the shard that stores `id`.
+    pub fn owner_index(&self, id: &Bson) -> usize {
+        self.index_of(self.owner_id(id))
             .expect("ring shard is one of the configured ids")
+    }
+
+    fn index_of(&self, shard_id: u64) -> Option<usize> {
+        self.order.iter().position(|candidate| *candidate == shard_id)
     }
 }
 
@@ -100,6 +106,9 @@ pub trait ShardLink: Send + Sync {
 pub struct ShardRouter {
     ring: Ring,
     link: Arc<dyn ShardLink>,
+    /// Ring from before the latest shard was added. A find by `_id`
+    /// checks the new owner, then this one, and returns the document once.
+    previous: Arc<std::sync::Mutex<Option<Ring>>>,
 }
 
 impl ShardRouter {
@@ -116,6 +125,52 @@ impl ShardRouter {
         Self {
             ring: Ring::new(&shard_ids),
             link,
+            previous: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Moves documents whose `_id` now falls on a new arc.
+    ///
+    /// `previous_ids` is the ring before the shard was added. A document
+    /// that stays on its current shard is not rewritten. While the move
+    /// runs, a find by `_id` returns the document once.
+    pub async fn rebalance(&self, previous_ids: &[u64]) -> Result<(), String> {
+        if previous_ids.is_empty() {
+            return Err("rebalance needs the previous shard ids".into());
+        }
+        let previous = Ring::new(previous_ids);
+        *self
+            .previous
+            .lock()
+            .map_err(|_| "shard move lock was poisoned".to_string())? = Some(previous.clone());
+        let result = self.move_documents(&previous).await;
+        *self
+            .previous
+            .lock()
+            .map_err(|_| "shard move lock was poisoned".to_string())? = None;
+        result
+    }
+
+    /// Remembers the shard ids in `data_dir` and moves documents when the
+    /// list has grown. The first start records the list and moves nothing.
+    /// Removing a shard is left as it was.
+    pub async fn adopt(&self, data_dir: &std::path::Path, ids: &[u64]) -> Result<(), String> {
+        std::fs::create_dir_all(data_dir).map_err(|err| format!("data dir: {err}"))?;
+        let path = data_dir.join("shard-ring.txt");
+        let previous = read_ring(&path)?;
+        match previous {
+            None => write_ring(&path, ids),
+            Some(old) if old == ids => Ok(()),
+            Some(old) if old.len() < ids.len() && old.iter().all(|id| ids.contains(id)) => {
+                self.rebalance(&old).await?;
+                write_ring(&path, ids)
+            }
+            Some(old) => {
+                crate::logger::LOGGER.warn(format!(
+                    "shard list changed from {old:?} to {ids:?}; removing a shard does not move documents"
+                ));
+                Ok(())
+            }
         }
     }
 
@@ -163,10 +218,7 @@ impl ShardRouter {
             return self.route_cursor(command).await;
         }
         if command.contains_key("aggregate") {
-            if let Some(message) = aggregate_refusal(command) {
-                return fail(&message);
-            }
-            return self.route_cursor(command).await;
+            return self.route_aggregate(command).await;
         }
         if command.contains_key("explain") {
             return self.link.call(0, command.clone()).await;
@@ -221,10 +273,21 @@ impl ShardRouter {
     async fn route_find(&self, command: &Document) -> Document {
         let filter = command.get_document("filter").cloned().unwrap_or_default();
         if let Some(id) = sole_id(&filter) {
-            return self
-                .link
-                .call(self.ring.owner_index(id), command.clone())
-                .await;
+            let owner = self.ring.owner_index(id);
+            let reply = self.link.call(owner, command.clone()).await;
+            if cursor_len(&reply) > 0 {
+                return reply;
+            }
+            let previous = self.previous.lock().ok().and_then(|slot| {
+                slot.as_ref()
+                    .and_then(|ring| self.ring.index_of(ring.owner_id(id)))
+            });
+            if let Some(old) = previous {
+                if old != owner {
+                    return self.link.call(old, command.clone()).await;
+                }
+            }
+            return reply;
         }
         let skip = number(command, "skip").max(0);
         let limit = match command.get("limit") {
@@ -306,6 +369,262 @@ impl ShardRouter {
         merge_cursor(&self.scatter(command.clone()).await, 0, None)
     }
 
+    async fn route_aggregate(&self, command: &Document) -> Document {
+        let Some(stages) = command.get_array("pipeline").cloned().ok() else {
+            return fail("aggregate requires a pipeline");
+        };
+        if let Some(index) = stage_index(&stages, "$group") {
+            return self.route_group(command, &stages, index).await;
+        }
+        if let Some(index) = stage_index(&stages, "$lookup") {
+            return self.route_lookup(command, &stages, index).await;
+        }
+        if let Some(message) = aggregate_refusal(command) {
+            return fail(&message);
+        }
+        self.route_cursor(command).await
+    }
+
+    async fn route_group(&self, command: &Document, stages: &[Bson], index: usize) -> Document {
+        if let Some(message) = prefix_refusal(&stages[..index]).or_else(|| tail_refusal(stages, index))
+        {
+            return fail(&message);
+        }
+        let Some(spec) = stages[index]
+            .as_document()
+            .and_then(|stage| stage.get_document("$group").ok())
+        else {
+            return fail("aggregate stage $group cannot be merged");
+        };
+        if let Some(message) = group_refusal(spec) {
+            return fail(&message);
+        }
+        let (sent, averages) = rewrite_group(spec);
+        let mut pipeline = stages[..index].to_vec();
+        pipeline.push(Bson::Document(bson::doc! { "$group": sent }));
+        let mut forwarded = command.clone();
+        forwarded.insert("pipeline", pipeline);
+        let replies = self.scatter(forwarded).await;
+        let rows = match cursor_rows(&replies) {
+            Ok(rows) => rows,
+            Err(reply) => return reply,
+        };
+        let namespace = cursor_namespace(&replies);
+        let merged = merge_groups(&rows, spec, &averages);
+        cursor_of(&namespace, merged)
+    }
+
+    async fn route_lookup(&self, command: &Document, stages: &[Bson], index: usize) -> Document {
+        if let Some(message) = prefix_refusal(&stages[..index]).or_else(|| tail_refusal(stages, index))
+        {
+            return fail(&message);
+        }
+        let Some(spec) = stages[index]
+            .as_document()
+            .and_then(|stage| stage.get_document("$lookup").ok())
+        else {
+            return fail("aggregate stage $lookup cannot be merged");
+        };
+        let (Ok(from), Ok(local_field), Ok(foreign_field)) = (
+            spec.get_str("from"),
+            spec.get_str("localField"),
+            spec.get_str("foreignField"),
+        ) else {
+            return fail("aggregate stage $lookup cannot be merged");
+        };
+        let as_field = spec.get_str("as").unwrap_or(from);
+        let db = command.get_str("$db").ok();
+        let local = if index == 0 {
+            let mut find = bson::doc! { "find": command.get_str("aggregate").unwrap_or(""), "filter": {} };
+            if let Some(db) = db {
+                find.insert("$db", db);
+            }
+            find
+        } else {
+            let mut forwarded = command.clone();
+            forwarded.insert("pipeline", stages[..index].to_vec());
+            forwarded
+        };
+        let replies = self.scatter(local).await;
+        let mut rows = match cursor_rows(&replies) {
+            Ok(rows) => rows,
+            Err(reply) => return reply,
+        };
+        let mut keys = Vec::new();
+        for row in &rows {
+            if let Some(value) = row.get(local_field) {
+                if !keys.iter().any(|kept: &Bson| kept == value) {
+                    keys.push(value.clone());
+                }
+            }
+        }
+        let foreign = if keys.is_empty() {
+            Vec::new()
+        } else {
+            match self.foreign_matches(db, from, foreign_field, &keys).await {
+                Ok(documents) => documents,
+                Err(reply) => return reply,
+            }
+        };
+        for row in &mut rows {
+            let key = row.get(local_field).cloned();
+            let matches = foreign
+                .iter()
+                .filter(|document| document.get(foreign_field) == key.as_ref())
+                .cloned()
+                .map(Bson::Document)
+                .collect::<Vec<_>>();
+            row.insert(as_field, matches);
+        }
+        cursor_of(&cursor_namespace(&replies), rows)
+    }
+
+    async fn foreign_matches(
+        &self,
+        db: Option<&str>,
+        collection: &str,
+        field: &str,
+        keys: &[Bson],
+    ) -> Result<Vec<Document>, Document> {
+        let filter = bson::doc! { field: { "$in": keys.to_vec() } };
+        let mut command = bson::doc! { "find": collection, "filter": filter };
+        if let Some(db) = db {
+            command.insert("$db", db);
+        }
+        if field == "_id" {
+            let mut groups: Vec<Vec<Bson>> = vec![Vec::new(); self.ring.len()];
+            for key in keys {
+                groups[self.ring.owner_index(key)].push(key.clone());
+            }
+            let mut found = Vec::new();
+            for (shard, keys) in groups.into_iter().enumerate() {
+                if keys.is_empty() {
+                    continue;
+                }
+                command.insert("filter", bson::doc! { "_id": { "$in": keys } });
+                let reply = self.link.call(shard, command.clone()).await;
+                found.extend(cursor_rows(std::slice::from_ref(&reply))?);
+            }
+            return Ok(found);
+        }
+        cursor_rows(&self.scatter(command).await)
+    }
+
+    async fn move_documents(&self, previous: &Ring) -> Result<(), String> {
+        let listed = self
+            .route(&bson::doc! { "listDatabases": 1, "filter": {} })
+            .await;
+        if !is_ok(&listed) {
+            return Err(listed
+                .get_str("errmsg")
+                .unwrap_or("listDatabases failed")
+                .to_string());
+        }
+        let databases = listed
+            .get_array("databases")
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.as_document()?.get_str("name").ok())
+                    .filter(|name| *name != "admin")
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for database in databases {
+            let listed = self
+                .route(&bson::doc! {
+                    "listCollections": 1,
+                    "filter": {},
+                    "$db": &database,
+                })
+                .await;
+            let collections = match cursor_rows(std::slice::from_ref(&listed)) {
+                Ok(rows) => rows,
+                Err(reply) => {
+                    return Err(reply
+                        .get_str("errmsg")
+                        .unwrap_or("listCollections failed")
+                        .to_string());
+                }
+            };
+            for info in collections {
+                if info.get_str("type").ok() == Some("view") {
+                    continue;
+                }
+                let Some(name) = info.get_str("name").ok() else {
+                    continue;
+                };
+                self.move_collection(previous, &database, name).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn move_collection(
+        &self,
+        previous: &Ring,
+        database: &str,
+        name: &str,
+    ) -> Result<(), String> {
+        let found = self
+            .route(&bson::doc! { "find": name, "filter": {}, "$db": database })
+            .await;
+        let documents = documents_of(&found)?;
+        for document in documents {
+            let Some(id) = document.get("_id") else {
+                continue;
+            };
+            let new_id = self.ring.owner_id(id);
+            let old_id = previous.owner_id(id);
+            if new_id == old_id {
+                continue;
+            }
+            let new_owner = self
+                .ring
+                .index_of(new_id)
+                .ok_or_else(|| format!("shard {new_id} is not in the current list"))?;
+            let old_owner = self
+                .ring
+                .index_of(old_id)
+                .ok_or_else(|| format!("shard {old_id} is not in the current list"))?;
+            let inserted = self
+                .link
+                .call(
+                    new_owner,
+                    bson::doc! {
+                        "insert": name,
+                        "documents": [document.clone()],
+                        "$db": database,
+                    },
+                )
+                .await;
+            if !is_ok(&inserted) {
+                return Err(inserted
+                    .get_str("errmsg")
+                    .unwrap_or("move insert failed")
+                    .to_string());
+            }
+            let deleted = self
+                .link
+                .call(
+                    old_owner,
+                    bson::doc! {
+                        "delete": name,
+                        "deletes": [{ "q": { "_id": id.clone() }, "limit": 1 }],
+                        "$db": database,
+                    },
+                )
+                .await;
+            if !is_ok(&deleted) {
+                return Err(deleted
+                    .get_str("errmsg")
+                    .unwrap_or("move delete failed")
+                    .to_string());
+            }
+        }
+        Ok(())
+    }
+
     async fn route_broadcast(&self, command: &Document) -> Document {
         let replies = self.scatter(command.clone()).await;
         if command.contains_key("listCollections") || command.contains_key("listIndexes") {
@@ -343,6 +662,38 @@ impl ShardRouter {
     }
 }
 
+fn read_ring(path: &std::path::Path) -> Result<Option<Vec<u64>>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("read {}: {err}", path.display())),
+    };
+    let mut ids = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let id = line
+            .parse::<u64>()
+            .map_err(|_| format!("shard ring line {line:?} is not an id"))?;
+        ids.push(id);
+    }
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ids))
+}
+
+fn write_ring(path: &std::path::Path, ids: &[u64]) -> Result<(), String> {
+    let body = ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, body + "\n").map_err(|err| format!("write {}: {err}", path.display()))
+}
+
 fn is_transaction(command: &Document) -> bool {
     command.contains_key("txnId")
         || command.contains_key("beginTransaction")
@@ -377,8 +728,281 @@ fn is_broadcast(command: &Document) -> bool {
     KEYS.iter().any(|key| command.contains_key(*key))
 }
 
-/// Stages the router can concatenate. A reducing stage would group
-/// inside each shard and report those groups as the answer.
+fn stage_index(stages: &[Bson], name: &str) -> Option<usize> {
+    stages.iter().position(|stage| {
+        stage
+            .as_document()
+            .is_some_and(|document| document.contains_key(name))
+    })
+}
+
+fn stage_name(stage: &Bson) -> Option<&str> {
+    stage
+        .as_document()
+        .and_then(|document| document.keys().next().map(String::as_str))
+}
+
+const MERGE_SAFE: &[&str] = &[
+    "$match",
+    "$project",
+    "$addFields",
+    "$set",
+    "$unset",
+    "$unwind",
+    "$replaceRoot",
+    "$replaceWith",
+];
+
+fn prefix_refusal(stages: &[Bson]) -> Option<String> {
+    for stage in stages {
+        let name = stage_name(stage)?;
+        if !MERGE_SAFE.contains(&name) {
+            return Some(format!("aggregate stage {name} cannot be merged"));
+        }
+    }
+    None
+}
+
+fn tail_refusal(stages: &[Bson], index: usize) -> Option<String> {
+    stages
+        .get(index + 1)
+        .and_then(stage_name)
+        .map(|name| format!("aggregate stage {name} cannot be merged"))
+}
+
+fn group_refusal(spec: &Document) -> Option<String> {
+    for (name, value) in spec {
+        if name == "_id" {
+            continue;
+        }
+        let Some(op) = value
+            .as_document()
+            .and_then(|document| document.keys().next().cloned())
+        else {
+            return Some(format!("aggregate accumulator {name} cannot be merged"));
+        };
+        if !matches!(
+            op.as_str(),
+            "$sum" | "$min" | "$max" | "$avg" | "$count"
+        ) {
+            return Some(format!("aggregate accumulator {op} cannot be merged"));
+        }
+    }
+    None
+}
+
+struct Average {
+    name: String,
+    sum: String,
+    count: String,
+}
+
+fn rewrite_group(spec: &Document) -> (Document, Vec<Average>) {
+    let mut sent = Document::new();
+    let mut averages = Vec::new();
+    for (name, value) in spec {
+        if name == "_id" {
+            sent.insert(name, value.clone());
+            continue;
+        }
+        let op = value
+            .as_document()
+            .and_then(|document| document.keys().next().cloned());
+        if op.as_deref() == Some("$avg") {
+            let operand = value
+                .as_document()
+                .and_then(|document| document.get("$avg"))
+                .cloned()
+                .unwrap_or(Bson::Null);
+            let sum = format!("__kova_sum_{name}");
+            let count = format!("__kova_n_{name}");
+            sent.insert(sum.clone(), bson::doc! { "$sum": operand });
+            sent.insert(count.clone(), bson::doc! { "$count": {} });
+            averages.push(Average {
+                name: name.clone(),
+                sum,
+                count,
+            });
+            continue;
+        }
+        sent.insert(name, value.clone());
+    }
+    (sent, averages)
+}
+
+fn merge_groups(rows: &[Document], spec: &Document, averages: &[Average]) -> Vec<Document> {
+    let mut groups: Vec<Document> = Vec::new();
+    for row in rows {
+        let id = row.get("_id").cloned().unwrap_or(Bson::Null);
+        let key = id_key(&id);
+        if !groups
+            .iter()
+            .any(|group| id_key(group.get("_id").unwrap_or(&Bson::Null)) == key)
+        {
+            let mut fresh = bson::doc! { "_id": id };
+            for (name, _) in spec {
+                if name == "_id" || averages.iter().any(|average| average.name == *name) {
+                    continue;
+                }
+                fresh.insert(name, Bson::Null);
+            }
+            for average in averages {
+                fresh.insert(average.sum.clone(), 0i32);
+                fresh.insert(average.count.clone(), 0i32);
+            }
+            groups.push(fresh);
+        }
+        let group = groups
+            .iter_mut()
+            .find(|group| id_key(group.get("_id").unwrap_or(&Bson::Null)) == key)
+            .expect("group was just inserted");
+        for (name, value) in spec {
+            if name == "_id" {
+                continue;
+            }
+            if let Some(average) = averages.iter().find(|average| average.name == *name) {
+                let sum = bson_f64(group.get(&average.sum).unwrap_or(&Bson::Null))
+                    + bson_f64(row.get(&average.sum).unwrap_or(&Bson::Null));
+                let count = number(group, &average.count) + number(row, &average.count);
+                group.insert(average.sum.clone(), finish_number(sum));
+                group.insert(average.count.clone(), count);
+                continue;
+            }
+            let op = value
+                .as_document()
+                .and_then(|document| document.keys().next().map(String::as_str))
+                .unwrap_or("");
+            let current = group.get(name).cloned().unwrap_or(Bson::Null);
+            let incoming = row.get(name).cloned().unwrap_or(Bson::Null);
+            let combined = match op {
+                "$sum" | "$count" => finish_number(bson_f64(&current) + bson_f64(&incoming)),
+                "$min" => tighter(&current, &incoming, true),
+                "$max" => tighter(&current, &incoming, false),
+                _ => incoming,
+            };
+            group.insert(name, combined);
+        }
+    }
+    for group in &mut groups {
+        for average in averages {
+            let sum = bson_f64(group.get(&average.sum).unwrap_or(&Bson::Null));
+            let count = number(group, &average.count);
+            let value = if count == 0 {
+                Bson::Null
+            } else {
+                Bson::Double(sum / count as f64)
+            };
+            group.insert(average.name.clone(), value);
+            group.remove(&average.sum);
+            group.remove(&average.count);
+        }
+    }
+    groups
+}
+
+fn id_key(value: &Bson) -> Vec<u8> {
+    bson::to_vec(&bson::doc! { "id": value.clone() }).unwrap_or_default()
+}
+
+fn bson_f64(value: &Bson) -> f64 {
+    match value {
+        Bson::Double(number) => *number,
+        Bson::Int32(number) => f64::from(*number),
+        Bson::Int64(number) => *number as f64,
+        _ => 0.0,
+    }
+}
+
+fn finish_number(number: f64) -> Bson {
+    if number.is_finite() && number.fract() == 0.0 && number.abs() < i32::MAX as f64 {
+        Bson::Int32(number as i32)
+    } else if number.is_finite() && number.fract() == 0.0 {
+        Bson::Int64(number as i64)
+    } else {
+        Bson::Double(number)
+    }
+}
+
+fn tighter(current: &Bson, incoming: &Bson, low: bool) -> Bson {
+    match (bson_f64_opt(current), bson_f64_opt(incoming)) {
+        (None, Some(_)) => incoming.clone(),
+        (Some(_), None) => current.clone(),
+        (Some(left), Some(right)) => {
+            let keep_current = if low { left <= right } else { left >= right };
+            if keep_current {
+                current.clone()
+            } else {
+                incoming.clone()
+            }
+        }
+        (None, None) => incoming.clone(),
+    }
+}
+
+fn bson_f64_opt(value: &Bson) -> Option<f64> {
+    match value {
+        Bson::Double(number) => Some(*number),
+        Bson::Int32(number) => Some(f64::from(*number)),
+        Bson::Int64(number) => Some(*number as f64),
+        Bson::Null => None,
+        _ => None,
+    }
+}
+
+fn cursor_len(reply: &Document) -> usize {
+    reply
+        .get_document("cursor")
+        .ok()
+        .and_then(|cursor| cursor.get_array("firstBatch").ok())
+        .map(|batch| batch.len())
+        .unwrap_or(0)
+}
+
+fn cursor_namespace(replies: &[Document]) -> String {
+    replies
+        .iter()
+        .find_map(|reply| {
+            reply
+                .get_document("cursor")
+                .ok()
+                .and_then(|cursor| cursor.get_str("ns").ok())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+fn cursor_rows(replies: &[Document]) -> Result<Vec<Document>, Document> {
+    let mut rows = Vec::new();
+    for reply in replies {
+        if !is_ok(reply) {
+            return Err(reply.clone());
+        }
+        let Ok(cursor) = reply.get_document("cursor") else {
+            return Err(fail("shard reply has no cursor"));
+        };
+        let Ok(batch) = cursor.get_array("firstBatch") else {
+            continue;
+        };
+        for value in batch {
+            let Some(document) = value.as_document().cloned() else {
+                return Err(fail("cursor row is not a document"));
+            };
+            rows.push(document);
+        }
+    }
+    Ok(rows)
+}
+
+fn cursor_of(namespace: &str, rows: Vec<Document>) -> Document {
+    let rows = rows.into_iter().map(Bson::Document).collect::<Vec<_>>();
+    bson::doc! {
+        "ok": 1.0,
+        "cursor": { "id": 0i64, "ns": namespace, "firstBatch": rows },
+    }
+}
+
+/// Stages the router can concatenate. A reducing stage runs on each
+/// shard; the router merges the pieces.
 fn aggregate_refusal(command: &Document) -> Option<String> {
     let stages = command.get_array("pipeline").ok()?;
     const SAFE: &[&str] = &[
@@ -721,5 +1345,204 @@ mod tests {
                 .collect(),
             other => panic!("expected documents, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn router_group_matches_one_process_and_names_a_push() {
+        let left = PartitionRouter::new(1);
+        let right = PartitionRouter::new(1);
+        let whole = PartitionRouter::new(1);
+        let router = ShardRouter::with_link(
+            vec![1, 2],
+            Arc::new(MemoryLink {
+                routers: vec![left, right],
+            }),
+        );
+        let documents: Vec<Document> = (0..20)
+            .map(|id| {
+                bson::doc! {
+                    "_id": id,
+                    "job": if id % 2 == 0 { "CLERK" } else { "MANAGER" },
+                    "sal": 100,
+                }
+            })
+            .collect();
+        let inserted = router
+            .route(&bson::doc! {
+                "insert": "emp",
+                "documents": documents.clone(),
+                "$db": "db",
+            })
+            .await;
+        assert_eq!(inserted.get_f64("ok"), Ok(1.0), "{inserted}");
+        let parsed = protocol::command_from_document(&bson::doc! {
+            "insert": "emp",
+            "documents": documents,
+            "$db": "db",
+        })
+        .expect("insert");
+        whole.dispatch(parsed).expect("dispatch").await.expect("reply");
+
+        let group = bson::doc! {
+            "aggregate": "emp",
+            "pipeline": [{
+                "$group": {
+                    "_id": "$job",
+                    "total": { "$sum": "$sal" },
+                    "n": { "$count": {} },
+                }
+            }],
+            "$db": "db",
+        };
+        let routed = documents_of(&router.route(&group).await).expect("router groups");
+        let local = protocol::command_from_document(&group).expect("group");
+        let local = match whole.dispatch(local).expect("dispatch").await.expect("reply") {
+            PartitionResult::Found { documents } => documents,
+            other => panic!("expected groups, got {other:?}"),
+        };
+        assert_eq!(totals(&routed), totals(&local));
+
+        let refused = router
+            .route(&bson::doc! {
+                "aggregate": "emp",
+                "pipeline": [{
+                    "$group": { "_id": "$job", "names": { "$push": "$ename" } }
+                }],
+                "$db": "db",
+            })
+            .await;
+        let message = refused.get_str("errmsg").unwrap_or("");
+        assert!(message.contains("$push"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn router_lookup_joins_on_equality() {
+        let router = ShardRouter::with_link(
+            vec![1, 2],
+            Arc::new(MemoryLink {
+                routers: vec![PartitionRouter::new(1), PartitionRouter::new(1)],
+            }),
+        );
+        let inserted = router
+            .route(&bson::doc! {
+                "insert": "emp",
+                "documents": [
+                    { "_id": 1, "ename": "ADA", "deptno": 10 },
+                    { "_id": 2, "ename": "BOB", "deptno": 20 },
+                ],
+                "$db": "db",
+            })
+            .await;
+        assert_eq!(inserted.get_f64("ok"), Ok(1.0), "{inserted}");
+        let inserted = router
+            .route(&bson::doc! {
+                "insert": "dept",
+                "documents": [
+                    { "_id": 10, "dname": "ACCOUNTING" },
+                    { "_id": 20, "dname": "RESEARCH" },
+                ],
+                "$db": "db",
+            })
+            .await;
+        assert_eq!(inserted.get_f64("ok"), Ok(1.0), "{inserted}");
+        let joined = documents_of(
+            &router
+                .route(&bson::doc! {
+                    "aggregate": "emp",
+                    "pipeline": [{
+                        "$lookup": {
+                            "from": "dept",
+                            "localField": "deptno",
+                            "foreignField": "_id",
+                            "as": "dept",
+                        }
+                    }],
+                    "$db": "db",
+                })
+                .await,
+        )
+        .expect("joined rows");
+        assert_eq!(joined.len(), 2, "{joined:?}");
+        let ada = joined
+            .iter()
+            .find(|row| row.get_str("ename").ok() == Some("ADA"))
+            .expect("ada");
+        let dept = ada.get_array("dept").expect("dept");
+        assert_eq!(dept.len(), 1);
+        assert_eq!(
+            dept[0].as_document().unwrap().get_str("dname"),
+            Ok("ACCOUNTING")
+        );
+    }
+
+    #[tokio::test]
+    async fn adding_a_shard_moves_a_document_and_a_find_returns_it_once() {
+        let grown = Ring::new(&[1, 2]);
+        let id = (0..500)
+            .find(|value| grown.owner_index(&Bson::Int32(*value)) == 1)
+            .expect("an id that changes arc");
+        let stays = (0..500)
+            .find(|value| grown.owner_index(&Bson::Int32(*value)) == 0)
+            .expect("an id that stays");
+        let first = PartitionRouter::new(1);
+        let second = PartitionRouter::new(1);
+        let starter = ShardRouter::with_link(
+            vec![1],
+            Arc::new(MemoryLink {
+                routers: vec![first.clone()],
+            }),
+        );
+        let inserted = starter
+            .route(&bson::doc! {
+                "insert": "emp",
+                "documents": [
+                    { "_id": id, "ename": "MOVED" },
+                    { "_id": stays, "ename": "STAYS" },
+                ],
+                "$db": "db",
+            })
+            .await;
+        assert_eq!(inserted.get_f64("ok"), Ok(1.0), "{inserted}");
+
+        let router = ShardRouter::with_link(
+            vec![1, 2],
+            Arc::new(MemoryLink {
+                routers: vec![first.clone(), second.clone()],
+            }),
+        );
+        *router.previous.lock().expect("lock") = Some(Ring::new(&[1]));
+        let during = documents_of(
+            &router
+                .route(&bson::doc! { "find": "emp", "filter": { "_id": id }, "$db": "db" })
+                .await,
+        )
+        .expect("during");
+        assert_eq!(during.len(), 1);
+        assert_eq!(during[0].get_str("ename"), Ok("MOVED"));
+        *router.previous.lock().expect("lock") = None;
+
+        router.rebalance(&[1]).await.expect("rebalance");
+        let after = documents_of(
+            &router
+                .route(&bson::doc! { "find": "emp", "filter": { "_id": id }, "$db": "db" })
+                .await,
+        )
+        .expect("after");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].get_str("ename"), Ok("MOVED"));
+        assert_eq!(count_ids(&second).await, vec![id]);
+        assert_eq!(count_ids(&first).await, vec![stays]);
+    }
+
+    fn totals(rows: &[Document]) -> BTreeSet<(String, i32, i32)> {
+        rows.iter()
+            .map(|row| {
+                (
+                    row.get_str("_id").unwrap_or("").to_string(),
+                    row.get_i32("total").unwrap_or(0),
+                    row.get_i32("n").unwrap_or(0),
+                )
+            })
+            .collect()
     }
 }

@@ -240,10 +240,22 @@ impl PartitionWorker {
     }
 
     fn restore_indexes(&mut self) -> bool {
-        let path = self.engine.root().join("indexes.bin");
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
+        let bytes = match self.engine.read_index_bytes() {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                let path = self.engine.root().join("indexes.bin");
+                match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return false,
+                }
+            }
+            Err(message) => {
+                LOGGER.warn(format!(
+                    "partition {} index pages were not loaded: {message}",
+                    self.id
+                ));
+                return false;
+            }
         };
         match IndexManager::from_bytes(&bytes) {
             Ok((lsn, manager)) if lsn == self.engine.applied_lsn() => {
@@ -268,9 +280,14 @@ impl PartitionWorker {
         }
     }
 
-    fn persist_indexes(&self) -> Result<(), String> {
-        let bytes = self.indexes.to_bytes(self.engine.applied_lsn())?;
-        disk::atomic_write(&self.engine.root().join("indexes.bin"), &bytes)
+    fn persist_indexes(&mut self) -> Result<(), String> {
+        let bytes = self.indexes.to_bytes(self.engine.last_lsn())?;
+        self.engine.checkpoint_with_indexes(Some(&bytes))?;
+        let path = self.engine.root().join("indexes.bin");
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|err| format!("remove indexes.bin: {err}"))?;
+        }
+        Ok(())
     }
 
     /// Builds the search index entry for one document and adds it.
@@ -1189,9 +1206,9 @@ impl PartitionWorker {
 
     /// Rebuilds Tantivy and the secondary indexes by scanning pages.
     ///
-    /// Both structures live in RAM. Pages store the documents, and the
-    /// catalog stores which indexes exist, so every startup walks the
-    /// pages once for each structure.
+    /// A warm start opens the B-tree and hash snapshot from its pages
+    /// instead. This path runs when those pages are missing or their
+    /// LSN does not match the catalog.
     fn reindex_all(&mut self) -> Result<(), String> {
         self.indexes = IndexManager::new();
         for name in self.engine.names() {
@@ -1967,8 +1984,11 @@ impl PartitionWorker {
     }
 
     /// Flushes dirty pages and truncates the WAL they cover.
+    ///
+    /// The B-tree and the hash index are written as buffer-pool pages in
+    /// the same checkpoint. An older `indexes.bin` is removed once those
+    /// pages are in the catalog.
     fn write_checkpoint(&mut self) -> Result<(), String> {
-        self.engine.checkpoint_pages()?;
         self.persist_indexes()?;
         self.index.commit()
     }
@@ -2464,15 +2484,15 @@ impl PartitionWorker {
 
     /// Reads through the index when one covers `filter`.
     ///
-    /// An id lookup and an index scan still read pages. The index only
-    /// chooses which ids to keep. A transaction snapshot does not use
-    /// this path: it reads the version chain instead.
+    /// An id lookup and an index scan read the page recorded for each
+    /// id. A missing id reads no page. A transaction snapshot does not
+    /// use this path: it reads the version chain instead.
     fn planned_documents(
         &mut self,
         collection: &str,
         filter: &Document,
     ) -> Result<Vec<Document>, String> {
-        match self.indexes.access(collection, filter) {
+        let found = match self.indexes.access(collection, filter) {
             Access::Collection => {
                 crate::metrics::METRICS.collection_scan();
                 self.engine.find_documents(collection, filter)
@@ -2491,8 +2511,19 @@ impl PartitionWorker {
                 crate::metrics::METRICS.index_lookup();
                 self.engine.find_ids(collection, &ids, filter)
             }
-        }
+        };
+        #[cfg(test)]
+        note_page_reads(self);
+        found
     }
+}
+
+#[cfg(test)]
+fn note_page_reads(worker: &PartitionWorker) {
+    let _ = std::fs::write(
+        worker.engine.root().join("page-reads.txt"),
+        worker.engine.user_page_reads().to_string(),
+    );
 }
 
 /// A document an auto-commit is about to replace, plus the image it
@@ -6115,6 +6146,169 @@ mod tests {
                 assert_eq!(documents[0].get_str("name").unwrap(), "KEPT")
             }
             other => panic!("commit did not publish the insert: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_index_hit_reads_one_page_and_reopens_without_a_rebuild() {
+        let dir = scratch_dir();
+        let config = durable_config(&dir, true);
+        {
+            let router = PartitionRouter::with_storage(1, config.clone());
+            let documents: Vec<_> = (0..8)
+                .map(|n| {
+                    doc! {
+                        "_id": n,
+                        "sku": format!("sku-{n}"),
+                        "pad": "p".repeat(400),
+                    }
+                })
+                .collect();
+            dispatch(
+                &router,
+                PartitionCommand::Insert {
+                    collection: "db.orders".into(),
+                    documents,
+                },
+            )
+            .await;
+            dispatch(
+                &router,
+                PartitionCommand::CreateIndexes {
+                    collection: "db.orders".into(),
+                    indexes: vec![doc! { "name": "sku_1", "key": { "sku": 1 } }],
+                },
+            )
+            .await;
+        }
+        assert!(
+            !dir.join("partition-0").join("indexes.bin").exists(),
+            "the index snapshot lives in pages"
+        );
+
+        let router = PartitionRouter::with_storage(1, config);
+        let startup = std::fs::read_to_string(dir.join("partition-0").join("startup-reads.txt"))
+            .expect("startup counter");
+        assert_eq!(startup.trim(), "0", "startup scanned documents: {startup}");
+
+        match dispatch(
+            &router,
+            PartitionCommand::Explain {
+                collection: "db.orders".into(),
+                filter: doc! { "sku": "sku-7" },
+            },
+        )
+        .await
+        {
+            PartitionResult::Plan { stage, .. } => assert_eq!(stage, "IXSCAN"),
+            other => panic!("expected an index scan, got {other:?}"),
+        }
+        match dispatch(
+            &router,
+            PartitionCommand::find("db.orders", doc! { "sku": "sku-7" }),
+        )
+        .await
+        {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0].get_str("sku").unwrap(), "sku-7");
+            }
+            other => panic!("expected the indexed document, got {other:?}"),
+        }
+        let selective = std::fs::read_to_string(dir.join("partition-0").join("page-reads.txt"))
+            .expect("page counter")
+            .trim()
+            .parse::<u64>()
+            .expect("counter");
+        dispatch(
+            &router,
+            PartitionCommand::find("db.orders", doc! {}),
+        )
+        .await;
+        let full = std::fs::read_to_string(dir.join("partition-0").join("page-reads.txt"))
+            .expect("page counter")
+            .trim()
+            .parse::<u64>()
+            .expect("counter");
+        assert!(
+            selective > 0 && selective < full,
+            "selective read {selective} pages, scan read {full}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_one_transaction_writes_two_collections() {
+        let router = PartitionRouter::new(1);
+        let txn = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        for (collection, id, name) in [("db.emp", 1, "ADA"), ("db.dept", 10, "ACCOUNTING")] {
+            let inserted = dispatch(
+                &router,
+                PartitionCommand::Transactional {
+                    txn_id: txn,
+                    inner: Box::new(PartitionCommand::Insert {
+                        collection: collection.into(),
+                        documents: vec![doc! { "_id": id, "name": name }],
+                    }),
+                },
+            )
+            .await;
+            assert!(
+                matches!(inserted, PartitionResult::Inserted { inserted_count: 1 }),
+                "{inserted:?}"
+            );
+        }
+        match dispatch(&router, PartitionCommand::find("db.dept", doc! {})).await {
+            PartitionResult::Found { documents } => assert!(documents.is_empty()),
+            other => panic!("uncommitted dept leaked: {other:?}"),
+        }
+        dispatch(
+            &router,
+            PartitionCommand::CommitTransaction {
+                collection: "db.emp".into(),
+                txn_id: txn,
+            },
+        )
+        .await;
+        match dispatch(&router, PartitionCommand::find("db.emp", doc! {})).await {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents[0].get_str("name").unwrap(), "ADA")
+            }
+            other => panic!("emp was not committed: {other:?}"),
+        }
+        match dispatch(&router, PartitionCommand::find("db.dept", doc! {})).await {
+            PartitionResult::Found { documents } => {
+                assert_eq!(documents[0].get_str("name").unwrap(), "ACCOUNTING")
+            }
+            other => panic!("dept was not committed: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transaction_on_another_partition_is_refused() {
+        let router = PartitionRouter::new(4);
+        let home = router.partition_index("db.emp");
+        let other = (0..64)
+            .map(|n| format!("db.other{n}"))
+            .find(|name| router.partition_index(name) != home)
+            .expect("a collection on another partition");
+        let txn = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        let refused = dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: txn,
+                inner: Box::new(PartitionCommand::Insert {
+                    collection: other,
+                    documents: vec![doc! { "_id": 1, "name": "NO" }],
+                }),
+            },
+        )
+        .await;
+        match refused {
+            PartitionResult::Error { message } => {
+                assert!(message.contains("not active"), "{message}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
         }
     }
 

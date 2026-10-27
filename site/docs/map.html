@@ -6,7 +6,10 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Map — KOVA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Map - KOVA</title>
   <meta name="description" content="mapReduce returns one { key, value } document per match. It writes nothing.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,6 +42,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map" class="here">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
@@ -49,11 +53,14 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <p><code>mapReduce</code> reads one collection and returns a cursor of pairs. The read stays on the process that received the command. On a replica set every voter already stores every document, so the command does not fan out. On a shard router it visits every shard and the batches are concatenated.</p>
 
 <h2 id="shape">The command</h2>
-<pre>db.runCommand({
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({
   mapReduce: "emp",
   query: { deptno: 20 },
   map: { key: "$job", value: "$sal" }
-})</pre>
+})</code></pre>
+</div>
 <p><code>query</code> is a find filter. Leave it out and every document matches. <code>map</code> is a document with <code>key</code> and <code>value</code>. A string that starts with <code>$</code> reads that field, including a dotted path. Any other value is a literal. A missing field becomes null.</p>
 <p>The reply is <code>firstBatch</code>, the same cursor shape as <code>find</code>. Each document is <code>{ key, value }</code>. For the employees in department 20, the pairs are the job and the salary of each person.</p>
 
@@ -75,8 +82,10 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

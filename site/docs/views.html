@@ -6,7 +6,10 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Views — KOVA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Views - KOVA</title>
   <meta name="description" content="A view is a name, a source collection, and a pipeline. Reading the view runs the pipeline. It does not copy the documents.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,6 +42,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views" class="here">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
@@ -50,27 +54,36 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 
 <h2 id="create">Create one</h2>
 <p>The sample load leaves two views on database <code>db</code>. This is the definition of the first:</p>
-<pre>db.runCommand({
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({
   create: "well_paid",
   viewOn: "emp",
   pipeline: [{ $match: { sal: { $gt: 2000 } } }]
 })
-db.well_paid.find({}, { ename: 1, sal: 1, _id: 0 })</pre>
+db.well_paid.find({}, { ename: 1, sal: 1, _id: 0 })</code></pre>
+</div>
 <p>The rows are employees with salary above 2000, read from <code>emp</code> at query time. Insert a new employee above that line and the view returns them. There is no second copy to refresh.</p>
 
 <h2 id="search-view">A view with a disk text index</h2>
-<pre>db.runCommand({
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({
   create: "emp_search",
   viewOn: "emp",
   pipeline: [],
   kova: { inverted: true, analyzer: "en_stem" }
-})</pre>
+})</code></pre>
+</div>
 <p><code>kova</code> holds engine options. Keys you add stay on the view. The key this server reads is <code>inverted</code>. <code>true</code> builds the on-disk text index described on <a href="/docs/search">Text search</a>.</p>
 <p>An inverted view accepts only <code>$match</code> and <code>$project</code>, and the project must keep <code>_id</code>. A <code>$group</code> view is still a valid view. Setting <code>inverted: true</code> on it fails and names the stage. String fields become text, ints become 64-bit integers, doubles become floats, bools stay bools, and dates stay dates. The first type seen for a field stays. A new field extends the schema and the index is rewritten.</p>
 <p>The in-memory <code>$text</code> index on ordinary collections stays. <code>inverted</code> does not replace it.</p>
 
 <h2 id="drop">Drop</h2>
-<pre>db.well_paid.drop()</pre>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.well_paid.drop()</code></pre>
+</div>
 <p>The source collection remains. Drop views that read a collection before you drop the collection.</p>
 
       <nav class="pager"><a href="/docs/search"><span>Previous</span>Text search</a><a class="next" href="/docs/map"><span>Next</span>Map</a></nav>
@@ -82,8 +95,10 @@ db.well_paid.find({}, { ename: 1, sal: 1, _id: 0 })</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

@@ -32,7 +32,7 @@ jobs:
           stage="$RUNNER_TEMP/$name"
           mkdir -p "$stage" dist
           cp target/release/kova target/release/kovadump target/release/libkova.so "$stage/"
-          cp kova.toml scripts/seed-oracle.js packaging/install.sh "$stage/"
+          cp kova.toml scripts/seed-oracle.js packaging/install.sh LICENSE NOTICE "$stage/"
           chmod 755 "$stage/kova" "$stage/kovadump" "$stage/libkova.so" "$stage/install.sh"
           tar -C "$RUNNER_TEMP" -czf "dist/$name.tar.gz" "$name"
           sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"

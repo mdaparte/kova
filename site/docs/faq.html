@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script>
+try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
+</script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>FAQ - KOVA</title>
+  <meta name="description" content="How to run Kova, how a document is stored, and how kovadump writes a backup.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="/"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="/docs">Docs</a>
+      <a href="/docs/getting-started">Start</a>
+      <a href="/#list">Email</a>
+      <button type="button" class="theme" data-theme-toggle>Light</button>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq" class="here">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
+<div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>FAQ</h1>
+      <p class="lede">How to run the server, how a document sits on disk, and how a backup is built.</p>
+
+<h2 id="running">Running the server</h2>
+
+<h3 id="connect">What do I connect to?</h3>
+<p>A MongoDB driver, pointed at <code>127.0.0.1</code> port <code>27018</code>. The listener speaks the MongoDB wire. The same process answers <code>find</code>, <code>aggregate</code>, and <code>db.runCommand({ sql })</code>. Install and the first insert are on <a href="/docs/getting-started">Getting started</a>.</p>
+
+<h3 id="mongodb">Do I install MongoDB?</h3>
+<p>The Kova process is the database. A MongoDB server on port 27017 can stay beside it. You need a MongoDB driver or shell only as the client that sends commands.</p>
+
+<h3 id="open">Who can connect?</h3>
+<p>Security is off in the default <code>kova.toml</code>. Any client that can reach the port can read and write. Turn on <code>[security]</code> when you want a user and a password. Both must be sent. One of them alone is refused. See <a href="/docs/security">Security</a>.</p>
+
+<h3 id="crate">How do I use the crates.io crate?</h3>
+<p>The package name is <code>kovadb</code>. The library name is <code>kova</code>. After 0.1.0 is published, <code>cargo install kovadb</code> installs the binaries <code>kova</code> and <code>kovadump</code>. A program that embeds the server depends on the package and calls the library:</p>
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">kovadb = "0.1"</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">Rust</div>
+<pre><code class="lang-rs">#[tokio::main]
+async fn main() {
+    kova::serve().await;
+}</code></pre>
+</div>
+<p><code>serve</code> is the same process the <code>kova</code> binary starts: it reads <code>kova.toml</code>, opens <code>data/</code>, and listens. Version 0.1.0 is published from GitHub Actions when a merge into <code>main</code> changes the crate sources. It is not on crates.io yet. The install commands are on <a href="/docs/getting-started#crate">Getting started</a>.</p>
+
+<h3 id="sql-and-documents">Can SQL and document commands see the same rows?</h3>
+<p>Yes. A collection is the table. <code>db.emp.find({ sal: { $gt: 2000 } })</code> and <code>SELECT ename, sal FROM emp WHERE sal &gt; 2000</code> read the same pages. SQL runs in <a href="https://datafusion.apache.org/">DataFusion</a>. The statement is one <code>FROM</code>. A join in SQL is outside that statement. Use <code>$lookup</code> in the pipeline, or write the result with <code>$out</code> and select from that collection. See <a href="/docs/sql">SQL</a>.</p>
+
+<h3 id="writes">How do I create a table, insert, and update?</h3>
+<p>The collection is the table. The first insert creates it. <code>db.createCollection("orders")</code> creates it empty, which is also how you attach an autoincrement field. <code>insertOne</code> and <code>insertMany</code> add rows. <code>updateOne</code> and <code>updateMany</code> change them. <code>deleteOne</code> removes one. <code>createIndex</code> adds an index on a field you look up. A later <code>SELECT</code> reads those rows.</p>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.createCollection("orders")
+db.orders.insertOne({ sku: "kettle", qty: 2 })
+db.orders.updateOne({ sku: "kettle" }, { $set: { qty: 3 } })
+db.orders.createIndex({ sku: 1 })</code></pre>
+<div class="ex-label">SQL</div>
+<pre><code class="lang-sql">SELECT sku, qty FROM orders WHERE qty &gt; 1</code></pre>
+</div>
+<p>A SQL string does the reading. <code>CREATE TABLE</code>, <code>INSERT</code>, and <code>UPDATE</code> sent as SQL are not stored. The writes above are. Details are on <a href="/docs/documents">Documents</a>, <a href="/docs/indexes">Indexes</a>, and <a href="/docs/sql">SQL</a>.</p>
+
+<h3 id="restart">What survives a restart?</h3>
+<p>Committed documents, indexes, views, users, and autoincrement counters. They are in the page files under <code>data/</code>. An open transaction that had not committed is gone: its writes never reached a page. Start the process again from the same directory and the listener answers with the same data.</p>
+
+<h3 id="add-shard">What happens when I add a shard?</h3>
+<p>Add the shard to the router's list and restart the router. Documents whose <code>_id</code> now falls on the new arc move. A document that stays on its current shard is left where it is. During the move, a find by <code>_id</code> returns the document once. Removing a shard does not move documents. See <a href="/docs/sharding">Sharding</a>.</p>
+
+<h2 id="storage">How a document is stored</h2>
+
+<h3 id="page">Where does a document live?</h3>
+<p>On a page. The default page is 16 KiB. A collection is a list of page ids. The document body is BSON in a slot on one of those pages. A document larger than the page payload is a chain: a head page and continuation pages. The head id is the one the collection lists. RAM does not hold a second copy of the collection. The <a href="/docs/concepts">concepts</a> page is the short map of this layout.</p>
+
+<h3 id="write">What happens on an insert?</h3>
+<p>The listener hands the command to the worker that owns the collection. That worker appends the change to the write-ahead log and flushes it when <code>wal_fsync</code> is true, which is the default. Then it dirties the page. The reply means the log has the change. A checkpoint, every 128 log records by default, writes the dirty pages, records how far the log has been applied, and deletes the log segments behind that point.</p>
+
+<h3 id="pool">What is the buffer pool?</h3>
+<p>A fixed cache of pages, 4096 per partition by default. A read pins a page, copies the slots it needs, and unpins. A miss reads the page file. When the pool is full, the least recently used unpinned page is written back if it is dirty, then dropped. The collection can be larger than RAM. The cache is the only place a hot page stays resident.</p>
+
+<h3 id="workers">Why four workers?</h3>
+<p>One process runs four partition workers. The collection name is hashed, and every document of that collection on this process lives on one worker. Writes to that collection stay on that worker, so the log for the collection stays in one order. A scan of the collection can decode pages on more than one core. <code>shop.orders</code> and <code>shop.customers</code> can run at the same time because they can hash to different workers. This split is inside the process. Sharding is the split of one collection across processes, by <code>_id</code>.</p>
+
+<h3 id="crash">What does startup do after a crash?</h3>
+<p>It opens the catalog page. When that catalog is current, startup does not walk user documents to learn the schema. It opens the B-tree and hash index from their own pages. It then replays the log records that landed after the last checkpoint. A write that reached the log and not yet the page is applied. A transaction that did not commit has no page image and no log record to replay.</p>
+
+<h3 id="indexes">Where do indexes live?</h3>
+<p>The B-tree and the hash index are pages in the same pool. Each entry records the page that holds the document. A hit reads that page. A missing id reads no page. When an update moves the document to another page, the entry's page moves with it. A text index is <a href="https://github.com/quickwit-oss/tantivy">Tantivy</a>, updated on write. A view can ask for that text index to stay on disk. See <a href="/docs/indexes">Indexes</a> and <a href="/docs/search">Text search</a>.</p>
+
+<h3 id="catalog">What is the admin catalog?</h3>
+<p>Database names, collections, field types, index declarations, users, roles, views, and autoincrement counters are rows in <code>admin</code>. They are written at checkpoint from the memory the process already keeps. You can <code>find</code> them. An autoincrement counter stores <code>last</code>, the last number already handed out. The next insert that omits the field stores <code>last + 1</code>. See <a href="/docs/catalog">Catalog</a> and <a href="/docs/counters">Autoincrement</a>.</p>
+
+<h2 id="backup">How backup works</h2>
+
+<h3 id="dump-path">What does kovadump read?</h3>
+<p><code>kovadump</code> opens a MongoDB wire connection to a server that is already running. It does not copy the page files and it does not copy the log. Backup asks the server for the collections in one database, then for their documents, index declarations, views, and autoincrement counters. The server answers through the same commands a client uses. A checkpoint can run while the dump runs. The dump sees committed documents.</p>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">kovadump backup --db shop shop.kdmp</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">wrote 1 collections, 3 documents, 0 views to shop.kdmp</code></pre>
+</div>
+
+<h3 id="kdmp">What is inside the file?</h3>
+<p>A Kova dump starts with the bytes <code>KOVADMP1</code>. After that magic, the file is a sequence of BSON documents. Each one has a <code>kind</code>:</p>
+<ul>
+  <li><code>collection</code> carries <code>name</code>. The <code>document</code>, <code>index</code>, and <code>counter</code> records that follow belong to it.</li>
+  <li><code>document</code> carries the stored document in <code>doc</code>.</li>
+  <li><code>index</code> carries one <code>createIndexes</code> spec in <code>spec</code>. The generated <code>_id_</code> index is omitted. The server adds it on restore.</li>
+  <li><code>counter</code> carries <code>field</code> and <code>last</code> for one autoincrement field.</li>
+  <li><code>view</code> carries <code>name</code>, <code>viewOn</code>, <code>pipeline</code>, and <code>kova</code>.</li>
+</ul>
+<p>The file is a logical copy. Page size, compression, and which worker owned the collection are not in it. Restore can load it into a server with a different <code>page_size</code>.</p>
+
+<h3 id="restore">What does restore do?</h3>
+<p>Restore reads those records and sends ordinary commands: <code>create</code>, <code>insert</code>, <code>createIndexes</code>. Each insert appends the log and dirties a page, the same path as a client insert. Indexes are built from the declarations. A replica primary proposes those writes, so followers receive them through the oplog. A view that still reads a collection being replaced is dropped first. The collection is dropped and created again, then the views are created. A collection the dump does not name stays. When the collection is already there, restore asks before replacing it. <code>--yes</code> skips the question.</p>
+<p>The same command reads a <code>pg_dump</code> plain SQL file, a <code>mysqldump</code> SQL file, or a <code>mongodump</code> directory or archive, and writes them through that insert path. Binary <code>COPY</code> and custom-format archives are refused. Details and the flags are on <a href="/docs/backup">Backup and restore</a>.</p>
+
+<h3 id="dump-where">Router, one shard, or one process?</h3>
+<p>Point <code>kovadump</code> at the address you want to read. Against one process, the file has that process's database. Against a router, the file has the whole database when every shard answers. If a shard is down, the dump fails and no partial file is written. Against one shard, the file has that piece.</p>
+
+<h2 id="copies">Copies, and what is still planned</h2>
+
+<h3 id="replica">What is a replica set?</h3>
+<p>Photocopies of one process. Every voter stores every document of that set. The primary appends the log. Followers apply the same records. <a href="https://github.com/databendlabs/openraft">OpenRaft</a> runs the election. The router does not join the set. See <a href="/docs/replication">Replica sets</a>.</p>
+
+<h3 id="feed">Is there a change feed?</h3>
+<p>The feed is planned. A committed insert, update, or delete will publish one JSON record, with <code>before</code> and <code>after</code>, to <a href="https://iggy.apache.org/docs/">Apache Iggy</a> running as a separate process. Kova will not embed that process. Until the feed is in the server, read with <code>find</code>, or tail <code>local.oplog.rs</code> on a replica set. The record shape is on the <a href="/docs/feed">Feed</a> page. The libraries the server links today are on <a href="/docs/powered-by">Powered by</a>.</p>
+
+      <nav class="pager"><a href="/docs"><span>Previous</span>Welcome</a><a class="next" href="/docs/powered-by"><span>Next</span>Powered by</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#running">Running the server</a><a href="#writes">Creating and changing rows</a><a href="#storage">How a document is stored</a><a href="#backup">How backup works</a><a href="#copies">Copies, and what is still planned</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
+    </nav>
+  </footer>
+  <script src="/js/code.js"></script>
+  <script src="/js/theme.js"></script>
+</body>
+</html>

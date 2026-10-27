@@ -6,7 +6,10 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Feed — KOVA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Feed - KOVA</title>
   <meta name="description" content="Planned. A committed write will publish one JSON record to Apache Iggy. The condition stays in the listener.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,6 +42,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed" class="here">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
@@ -51,25 +55,37 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <p>The sidecar is <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, a separate process. Kova will be a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client, or receives the same JSON over HTTP and applies its own condition. Kova will not embed the Iggy server. Iggy's own documentation is the guide to streams, topics, offsets, and the SDKs.</p>
 
 <h2 id="config">The switch</h2>
-<pre>[feed]
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">[feed]
 enabled = false
 address = "127.0.0.1:8090"
 username = "iggy"
 password = "iggy"
 stream = "kova"
-topic = "changes"</pre>
+topic = "changes"</code></pre>
+</div>
 <p><code>enabled</code> false, or a missing section, publishes nothing. The username and password in that sketch are the sample Iggy root. They are not a default you should expose.</p>
 
 <h2 id="record">The record</h2>
 <p>After a committed insert, update, or delete, the process that applied the write publishes one JSON record to stream <code>kova</code>, topic <code>changes</code>:</p>
-<pre>{
-  "op": "update",
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">{</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">Record</div>
+<pre><code class="lang-cfg">  "op": "update",
   "ns": "db.orders",
   "id": "674a1c",
   "before": { "sku": "kettle", "qty": 1 },
   "after": { "sku": "kettle", "qty": 2 },
-  "lsn": 120
-}</pre>
+  "lsn": 120</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">}</code></pre>
+</div>
 <table class="grid">
   <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
   <tbody>
@@ -101,8 +117,10 @@ topic = "changes"</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

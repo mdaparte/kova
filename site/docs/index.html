@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>KOVA</title>
   <meta name="description" content="Kova stores documents, answers SQL, and searches text. One process, one port, the MongoDB wire.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -39,6 +42,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
@@ -52,16 +56,18 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <a href="/docs/concepts"><strong>How data is stored</strong><span>Databases, collections, pages, and what a restart keeps.</span></a>
   <a href="/docs/documents"><strong>Documents</strong><span>Insert, update, delete, and the commands a driver sends.</span></a>
   <a href="/docs/sql"><strong>SQL</strong><span>One SELECT against a collection, on the same server.</span></a>
+  <a href="/docs/faq"><strong>FAQ</strong><span>How to run it, how a document is stored, and how a backup is built.</span></a>
+  <a href="/docs/powered-by"><strong>Powered by</strong><span>Rust, DataFusion, Tantivy, OpenRaft, and the libraries around them.</span></a>
 </div>
 
 <h2 id="what-you-can-do">What you can do today</h2>
 <table class="grid">
   <thead><tr><th>You want to</th><th>You use</th></tr></thead>
   <tbody>
-    <tr><td>Store and read documents</td><td>A MongoDB driver. <a href="/docs/documents">Documents</a>.</td></tr>
+    <tr><td>Create a collection, insert, update, delete</td><td><code>createCollection</code>, <code>insertOne</code>, <code>updateOne</code>, <code>deleteOne</code>. <a href="/docs/documents">Documents</a>.</td></tr>
     <tr><td>Filter, group, and join collections</td><td><code>find</code> and <code>aggregate</code>. <a href="/docs/queries">Find and aggregate</a>.</td></tr>
     <tr><td>Ask a SQL question</td><td><code>db.runCommand({ sql })</code>. <a href="/docs/sql">SQL</a>.</td></tr>
-    <tr><td>Search words, including a typo</td><td><code>$text</code>, or <code>WHERE TEXT</code>. <a href="/docs/search">Text search</a>.</td></tr>
+    <tr><td>Search words, allow a typo, and count by group</td><td><code>$text</code>, or <code>WHERE TEXT</code> with <code>FUZZY</code> and <code>FACETS</code>. <a href="/docs/search">Text search</a>.</td></tr>
     <tr><td>Speed up a field lookup</td><td><code>createIndex</code>. <a href="/docs/indexes">Indexes</a>.</td></tr>
     <tr><td>Name a saved pipeline</td><td>A view. <a href="/docs/views">Views</a>.</td></tr>
     <tr><td>Number a field on insert</td><td><code>autoincrement</code>. <a href="/docs/counters">Autoincrement</a>.</td></tr>
@@ -71,6 +77,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <tr><td>Open the data from a SQL client</td><td>The ODBC driver. <a href="/docs/odbc">ODBC</a>.</td></tr>
     <tr><td>Keep a copy if a machine dies</td><td>A replica set. <a href="/docs/replication">Replica sets</a>.</td></tr>
     <tr><td>Split one collection across machines</td><td>Shards and a router. <a href="/docs/sharding">Sharding</a>.</td></tr>
+    <tr><td>Embed the server in a Rust program</td><td>The crates.io package <code>kovadb</code>. Library name <code>kova</code>. <a href="/docs/getting-started#crate">Getting started</a>.</td></tr>
   </tbody>
 </table>
 
@@ -91,6 +98,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <tr><td><code>~/.local/bin/kova</code></td><td>The server, after the install.</td></tr>
     <tr><td><code>~/.local/bin/kovadump</code></td><td>Backup and restore. It talks to a server that is already running.</td></tr>
     <tr><td><code>~/.local/lib/libkova.so</code></td><td>The ODBC driver on Linux.</td></tr>
+    <tr><td><code>kovadb</code> on crates.io</td><td>The package. The library name is <code>kova</code>. <code>cargo install kovadb</code> installs <code>kova</code> and <code>kovadump</code> after 0.1.0 is published. It is not on crates.io yet. <a href="/docs/getting-started#crate">The dependency line</a>.</td></tr>
   </tbody>
 </table>
 <p>The engineering notes stay in <code>docs/</code> inside the repository. This site is the guide for people running the server.</p>
@@ -104,8 +112,10 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

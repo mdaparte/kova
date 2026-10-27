@@ -17,6 +17,7 @@ use super::{apply_update, document_id_string, document_matches};
 
 const DOCS_MAGIC: u32 = 0x444F_4353; // DOCS
 const CATA_MAGIC: u32 = 0x4341_5441; // CATA
+const INDX_MAGIC: u32 = 0x494E_4458; // INDX
 const CATALOG_PAGE: u64 = 1;
 const FLAG_OVERFLOW: u16 = 1;
 const FLAG_CONTINUATION: u16 = 2;
@@ -34,6 +35,10 @@ struct CollectionState {
     /// `_id` values already stored. Insert checks this before writing,
     /// so a duplicate is refused without rereading every page.
     ids: HashSet<String>,
+    /// Page that holds each id. An index hit reads this page. A missing
+    /// id reads none. A document that moves to another page updates the
+    /// entry here.
+    locations: HashMap<String, u64>,
     /// Top-level field name and BSON type. A later value of another
     /// type becomes `"mixed"`.
     fields: Vec<(String, String)>,
@@ -80,6 +85,7 @@ impl CollectionState {
             validator: None,
             doc_count: 0,
             ids: HashSet::new(),
+            locations: HashMap::new(),
             fields: Vec::new(),
             counters: Vec::new(),
         }
@@ -97,6 +103,8 @@ pub struct Heap {
     users: Vec<UserRecord>,
     roles: Vec<RoleRecord>,
     views: Vec<ViewSpec>,
+    /// Pages that hold the B-tree and hash snapshot, in order.
+    index_pages: Vec<u64>,
     /// Set when startup read a version-2 catalog instead of scanning
     /// document pages.
     catalog_warm: bool,
@@ -117,6 +125,7 @@ impl Heap {
             users: Vec::new(),
             roles: Vec::new(),
             views: Vec::new(),
+            index_pages: Vec::new(),
             catalog_warm: false,
             user_page_reads: 0,
         }
@@ -249,17 +258,11 @@ impl Heap {
     }
 
     /// One pass over the pages so later inserts can see an existing `_id`
-    /// without walking the collection again.
+    /// without walking the collection again. Each id records its page.
     fn collect_ids(&mut self, pool: &mut BufferPool) -> Result<(), String> {
         let names: Vec<String> = self.collections.keys().cloned().collect();
         for name in names {
-            let mut ids = HashSet::new();
-            self.for_each_in(pool, &name, &mut |doc| {
-                ids.insert(document_id_string(doc));
-            })?;
-            if let Some(state) = self.collections.get_mut(&name) {
-                state.ids = ids;
-            }
+            self.fill_locations(pool, &name)?;
         }
         Ok(())
     }
@@ -269,6 +272,13 @@ impl Heap {
             return Err(format!("page {id} has no magic"));
         }
         let magic = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+        if magic == INDX_MAGIC {
+            self.live.insert(id);
+            if !self.index_pages.contains(&id) {
+                self.index_pages.push(id);
+            }
+            return Ok(());
+        }
         if magic != DOCS_MAGIC {
             return Err(format!(
                 "page {id} magic {magic:08x} is not a document page"
@@ -796,6 +806,7 @@ impl Heap {
             "applied_lsn": self.applied_lsn as i64,
             "next_page_id": self.next_page_id as i64,
             "catalog_pages": catalog_pages,
+            "index_pages": crate::storage::catalog::u64s(&self.index_pages),
         };
         let bson = bson::to_vec(&body).map_err(|err| format!("catalog encode: {err}"))?;
         let mut payload = Vec::with_capacity(4 + bson.len());
@@ -835,6 +846,10 @@ impl Heap {
         }
         if let Ok(next) = body.get_i64("next_page_id") {
             self.next_page_id = self.next_page_id.max(next as u64);
+        }
+        self.index_pages = crate::storage::catalog::read_u64s(&body, "index_pages");
+        for id in &self.index_pages {
+            self.live.insert(*id);
         }
         self.live.insert(CATALOG_PAGE);
         let empty_pages = Document::new();
@@ -970,14 +985,7 @@ impl Heap {
         if !self.contains(collection) || crate::storage::catalog::is_catalog(collection) {
             return Ok(());
         }
-        let mut ids = HashSet::new();
-        self.for_each_in(pool, collection, &mut |document| {
-            ids.insert(document_id_string(document));
-        })?;
-        if let Some(state) = self.collections.get_mut(collection) {
-            state.ids = ids;
-        }
-        Ok(())
+        self.fill_locations(pool, collection)
     }
 
     fn read_catalog(&mut self, pool: &mut BufferPool, name: &str) -> Result<Vec<Document>, String> {
@@ -1007,9 +1015,12 @@ impl Heap {
         state.continuations = continuations;
         state.overflow_heads = overflow.into_iter().collect();
         state.doc_count = document.get_i64("doc_count").unwrap_or(0) as u64;
-        state.ids = crate::storage::catalog::read_strings(document, "ids")
-            .into_iter()
-            .collect();
+        let stored_ids = crate::storage::catalog::read_strings(document, "ids");
+        let stored_pages = crate::storage::catalog::read_u64s(document, "id_pages");
+        state.ids = stored_ids.iter().cloned().collect();
+        if stored_pages.len() == stored_ids.len() {
+            state.locations = stored_ids.into_iter().zip(stored_pages).collect();
+        }
         if let Ok(validator) = document.get_document("validator") {
             state.validator = Some(validator.clone());
         }
@@ -1085,6 +1096,10 @@ impl Heap {
                 let name = crate::storage::catalog::bare_name(namespace);
                 let mut ids: Vec<&String> = state.ids.iter().collect();
                 ids.sort();
+                let id_pages: Vec<u64> = ids
+                    .iter()
+                    .filter_map(|id| state.locations.get(id.as_str()).copied())
+                    .collect();
                 let mut document = doc! {
                     "_id": namespace.clone(),
                     "database": database,
@@ -1097,6 +1112,9 @@ impl Heap {
                     "continuations": crate::storage::catalog::u64s(&state.continuations),
                     "ids": ids.into_iter().cloned().collect::<Vec<_>>(),
                 };
+                if id_pages.len() == state.ids.len() {
+                    document.insert("id_pages", crate::storage::catalog::u64s(&id_pages));
+                }
                 if let Some(validator) = &state.validator {
                     document.insert("validator", validator.clone());
                 }
@@ -1289,10 +1307,9 @@ impl Heap {
 
     /// Keeps documents whose id is in `ids` and that still match `filter`.
     ///
-    /// The index names the ids. This walk still reads pages through the
-    /// buffer pool; it does not jump to a page by pointer, because an
-    /// update can move a document. An empty `ids` list is an empty answer
-    /// and does not read any page.
+    /// Each id names the page recorded when the document was stored. An
+    /// empty list, and an id that is not stored, read no page. A page is
+    /// read once even when several hits share it.
     pub fn find_ids(
         &mut self,
         pool: &mut BufferPool,
@@ -1314,16 +1331,35 @@ impl Heap {
                 })
                 .collect());
         }
+        let mut pages: Vec<u64> = Vec::new();
+        for id in ids {
+            if !self.contains_id(collection, id) {
+                continue;
+            }
+            let Some(page) = self.location(collection, id) else {
+                return self.find_ids_scan(pool, collection, ids, filter);
+            };
+            if !pages.contains(&page) {
+                pages.push(page);
+            }
+        }
+        if pages.is_empty() {
+            return Ok(Vec::new());
+        }
         let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let mut matches = Vec::new();
-        self.for_each_in(pool, collection, &mut |doc| {
-            if wanted.contains(document_id_string(doc).as_str()) && document_matches(doc, filter) {
-                matches.push(doc.clone());
+        for page_id in pages {
+            for document in self.read_page_documents(pool, collection, page_id)? {
+                let id = document_id_string(&document);
+                if wanted.contains(id.as_str()) && document_matches(&document, filter) {
+                    matches.push(document);
+                }
             }
-        })?;
+        }
         Ok(matches)
     }
 
+    /// A missing id reads no page. A hit reads the page recorded for it.
     pub fn find_by_id(
         &mut self,
         pool: &mut BufferPool,
@@ -1339,13 +1375,38 @@ impl Heap {
         if !self.contains_id(collection, id) {
             return Ok(None);
         }
-        let mut found = None;
+        let Some(page_id) = self.location(collection, id) else {
+            let mut found = None;
+            self.for_each_in(pool, collection, &mut |doc| {
+                if found.is_none() && document_id_string(doc) == id {
+                    found = Some(doc.clone());
+                }
+            })?;
+            return Ok(found);
+        };
+        for document in self.read_page_documents(pool, collection, page_id)? {
+            if document_id_string(&document) == id {
+                return Ok(Some(document));
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_ids_scan(
+        &mut self,
+        pool: &mut BufferPool,
+        collection: &str,
+        ids: &[String],
+        filter: &Document,
+    ) -> Result<Vec<Document>, String> {
+        let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut matches = Vec::new();
         self.for_each_in(pool, collection, &mut |doc| {
-            if found.is_none() && document_id_string(doc) == id {
-                found = Some(doc.clone());
+            if wanted.contains(document_id_string(doc).as_str()) && document_matches(doc, filter) {
+                matches.push(doc.clone());
             }
         })?;
-        Ok(found)
+        Ok(matches)
     }
 
     pub fn for_each_document(
@@ -1386,6 +1447,9 @@ impl Heap {
     /// Walks one page at a time. `visit` must not retain the document
     /// beyond the call if the caller wants the body to stay off the heap
     /// store; the page itself is unpinned before the next one is read.
+    ///
+    /// Several normal pages are decoded on more than one core. The
+    /// calling worker still owns the log, so a write cannot fork it.
     pub fn for_each_in(
         &mut self,
         pool: &mut BufferPool,
@@ -1402,18 +1466,42 @@ impl Heap {
             .get(collection)
             .map(|state| state.overflow_heads.clone())
             .unwrap_or_default();
-        for page_id in pages {
-            if !crate::storage::catalog::is_catalog(collection) {
-                self.user_page_reads += 1;
-            }
+        let parallel = pages.len() > 1 && !crate::storage::catalog::is_catalog(collection);
+        let mut index = 0;
+        while index < pages.len() {
+            let page_id = pages[index];
             if heads.contains(&page_id) {
+                self.note_user_read(collection);
                 let doc = self.read_overflow(pool, page_id)?;
                 visit(&doc);
+                index += 1;
                 continue;
             }
-            let docs = self.read_docs(pool, page_id)?;
-            for doc in &docs {
-                visit(doc);
+            let start = index;
+            while index < pages.len() && !heads.contains(&pages[index]) {
+                index += 1;
+            }
+            let run = &pages[start..index];
+            if parallel && run.len() > 1 {
+                let mut payloads = Vec::with_capacity(run.len());
+                for page_id in run {
+                    self.note_user_read(collection);
+                    payloads.push(self.read_payload(pool, *page_id)?);
+                }
+                let decoded = decode_payloads(&payloads)?;
+                for docs in decoded {
+                    for doc in &docs {
+                        visit(doc);
+                    }
+                }
+            } else {
+                for page_id in run {
+                    self.note_user_read(collection);
+                    let docs = self.read_docs(pool, *page_id)?;
+                    for doc in &docs {
+                        visit(doc);
+                    }
+                }
             }
         }
         Ok(())
@@ -1526,7 +1614,9 @@ impl Heap {
         }
         if let Some(state) = self.collections.get_mut(collection) {
             for doc in &removed {
-                state.ids.remove(&document_id_string(doc));
+                let id = document_id_string(doc);
+                state.ids.remove(&id);
+                state.locations.remove(&id);
             }
         }
         Ok(removed)
@@ -1600,11 +1690,81 @@ impl Heap {
             .is_some_and(|state| state.ids.contains(id))
     }
 
-    fn note_stored(&mut self, collection: &str, document: &Document) {
+    fn note_stored(&mut self, collection: &str, document: &Document, page_id: u64) {
         let state = self.collections.get_mut(collection).unwrap();
         state.doc_count += 1;
-        state.ids.insert(document_id_string(document));
+        let id = document_id_string(document);
+        state.ids.insert(id.clone());
+        state.locations.insert(id, page_id);
         record_fields(state, document);
+    }
+
+    fn location(&self, collection: &str, id: &str) -> Option<u64> {
+        self.collections
+            .get(collection)
+            .and_then(|state| state.locations.get(id).copied())
+            .filter(|page| *page > 0)
+    }
+
+    fn remember(&mut self, collection: &str, document: &Document, page_id: u64) {
+        let id = document_id_string(document);
+        if let Some(state) = self.collections.get_mut(collection) {
+            state.locations.insert(id, page_id);
+        }
+    }
+
+    fn note_user_read(&mut self, collection: &str) {
+        if !crate::storage::catalog::is_catalog(collection) {
+            self.user_page_reads += 1;
+        }
+    }
+
+    /// Reads the documents on one page and counts that page.
+    fn read_page_documents(
+        &mut self,
+        pool: &mut BufferPool,
+        collection: &str,
+        page_id: u64,
+    ) -> Result<Vec<Document>, String> {
+        self.note_user_read(collection);
+        let heads = self
+            .collections
+            .get(collection)
+            .map(|state| state.overflow_heads.clone())
+            .unwrap_or_default();
+        if heads.contains(&page_id) {
+            return Ok(vec![self.read_overflow(pool, page_id)?]);
+        }
+        self.read_docs(pool, page_id)
+    }
+
+    /// Records each document's page. Used when a catalog has ids and no
+    /// page list yet, and when a cold start walks the files.
+    fn fill_locations(&mut self, pool: &mut BufferPool, collection: &str) -> Result<(), String> {
+        if !self.contains(collection) {
+            return Ok(());
+        }
+        let pages = self.collections[collection].pages.clone();
+        let heads = self.collections[collection].overflow_heads.clone();
+        let mut ids = HashSet::new();
+        let mut locations = HashMap::new();
+        for page_id in pages {
+            let documents = if heads.contains(&page_id) {
+                vec![self.read_overflow(pool, page_id)?]
+            } else {
+                self.read_docs(pool, page_id)?
+            };
+            for document in documents {
+                let id = document_id_string(&document);
+                ids.insert(id.clone());
+                locations.insert(id, page_id);
+            }
+        }
+        if let Some(state) = self.collections.get_mut(collection) {
+            state.ids = ids;
+            state.locations = locations;
+        }
+        Ok(())
     }
 
     /// Appends to the last normal page. When that page is full, the
@@ -1630,7 +1790,7 @@ impl Heap {
             docs.push(document.clone());
             if encode_docs(collection, &docs, self.capacity()).is_ok() {
                 self.write_normal(pool, collection, page_id, &docs)?;
-                self.note_stored(collection, document);
+                self.note_stored(collection, document, page_id);
                 return Ok(());
             }
         }
@@ -1638,11 +1798,11 @@ impl Heap {
             let payload = encode_docs(collection, std::slice::from_ref(document), self.capacity())?;
             let id = self.alloc(pool, payload)?;
             self.collections.get_mut(collection).unwrap().pages.push(id);
-            self.note_stored(collection, document);
+            self.note_stored(collection, document, id);
             return Ok(());
         }
-        self.attach_overflow(pool, collection, document)?;
-        self.note_stored(collection, document);
+        let head = self.attach_overflow(pool, collection, document)?;
+        self.note_stored(collection, document, head);
         Ok(())
     }
 
@@ -1657,7 +1817,11 @@ impl Heap {
         docs: Vec<Document>,
     ) -> Result<(), String> {
         if encode_docs(collection, &docs, self.capacity()).is_ok() {
-            return self.write_normal(pool, collection, page_id, &docs);
+            self.write_normal(pool, collection, page_id, &docs)?;
+            for doc in &docs {
+                self.remember(collection, doc, page_id);
+            }
+            return Ok(());
         }
         let mut kept = Vec::new();
         let mut spill = Vec::new();
@@ -1669,8 +1833,12 @@ impl Heap {
             }
         }
         self.write_normal(pool, collection, page_id, &kept)?;
+        for doc in &kept {
+            self.remember(collection, doc, page_id);
+        }
         for doc in spill {
-            self.attach_overflow(pool, collection, &doc)?;
+            let head = self.attach_overflow(pool, collection, &doc)?;
+            self.remember(collection, &doc, head);
         }
         Ok(())
     }
@@ -1693,7 +1861,7 @@ impl Heap {
         pool: &mut BufferPool,
         collection: &str,
         document: &Document,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         let bytes = bson::to_vec(document).map_err(|err| format!("document encode: {err}"))?;
         let ids = self.alloc_overflow_chain(pool, collection, &bytes)?;
         let head = ids[0];
@@ -1703,7 +1871,7 @@ impl Heap {
         for id in ids.into_iter().skip(1) {
             state.continuations.push(id);
         }
-        Ok(())
+        Ok(head)
     }
 
     /// Rewrites an overflow document without changing its head page id.
@@ -1847,6 +2015,71 @@ impl Heap {
         Ok(payload)
     }
 
+    /// Bytes of the index snapshot, or `None` when this directory still
+    /// keeps them in `indexes.bin`.
+    pub fn read_index_bytes(&mut self, pool: &mut BufferPool) -> Result<Option<Vec<u8>>, String> {
+        if self.index_pages.is_empty() {
+            return Ok(None);
+        }
+        let mut bytes = Vec::new();
+        for id in self.index_pages.clone() {
+            let payload = self.read_payload(pool, id)?;
+            if payload.len() < 12
+                || u32::from_le_bytes(payload[0..4].try_into().unwrap()) != INDX_MAGIC
+            {
+                return Err(format!("index page {id} is not an index snapshot"));
+            }
+            bytes.extend_from_slice(&payload[12..]);
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Replaces the index snapshot pages. The next catalog root names them.
+    pub fn store_index_bytes(
+        &mut self,
+        pool: &mut BufferPool,
+        disk: &PageStore,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let old = std::mem::take(&mut self.index_pages);
+        for id in old {
+            pool.discard(id);
+            disk.remove(id)?;
+            self.live.remove(&id);
+        }
+        let cap = self.capacity().checked_sub(12).filter(|n| *n > 0).ok_or_else(|| {
+            format!(
+                "page payload of {} bytes cannot hold an index header",
+                self.capacity()
+            )
+        })?;
+        let pieces: Vec<&[u8]> = if bytes.is_empty() {
+            vec![&[]]
+        } else {
+            bytes.chunks(cap).collect()
+        };
+        let mut ids = Vec::with_capacity(pieces.len());
+        for _ in &pieces {
+            ids.push(self.next_page_id);
+            self.next_page_id += 1;
+        }
+        for (index, piece) in pieces.iter().enumerate() {
+            let next = if index + 1 < ids.len() {
+                ids[index + 1]
+            } else {
+                0
+            };
+            let mut payload = Vec::with_capacity(12 + piece.len());
+            payload.extend_from_slice(&INDX_MAGIC.to_le_bytes());
+            payload.extend_from_slice(&next.to_le_bytes());
+            payload.extend_from_slice(piece);
+            pool.insert(Page::new(ids[index], self.applied_lsn, payload))?;
+            self.live.insert(ids[index]);
+        }
+        self.index_pages = ids;
+        Ok(())
+    }
+
     fn alloc(&mut self, pool: &mut BufferPool, payload: Vec<u8>) -> Result<u64, String> {
         let id = self.next_page_id;
         self.next_page_id += 1;
@@ -1977,6 +2210,38 @@ fn encode_docs(collection: &str, docs: &[Document], capacity: usize) -> Result<V
         at += body.len();
     }
     Ok(buf)
+}
+
+/// Decodes page bodies on more than one core, keeping page order.
+fn decode_payloads(payloads: &[Vec<u8>]) -> Result<Vec<Vec<Document>>, String> {
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .clamp(1, 8);
+    if payloads.len() < 2 || workers < 2 {
+        return payloads.iter().map(|payload| decode_docs(payload)).collect();
+    }
+    let width = workers.min(payloads.len());
+    let size = payloads.len().div_ceil(width);
+    std::thread::scope(|scope| {
+        let mut joins = Vec::new();
+        for chunk in payloads.chunks(size) {
+            joins.push(scope.spawn(move || {
+                chunk
+                    .iter()
+                    .map(|payload| decode_docs(payload))
+                    .collect::<Result<Vec<_>, _>>()
+            }));
+        }
+        let mut decoded = Vec::with_capacity(payloads.len());
+        for join in joins {
+            let part = join
+                .join()
+                .map_err(|_| "page decode thread failed".to_string())?;
+            decoded.extend(part?);
+        }
+        Ok(decoded)
+    })
 }
 
 fn decode_docs(payload: &[u8]) -> Result<Vec<Document>, String> {

@@ -76,9 +76,21 @@ pub async fn serve() {
             "Shard router hashing _id across {} shard(s)",
             config.sharding.shards.len()
         ));
-        Some(std::sync::Arc::new(shard::ShardRouter::connect(
-            &config.sharding.shards,
-        )))
+        let shards = std::sync::Arc::new(shard::ShardRouter::connect(&config.sharding.shards));
+        let ids = config
+            .sharding
+            .shards
+            .iter()
+            .map(|shard| shard.id)
+            .collect::<Vec<_>>();
+        if let Err(err) = shards
+            .adopt(std::path::Path::new(&config.storage.data_dir), &ids)
+            .await
+        {
+            logger::LOGGER.error(format!("Shard move failed: {err}"));
+            std::process::exit(1);
+        }
+        Some(shards)
     } else {
         if config.sharding.enabled {
             logger::LOGGER.info(format!(

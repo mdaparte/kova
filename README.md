@@ -25,3 +25,20 @@ The end-user guide is the static site in [`site/`](site/index.html). Start at [G
 `kovadump backup --db db db.kdmp` writes a backup of a running server. `kovadump restore --db db db.kdmp` reads it back.
 
 People changing Kova build from this repository with the Makefile (`make release`, `make test`). `make doc` builds the API reference.
+
+The crates.io package name is `kovadb`. The library name stays `kova`. After 0.1.0 is published, `cargo install kovadb` installs the `kova` and `kovadump` binaries. A Rust project depends on the package and calls the library:
+
+```toml
+kovadb = "0.1"
+```
+
+```rust
+#[tokio::main]
+async fn main() {
+    kova::serve().await;
+}
+```
+
+0.1.0 is published from GitHub Actions when a merge into `main` changes the crate sources. It is not on crates.io yet.
+
+Kova is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

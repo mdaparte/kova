@@ -6,7 +6,10 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Getting started — KOVA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Getting started - KOVA</title>
   <meta name="description" content="Install Kova, start it on port 27018, insert a document, and read it back after a restart.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,6 +42,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
@@ -50,41 +54,108 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 
 <h2 id="install">Install</h2>
 <p>This downloads the current build and installs it under your home directory:</p>
-<pre>curl -fsSL -o install.sh https://github.com/mdaparte/kova/releases/latest/download/install.sh
-sh install.sh</pre>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">curl -fsSL -o install.sh https://github.com/mdaparte/kova/releases/latest/download/install.sh
+sh install.sh</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">Installed into /home/ada/.local
+  /home/ada/.local/bin/kova
+  /home/ada/.local/bin/kovadump
+  /home/ada/.local/lib/libkova.so
+  /home/ada/.local/share/kova/kova.toml
+Start from a directory you want to keep. Pages and the log go to data/ there:
+  mkdir -p "$HOME/kova-data" && cd "$HOME/kova-data"
+  KOVA_CONFIG=/home/ada/.local/share/kova/kova.toml kova</code></pre>
+</div>
 <p><code>kova</code> and <code>kovadump</code> land in <code>~/.local/bin</code>. <code>libkova.so</code> lands in <code>~/.local/lib</code>. The config and the sample script land in <code>~/.local/share/kova</code>. If <code>~/.local/bin</code> is not on <code>PATH</code>, the script prints the line to add.</p>
 <p>To put the files somewhere else, download the archive and run its installer with <code>PREFIX</code> set:</p>
-<pre>curl -fsSL -o kova.tar.gz https://github.com/mdaparte/kova/releases/latest/download/kova-x86_64-unknown-linux-gnu.tar.gz
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">curl -fsSL -o kova.tar.gz https://github.com/mdaparte/kova/releases/latest/download/kova-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf kova.tar.gz
-PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</pre>
+PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">Installed into /opt/kova
+  /opt/kova/bin/kova
+  /opt/kova/bin/kovadump
+  /opt/kova/lib/libkova.so
+  /opt/kova/share/kova/kova.toml</code></pre>
+</div>
 <p>The archive has a <code>.sha256</code> file next to it on the same release, for checking the download.</p>
 
 <h2 id="docker">Docker</h2>
 <p>The same build is the image <code>ghcr.io/mdaparte/kova</code>. The tag <code>latest</code> is the newest merge. A tag with the commit id is that exact build. Pages and the log stay in the volume <code>kova</code>.</p>
-<pre>docker run --rm -p 27018:27018 -v kova:/var/lib/kova ghcr.io/mdaparte/kova:latest</pre>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">docker run --rm -p 27018:27018 -v kova:/var/lib/kova ghcr.io/mdaparte/kova:latest</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[Kova] 2026-10-27 08:50:01.000 INFO - Kova engine starting (port 27018, log level info, data_dir data, wal_fsync=true, warn_on_non_mongo_queries=true)
+[Kova] 2026-10-27 08:50:01.012 INFO - Network server started on port 27018 (max_connections 128, idle_ms 0)</code></pre>
+</div>
 <p>The listener inside the container is on port 27018, published on the same port of the machine. <code>-e KOVA_PORT=27019</code> changes the port inside the container. Publish that port with <code>-p 27019:27019</code>. The rest of this page talks to <code>127.0.0.1:27018</code> either way.</p>
 <p>The sample script is in the image at <code>/usr/share/kova/seed-oracle.js</code>.</p>
-<pre>docker run --rm --entrypoint cat ghcr.io/mdaparte/kova:latest /usr/share/kova/seed-oracle.js > seed-oracle.js</pre>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">docker run --rm --entrypoint cat ghcr.io/mdaparte/kova:latest /usr/share/kova/seed-oracle.js > seed-oracle.js</code></pre>
+</div>
 
 <h2 id="start">Start the server</h2>
 <p>Start from a directory you want to keep. Pages and the log are created in <code>data/</code> there.</p>
-<pre>mkdir -p "$HOME/kova-data" && cd "$HOME/kova-data"
-KOVA_CONFIG="$HOME/.local/share/kova/kova.toml" kova</pre>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">mkdir -p "$HOME/kova-data" && cd "$HOME/kova-data"
+KOVA_CONFIG="$HOME/.local/share/kova/kova.toml" kova</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[Kova] 2026-10-27 08:50:01.000 INFO - Kova engine starting (port 27018, log level info, data_dir data, wal_fsync=true, warn_on_non_mongo_queries=true)
+[Kova] 2026-10-27 08:50:01.012 INFO - Network server started on port 27018 (max_connections 128, idle_ms 0)</code></pre>
+</div>
 <p>The listener binds <code>0.0.0.0:27018</code>. Leave that process running. A second terminal is where you send commands.</p>
 <p>Port <code>27018</code> is deliberate, so a local MongoDB on <code>27017</code> can stay up beside Kova. Override it for one run with <code>KOVA_PORT=27019</code> in front of <code>kova</code>. The matching client then uses that port too. <code>KOVA_LOG_LEVEL=debug</code> raises the log for that run.</p>
 
 <h2 id="first-document">Write the first document</h2>
 <p>Open a shell against database <code>shop</code>:</p>
-<pre>mongosh "mongodb://127.0.0.1:27018/shop"</pre>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">mongosh "mongodb://127.0.0.1:27018/shop"</code></pre>
+</div>
 <p>Insert one order and read it back.</p>
-<pre>db.orders.insertOne({ sku: "kettle", qty: 2 })
-db.orders.find({ sku: "kettle" })</pre>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.orders.insertOne({ sku: "kettle", qty: 2 })
+db.orders.find({ sku: "kettle" })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{
+  acknowledged: true,
+  insertedId: ObjectId('674a1c0e8f0a4b6d9c12e001')
+}
+[
+  {
+    _id: ObjectId('674a1c0e8f0a4b6d9c12e001'),
+    sku: 'kettle',
+    qty: 2
+  }
+]</code></pre>
+</div>
 <p>Kova fills <code>_id</code> with an ObjectId when you omit it. The reply from <code>insertOne</code> includes that id. <code>find</code> returns the document you stored.</p>
-<p>The same question in SQL, on the same collection:</p>
-<pre>db.runCommand({
-  sql: "SELECT sku, qty FROM orders WHERE qty > 1"
-})</pre>
-<p>The cursor rows are the documents DataFusion produced. One <code>FROM</code>. The database is the one in the connection, here <code>shop</code>.</p>
+<p>The same read from a shell and from a SQL client:</p>
+<div class="ex" data-switch>
+<div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="true">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="false">SQL</button></span></div>
+<div class="ex-pane" data-lang="mql">
+<pre><code class="lang-mql">db.orders.find({ qty: { $gt: 1 } }, { sku: 1, qty: 1, _id: 0 })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { sku: 'kettle', qty: 2 }
+]</code></pre>
+</div>
+<div class="ex-pane" data-lang="sql" hidden>
+<pre><code class="lang-sql">SELECT sku, qty FROM orders WHERE qty > 1</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">sku     qty
+kettle    2</code></pre>
+</div>
+</div>
+<p>One <code>FROM</code>. The database is the one in the connection, here <code>shop</code>. A shell can also send the statement with <code>db.runCommand({ sql: "..." })</code>.</p>
 
 <h2 id="restart">Stop, start, read again</h2>
 <p>Stop the server with Ctrl-C in the terminal that runs it. Start it again with the same <code>kova</code> command, from the same directory.</p>
@@ -93,14 +164,77 @@ db.orders.find({ sku: "kettle" })</pre>
 
 <h2 id="sample">Load the sample</h2>
 <p>The install includes a small company sample: employees, departments, salary grades, and a few bonuses. With the server already listening:</p>
-<pre>mongosh --quiet "mongodb://127.0.0.1:27018/db" --file "$HOME/.local/share/kova/seed-oracle.js"</pre>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">mongosh --quiet "mongodb://127.0.0.1:27018/db" --file "$HOME/.local/share/kova/seed-oracle.js"</code></pre>
+</div>
 <p>That drops database <code>db</code> and loads it again. It also creates five indexes on <code>emp</code> and two views, <code>well_paid</code> and <code>emp_search</code>. Your <code>shop</code> database is untouched.</p>
-<pre>mongosh "mongodb://127.0.0.1:27018/db"
-db.emp.find({ job: "CLERK" }, { ename: 1, sal: 1, _id: 0 })
-db.runCommand({
-  sql: "SELECT ename, job, sal FROM emp WHERE sal > 2000"
-})</pre>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">mongosh "mongodb://127.0.0.1:27018/db"</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.emp.find({ job: "CLERK" }, { ename: 1, sal: 1, _id: 0 })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { ename: 'SMITH', sal: 800 },
+  { ename: 'ADAMS', sal: 1100 },
+  { ename: 'JAMES', sal: 950 },
+  { ename: 'MILLER', sal: 1300 }
+]</code></pre>
+</div>
+<div class="ex" data-switch>
+<div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="true">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="false">SQL</button></span></div>
+<div class="ex-pane" data-lang="mql">
+<pre><code class="lang-mql">db.emp.find({ sal: { $gt: 2000 } }, { ename: 1, job: 1, sal: 1, _id: 0 })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { ename: 'JONES', job: 'MANAGER', sal: 2975 },
+  { ename: 'BLAKE', job: 'MANAGER', sal: 2850 },
+  { ename: 'CLARK', job: 'MANAGER', sal: 2450 },
+  { ename: 'SCOTT', job: 'ANALYST', sal: 3000 },
+  { ename: 'KING', job: 'PRESIDENT', sal: 5000 },
+  { ename: 'FORD', job: 'ANALYST', sal: 3000 }
+]</code></pre>
+</div>
+<div class="ex-pane" data-lang="sql" hidden>
+<pre><code class="lang-sql">SELECT ename, job, sal FROM emp WHERE sal > 2000</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">ename   job        sal
+JONES   MANAGER   2975
+BLAKE   MANAGER   2850
+CLARK   MANAGER   2450
+SCOTT   ANALYST   3000
+KING    PRESIDENT 5000
+FORD    ANALYST   3000</code></pre>
+</div>
+</div>
 <p><code>well_paid</code> is the employees with <code>sal</code> above 2000. <code>emp_search</code> is every employee, with a text index on disk. Both are covered on the <a href="/docs/views">Views</a> and <a href="/docs/search">Text search</a> pages.</p>
+
+<h2 id="crate">Rust crate</h2>
+<p>The crates.io package name is <code>kovadb</code>. The library name stays <code>kova</code>. After version 0.1.0 is published, <code>cargo install kovadb</code> installs the <code>kova</code> and <code>kovadump</code> binaries. A program that embeds the server depends on the package and calls <code>kova::serve()</code>.</p>
+<p>That version is published from GitHub Actions when a merge into <code>main</code> changes the crate sources. It is not on crates.io yet.</p>
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">kovadb = "0.1"</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">cargo install kovadb</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">Installed package `kovadb v0.1.0`
+binary: kova
+binary: kovadump</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">Rust</div>
+<pre><code class="lang-rs">#[tokio::main]
+async fn main() {
+    kova::serve().await;
+}</code></pre>
+</div>
+<p>The dependency uses the package name <code>kovadb</code>. The code uses the library name <code>kova</code>. <code>serve</code> is the same process the <code>kova</code> binary starts.</p>
 
 <h2 id="next">What to open next</h2>
 <div class="cards">
@@ -112,15 +246,17 @@ db.runCommand({
 
       <nav class="pager"><a href="/docs"><span>Previous</span>Welcome</a><a class="next" href="/docs/concepts"><span>Next</span>How data is stored</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#next">What to open next</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#crate">Rust crate</a><a href="#next">What to open next</a></nav>
   </div>
   <footer>
     <span>KOVA</span>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

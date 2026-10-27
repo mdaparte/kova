@@ -1,11 +1,26 @@
 [package]
-name = "kova"
+name = "kovadb"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+description = "Database you talk to with a MongoDB driver. Stores documents, answers SQL, and searches text."
+repository = "https://github.com/mdaparte/kova"
+readme = "README.md"
+keywords = ["database", "mongodb", "sql"]
+categories = ["database"]
+autobins = false
 
 [lib]
 name = "kova"
 crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "kova"
+path = "src/main.rs"
+
+[[bin]]
+name = "kovadump"
+path = "src/bin/kovadump.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

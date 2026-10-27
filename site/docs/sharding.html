@@ -6,7 +6,10 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sharding — KOVA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Sharding - KOVA</title>
   <meta name="description" content="The router hashes _id and sends the document to the process that owns it. Use it when one machine cannot hold the data.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,6 +42,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding" class="here">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
@@ -47,13 +51,19 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <p class="lede">The router hashes _id and sends the document to the process that owns it. Use it when one machine cannot hold the data.</p>
       
 <p>Leave <code>[sharding]</code> commented and every document stays in this process. Uncomment it when one machine cannot hold the collection or the writes. The router does not store the documents. A shard is a normal Kova process. The router speaks the MongoDB protocol to the address in <code>shards[].client</code>.</p>
-<pre>[sharding]
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">[sharding]
 enabled = true
 role = "router"
-shards = [
-  { id = 1, client = "127.0.0.1:27101" },
+shards = [</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">  { id = 1, client = "127.0.0.1:27101" },
   { id = 2, client = "127.0.0.1:27102" },
-]</pre>
+]</code></pre>
+</div>
 <p>Each shard has its own config, its own port, and its own data directory. <code>role = "shard"</code> on those processes is a normal server. The example ports stay off <code>27018</code>, so the single server you already run is left alone.</p>
 <div class="note"><p>A router cannot also enable <code>[replication]</code>. That combination is a config error. Put replication on the shard, and put the primary's address in <code>shards[].client</code>. The router does not join that replica set, and it does not follow an election. After a primary changes, edit the address in the router's <code>kova.toml</code> and restart the router.</p></div>
 
@@ -67,14 +77,14 @@ shards = [
   <li><code>create</code>, <code>drop</code>, <code>createIndexes</code>, and <code>dropDatabase</code> visit every shard, so the collection and its indexes exist wherever a document lands.</li>
   <li><code>listCollections</code> and <code>listDatabases</code> merge the names.</li>
   <li>SQL on the router loads each named collection from every shard and runs the statement there.</li>
-  <li>An aggregate stage other than match, project, or unwind is refused on the router. A group inside each shard is not the group of the whole collection.</li>
+  <li>An aggregate <code>$group</code> whose accumulators combine is merged from the shards. Equality <code>$lookup</code> sends the join keys to the shards that hold the other collection. An accumulator or a stage that cannot merge is refused by name.</li>
   <li><code>mapReduce</code> visits every shard and the batches are concatenated.</li>
   <li>A transaction is refused on the router.</li>
   <li>An update of <code>admin.counters</code> is sent to every shard. See <a href="/docs/counters">Autoincrement</a> for why each shard has its own <code>last</code>.</li>
 </ul>
 
 <h2 id="ring">Adding a shard</h2>
-<p>The shard list is fixed for data already written. Adding a shard changes the ring and leaves existing documents where they were stored. A find by an <code>_id</code> that now hashes to the new shard misses that document. A find with no <code>_id</code> still walks every shard and finds it. Plan the shard list before the collection is large, or move documents yourself.</p>
+<p>Adding a shard to the router's list and restarting the router moves each document whose <code>_id</code> now falls on the new arc. A document that stays on its current shard is not rewritten. During the move, a find by <code>_id</code> returns the document once. The previous shard ids are kept in <code>shard-ring.txt</code> in the data directory. Removing a shard does not move documents.</p>
 
 <h2 id="inside">Inside each shard</h2>
 <p>Each shard is a full Kova process. It still has four local workers, and a collection name still hashes to one of them. All documents of one collection on that process live on one worker. Sharding is what splits the same collection across processes, by document <code>_id</code>.</p>
@@ -90,8 +100,10 @@ shards = [
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

@@ -27,11 +27,11 @@ In modern software development, engineering teams are often forced to duplicate 
 * Provides high availability via oplog-based replication and replica sets
 
 **Kova is inspired by:**
-* **VoltDB** — lock-free, thread-per-core in-memory processing
-* **GraniteDB** — WAL, buffer pool, page-based storage, MVCC, replication
-* **MongoDB** — wire protocol, document model, aggregation pipeline
-* **Apache DataFusion** — SQL parsing, optimization, and execution
-* **Tantivy** — full-text search (Lucene equivalent in Rust)
+* **VoltDB** - lock-free, thread-per-core in-memory processing
+* **GraniteDB** - WAL, buffer pool, page-based storage, MVCC, replication
+* **MongoDB** - wire protocol, document model, aggregation pipeline
+* **Apache DataFusion** - SQL parsing, optimization, and execution
+* **Tantivy** - full-text search (Lucene equivalent in Rust)
 
 This makes Kova an ideal solution for **Edge Computing/IoT environments** (where resources are limited and extreme local efficiency is mandatory) and as an **elite technical portfolio project** that showcases mastery over low-level Rust concurrency, memory management, and storage engine design.
 
@@ -63,7 +63,7 @@ This makes Kova an ideal solution for **Edge Computing/IoT environments** (where
 * **Unique Constraints:** Enforce uniqueness across indexed fields.
 * **Sparse Indexes:** Skip documents missing the indexed field.
 * **Full-Text Indexes (Tantivy):** Already implemented (Phase 3/4). The index manager creates, drops, and auto-maintains full-text indexes alongside other index types.
-* **Auto-Maintenance:** Indexes are updated on insert/update/delete — no manual reindexing.
+* **Auto-Maintenance:** Indexes are updated on insert/update/delete - no manual reindexing.
 
 ### 6. Replication & High Availability
 * **Oplog-Based Replication:** Every write is recorded in a capped operations log with timestamps. Secondaries replay the oplog to stay in sync.
@@ -79,7 +79,7 @@ Kova's core is engineered by assembling highly optimized, production-proven crat
 * **`tokio` & `bytes`:** Asynchronous networking layer for thousands of concurrent TCP connections and raw binary streams via `BytesMut`.
 * **`bson`:** Official MongoDB BSON serialization for parsing and manipulating dynamic document structures.
 * **`crossbeam-channel`:** Ultra-fast MPSC channels for lock-free routing from network tasks to single-threaded storage workers.
-* **`tantivy`:** The "Lucene of Rust" — blazing fast, memory-optimized full-text search engine.
+* **`tantivy`:** The "Lucene of Rust" - blazing fast, memory-optimized full-text search engine.
 * **`datafusion` (Apache):** Extensible SQL query planner and execution framework as the internal analytical brain.
 * **`sled` or custom page store** (Phase 6+): For disk-based page storage, or a custom implementation inspired by GraniteDB.
 * **`crc32fast`:** CRC32 checksums for WAL entries and page integrity verification.

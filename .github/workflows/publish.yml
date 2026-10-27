@@ -1,0 +1,58 @@
+name: Publish crate
+
+# A push to main publishes kovadb on crates.io when this commit changes
+# the database code. A commit that only touches site/ does not run this
+# workflow. crates.io keeps every version, so a version already published
+# is left as it is: bump the version in Cargo.toml to publish again.
+#
+# The job reads the Actions secret CARGO_REGISTRY_TOKEN. Create the token
+# at https://crates.io/settings/tokens and store it on this repository.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/publish.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'mdaparte/kova'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish when this version is new
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -eu
+          name=$(awk -F'"' '/^name = /{print $2; exit}' Cargo.toml)
+          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          code=$(curl -sS -A 'kova-publish' -o /dev/null -w '%{http_code}' \
+            "https://crates.io/api/v1/crates/${name}/${version}")
+          if [ "$code" = "200" ]; then
+            echo "${name} ${version} is already on crates.io. Bump the version in Cargo.toml to publish again."
+            exit 0
+          fi
+          if [ "$code" != "404" ]; then
+            echo "crates.io answered ${code} for ${name} ${version}"
+            exit 1
+          fi
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "Add the CARGO_REGISTRY_TOKEN secret before this can publish."
+            exit 1
+          fi
+          cargo publish --locked

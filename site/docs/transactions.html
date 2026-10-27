@@ -6,8 +6,11 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Transactions — KOVA</title>
-  <meta name="description" content="Several writes on one collection commit together, or none of them do.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Transactions - KOVA</title>
+  <meta name="description" content="Several writes commit together, or none of them do.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
@@ -39,18 +42,21 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions" class="here">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
       <h1>Transactions</h1>
-      <p class="lede">Several writes on one collection commit together, or none of them do.</p>
+      <p class="lede">Several writes commit together, or none of them do.</p>
       
-<p>A transaction names the collection whose partition owns it. Later inserts, finds, updates, deletes, counts, and aggregates on that collection pass the same <code>txnId</code>. A collection that hashes to another partition does not see the transaction. Commit and abort name the same collection.</p>
+<p>A transaction opens on the partition that owns the named collection. Later inserts, finds, updates, deletes, counts, and aggregates on collections that hash to that same partition pass the same <code>txnId</code> and commit as one log record. A collection on another partition does not see the transaction. Commit and abort name the collection that opened it.</p>
 <p>Uncommitted writes stay off the pages. Commit is one log record, so a crash publishes every write in the transaction or none of them. Abort discards them. With a replica set, followers receive that one commit record and apply it. They do not open the transaction. Abort writes nothing to the oplog.</p>
 
 <h2 id="session">A short session</h2>
-<pre>db.runCommand({
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({
   beginTransaction: 1,
   collection: "orders",
   txnId: NumberLong(1),
@@ -65,7 +71,8 @@ db.runCommand({
   commitTransaction: 1,
   collection: "orders",
   txnId: NumberLong(1)
-})</pre>
+})</code></pre>
+</div>
 <p><code>abortTransaction</code> takes the same <code>collection</code> and <code>txnId</code>. Another client’s find sees the kettle only after commit.</p>
 <p><code>$out</code> inside a transaction is refused. <code>mapReduce</code> with <code>txnId</code> is refused. A transaction on a shard router is refused: the router does not own the documents.</p>
 
@@ -95,8 +102,10 @@ db.runCommand({
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

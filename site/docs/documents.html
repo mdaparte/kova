@@ -6,7 +6,10 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Documents — KOVA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Documents - KOVA</title>
   <meta name="description" content="Insert, replace, update, and delete documents with the commands a MongoDB driver already sends.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,6 +42,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div><h2>Work with data</h2><a href="/docs/documents" class="here">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
     <article class="doc">
@@ -46,71 +50,160 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>Documents</h1>
       <p class="lede">Insert, replace, update, and delete documents with the commands a MongoDB driver already sends.</p>
       
-<p>A collection appears the first time you insert into it. You can also create it empty, which is how you attach an autoincrement field. Commands below assume the shell is already on the database. <code>mongosh "mongodb://127.0.0.1:27018/shop"</code> does that. Every command carries <code>$db</code>. The shell fills it in.</p>
+<p>These commands are how you create the table, insert, update, and delete. A collection appears the first time you insert into it. You can also create it empty, which is how you attach an autoincrement field. An index is <a href="/docs/indexes">createIndex</a>. A SQL <code>SELECT</code> reads the rows these commands stored. <code>CREATE TABLE</code>, <code>INSERT</code>, and <code>UPDATE</code> sent as SQL are not the write path. Commands below assume the shell is already on the database. <code>mongosh "mongodb://127.0.0.1:27018/shop"</code> does that. Every command carries <code>$db</code>. The shell fills it in. The helpers are the MongoDB ones: <a href="https://www.mongodb.com/docs/manual/reference/method/db.collection.insertOne/"><code>insertOne</code></a>, <a href="https://www.mongodb.com/docs/manual/reference/method/db.collection.find/"><code>find</code></a>, <a href="https://www.mongodb.com/docs/manual/reference/method/db.collection.updateOne/"><code>updateOne</code></a>, <a href="https://www.mongodb.com/docs/manual/reference/method/db.collection.replaceOne/"><code>replaceOne</code></a>, and <a href="https://www.mongodb.com/docs/manual/reference/method/db.collection.deleteOne/"><code>deleteOne</code></a>.</p>
 
 <h2 id="insert">Insert</h2>
-<pre>db.orders.insertOne({ sku: "kettle", qty: 2, tags: ["kitchen"] })
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.orders.insertOne({ sku: "kettle", qty: 2, tags: ["kitchen"] })
 db.orders.insertMany([
   { sku: "mug", qty: 6 },
   { sku: "bowl", qty: 4 }
-])</pre>
+])</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{
+  acknowledged: true,
+  insertedId: ObjectId('674a1c0e8f0a4b6d9c12e001')
+}
+{
+  acknowledged: true,
+  insertedIds: {
+    '0': ObjectId('674a1c0e8f0a4b6d9c12e002'),
+    '1': ObjectId('674a1c0e8f0a4b6d9c12e003')
+  }
+}</code></pre>
+</div>
 <p>Each document is BSON. Numbers, strings, booleans, dates, nested documents, and arrays are stored as sent. Omit <code>_id</code> and the server assigns an ObjectId before the write is logged, so a replica set stores the same id on every member.</p>
 <p>The wire command, if you are not using a helper:</p>
-<pre>db.runCommand({
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({
   insert: "orders",
   documents: [{ sku: "kettle", qty: 2 }]
-})</pre>
+})</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{ n: 1, ok: 1 }</code></pre>
+</div>
 
 <h2 id="read">Read</h2>
-<pre>db.orders.find({ sku: "kettle" })
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.orders.find({ sku: "kettle" })
 db.orders.find({ qty: { $gt: 2 } }, { sku: 1, qty: 1, _id: 0 })
 db.orders.find().sort({ qty: -1 }).skip(2).limit(5)
-db.orders.countDocuments({ qty: { $gte: 2 } })</pre>
+db.orders.countDocuments({ qty: { $gte: 2 } })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { _id: ObjectId('674a1c0e8f0a4b6d9c12e001'), sku: 'kettle', qty: 2, tags: ['kitchen'] }
+]
+[
+  { sku: 'mug', qty: 6 },
+  { sku: 'bowl', qty: 4 }
+]
+[
+  { _id: ObjectId('674a1c0e8f0a4b6d9c12e001'), sku: 'kettle', qty: 2, tags: ['kitchen'] }
+]
+3</code></pre>
+</div>
 <p>A projection includes the fields you name. <code>_id</code> stays unless you set it to <code>0</code>. Sort, skip, and limit page through a result. The reply is a cursor: <code>firstBatch</code> holds the first documents, and the client asks for the rest.</p>
 <p><code>explain</code> tells you how the read ran. <code>IDHACK</code> is a lookup by <code>_id</code> alone. <code>IXSCAN</code> is a secondary index. <code>COLLSCAN</code> walks the pages.</p>
-<pre>db.orders.find({ sku: "kettle" }).explain()</pre>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.orders.find({ sku: "kettle" }).explain()</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{
+  ok: 1,
+  queryPlanner: {
+    namespace: 'shop.orders',
+    winningPlan: { stage: 'COLLSCAN', filter: { sku: 'kettle' } }
+  }
+}</code></pre>
+</div>
 <p>Predicates, pipelines, and update operators are on <a href="/docs/queries">Find and aggregate</a>.</p>
 
 <h2 id="update">Update</h2>
 <p>A replacement overwrites the document and keeps <code>_id</code>.</p>
-<pre>db.orders.replaceOne({ sku: "kettle" }, { sku: "kettle", qty: 3 })</pre>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.orders.replaceOne({ sku: "kettle" }, { sku: "kettle", qty: 3 })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{ acknowledged: true, matchedCount: 1, modifiedCount: 1 }</code></pre>
+</div>
 <p>Operators change fields in place. An unknown operator is an error.</p>
-<pre>db.orders.updateOne({ sku: "kettle" }, { $set: { qty: 3, color: "black" } })
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.orders.updateOne({ sku: "kettle" }, { $set: { qty: 3, color: "black" } })
 db.orders.updateOne({ sku: "kettle" }, { $inc: { qty: 1 } })
 db.orders.updateOne({ sku: "kettle" }, { $unset: { color: "" } })
 db.orders.updateOne({ sku: "kettle" }, { $rename: { color: "finish" } })
 db.orders.updateOne({ sku: "kettle" }, { $push: { tags: "sale" } })
-db.orders.updateOne({ sku: "kettle" }, { $pull: { tags: "sale" } })</pre>
+db.orders.updateOne({ sku: "kettle" }, { $pull: { tags: "sale" } })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{ acknowledged: true, matchedCount: 1, modifiedCount: 1 }</code></pre>
+</div>
 <p><code>updateMany</code> applies the same change to every match. The reply includes <code>n</code> (matched) and <code>nModified</code> (changed).</p>
 
 <h2 id="delete">Delete and drop</h2>
-<pre>db.orders.deleteOne({ sku: "bowl" })
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.orders.deleteOne({ sku: "bowl" })
 db.orders.deleteMany({ qty: { $lt: 1 } })
 db.orders.drop()
-db.dropDatabase()</pre>
+db.dropDatabase()</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{ acknowledged: true, deletedCount: 1 }</code></pre>
+</div>
 <p><code>drop</code> removes one collection. <code>dropDatabase</code> removes the database you are in. Views that still read a collection block the drop of that collection until the views are dropped.</p>
 
 <h2 id="create">Create a collection on purpose</h2>
-<pre>db.runCommand({ create: "orders" })</pre>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({ create: "orders" })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{ ok: 1 }</code></pre>
+</div>
 <p>Pass <code>autoincrement</code> here when a field should fill itself. That is the whole subject of <a href="/docs/counters">Autoincrement</a>.</p>
-<pre>db.runCommand({ create: "orders", autoincrement: "id" })</pre>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({ create: "orders", autoincrement: "id" })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{ ok: 1 }</code></pre>
+</div>
 
 <h2 id="validate">Require a field</h2>
 <p><code>collMod</code> stores a small validator on the collection. <code>required</code> lists field names. <code>properties.&lt;field&gt;.bsonType</code> names the BSON type. Insert and update check it.</p>
-<pre>db.runCommand({
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({
   collMod: "orders",
   validator: {
     required: ["sku"],
     properties: { qty: { bsonType: "int" } }
   }
-})</pre>
+})</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{ ok: 1 }</code></pre>
+</div>
 <p>A document missing <code>sku</code>, or a <code>qty</code> that is not an int, is refused. Leave the validator off and documents stay schemaless.</p>
 
 <h2 id="stats">Sizes</h2>
-<pre>db.runCommand({ collStats: "orders" })
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({ collStats: "orders" })
 db.runCommand({ dbStats: 1 })
 db.runCommand({ listCollections: 1 })
-db.adminCommand({ listDatabases: 1 })</pre>
+db.adminCommand({ listDatabases: 1 })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{
+  ns: 'shop.orders',
+  count: 3,
+  capped: false,
+  nindexes: 1,
+  totalIndexSize: 0,
+  indexSizes: { _id_: 0 },
+  ok: 1
+}</code></pre>
+</div>
 <p><code>collStats</code> reports the serialized size and the average document size. <code>dbStats</code> sums the partitions. <code>listCollections</code> includes views, with <code>type: "view"</code>.</p>
 
       <nav class="pager"><a href="/docs/concepts"><span>Previous</span>How data is stored</a><a class="next" href="/docs/queries"><span>Next</span>Find and aggregate</a></nav>
@@ -122,8 +215,10 @@ db.adminCommand({ listDatabases: 1 })</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>
