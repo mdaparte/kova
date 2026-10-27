@@ -43,7 +43,7 @@ replication, and multi-model indexing.
 | 27 | User guide | ✅ Complete |
 | 28 | Read path and scale | ✅ Complete |
 
-## Phase 1 — Networking & Interception ✅
+## Phase 1 - Networking & Interception ✅
 
 - TCP listener (default port 27018, overridable via `KOVA_PORT`).
 - 16-byte Wire Protocol header parsed in **little-endian**.
@@ -58,7 +58,7 @@ replication, and multi-model indexing.
 - SQL via DataFusion: `db.runCommand({ sql: "..." })` executes against in-memory
   collections and returns a cursor. (Phase 5.)
 
-## Phase 2 — Partition Isolation ✅
+## Phase 2 - Partition Isolation ✅
 
 - `PartitionCommand` enum: insert, find, update, delete, count, drop, create,
   dropDatabase, createIndexes, listIndexes, listCollections, listDatabases,
@@ -75,7 +75,7 @@ replication, and multi-model indexing.
 - Validated end-to-end with a real `mongosh`: insertMany, find (+filtered),
   count, updateOne (`n`/`nModified`), deleteOne, drop, listCollections.
 
-## Phase 3 — Full-Text Search Indexing ✅
+## Phase 3 - Full-Text Search Indexing ✅
 
 - `tantivy` integrated with a RAM directory per partition.
 - Hot indexing: documents tokenized as they arrive (insert/update/delete/drop
@@ -83,7 +83,7 @@ replication, and multi-model indexing.
 - Relevance scoring (BM25) and fuzzy (distance-1) fallback via `$text`.
 - Validated end-to-end with a real `mongosh` (8/8 assertions).
 
-## Phase 4 — Search Flexibility & Configuration ✅
+## Phase 4 - Search Flexibility & Configuration ✅
 
 - Per-field indexes (one tantivy index per document field per partition).
 - `$text.$boost`: per-field BM25 multipliers.
@@ -96,7 +96,7 @@ replication, and multi-model indexing.
 - Non-Mongo warnings: Kova extensions (`$boost`, `$decay`) and unsupported
   operators (`$analyzer`, `$language`) log a WARN when enabled.
 
-## Phase 5 — Analytical Query Optimization (DataFusion SQL) ✅
+## Phase 5 - Analytical Query Optimization (DataFusion SQL) ✅
 
 - Integrate `Apache DataFusion` (v45).
 - SQL via `db.runCommand({ sql: "..." })` executes against in-memory collections.
@@ -109,7 +109,7 @@ replication, and multi-model indexing.
   pipeline (`aggregate`, `$match`, `$group`, …) is Phase 8, after collections
   live on pages (Phase 7).
 
-### Phase 5 — Sub-tasks
+### Phase 5 - Sub-tasks
 
 - [x] Add `datafusion = "45"` dependency.
 - [x] Create `src/query_engine/mod.rs` with `parse_sql()` and execution.
@@ -120,7 +120,7 @@ replication, and multi-model indexing.
 - [x] Validate `SELECT ... FROM ... WHERE ...`, `COUNT(*)`, `GROUP BY`.
 - [x] Add unit tests for query_engine parsing + execution.
 
-## Phase 6 — Disk Storage Engine (WAL + Buffer Pool + Page Store) ✅
+## Phase 6 - Disk Storage Engine (WAL + Buffer Pool + Page Store) ✅
 
 _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 
@@ -169,7 +169,7 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 - Checkpoints periodically flush the in-memory state to disk and truncate the
   WAL.
 
-### Phase 6 — Sub-tasks
+### Phase 6 - Sub-tasks
 
 - [x] Design the on-disk layout: database directory, collection directories,
   page files, WAL segments.
@@ -184,7 +184,7 @@ _Inspiration: GraniteDB (https://github.com/jmptrader/GraniteDB)_
 - [x] Add configuration for `data_dir`, `page_size`, `buffer_pool_pages`,
   `wal_fsync` in `kova.toml`.
 
-## Phase 7 — Disk-Resident Collections ✅
+## Phase 7 - Disk-Resident Collections ✅
 
 Phase 6 made a crash survivable by copying the in-memory map to disk and
 loading that copy back on startup. The map is still the database: `find`,
@@ -247,7 +247,7 @@ dirtied. It is not where the document lives.
 - A document larger than one page round-trips.
 - `SELECT` over that collection returns the same rows as `find`.
 
-### Phase 7 — Sub-tasks
+### Phase 7 - Sub-tasks
 
 - [x] Slot directory and overflow chains in `src/storage/heap.rs`. The
   32-byte page envelope is unchanged.
@@ -268,7 +268,7 @@ dirtied. It is not where the document lives.
   and delete of an evicted document, overflow round-trip. SQL tests
   still read through `find`.
 
-## Phase 8 — Query Language and Aggregation Pipeline ✅
+## Phase 8 - Query Language and Aggregation Pipeline ✅
 
 `aggregate` reads documents from pages through the buffer pool, one page at
 a time. A leading `$match` is applied during that scan. `find` and `$match`
@@ -291,10 +291,10 @@ sends. There is no second syntax.
 Numbers compare across Int32, Int64, and Double. Dates compare by instant.
 This phase adds the rest, and `$match` uses that same function:
 
-- `$not` — negate one operator document.
-- `$regex` — match a string field.
-- `$type` — match the BSON type of a field.
-- `$elemMatch` — one array element must satisfy every predicate in the
+- `$not` - negate one operator document.
+- `$regex` - match a string field.
+- `$type` - match the BSON type of a field.
+- `$elemMatch` - one array element must satisfy every predicate in the
   subdocument.
 
 ### 8.3 Projection, sort, skip, and limit
@@ -351,7 +351,7 @@ against the same question asked in SQL:
   documents, read back from pages. The collection must not have been
   loaded entirely into RAM to answer.
 
-### Phase 8 — Sub-tasks
+### Phase 8 - Sub-tasks
 
 - [x] Accept `aggregate` in `command_from_document` and route it to the partition that owns the collection.
 - [x] Add `$not`, `$regex`, `$type`, and `$elemMatch` to the shared matcher. `$match` calls that matcher.
@@ -363,7 +363,7 @@ against the same question asked in SQL:
 - [x] Answer `explain` with the pipeline and a collection scan.
 - [x] Integration test: seed `emp`, compare `$match`/`$group` with SQL, project, `$inc`, `$lookup`, `$out`, restart, aggregate again.
 
-## Phase 9 — Transactional Storage (MVCC + ACID + Isolation) ✅
+## Phase 9 - Transactional Storage (MVCC + ACID + Isolation) ✅
 
 _Inspiration: GraniteDB (MVCC, ACID transactions, multiple isolation levels)_
 
@@ -410,7 +410,7 @@ partition's committed pages.
 - On abort: discard the transaction's writes.
 - Timeout enforcement: automatic abort on timeout.
 
-### Phase 9 — Sub-tasks
+### Phase 9 - Sub-tasks
 
 - [x] Design MVCC version storage: per-document version chain (LSN, document,
   deleted flag).
@@ -421,7 +421,7 @@ partition's committed pages.
 - [x] Add transaction tests: ACID properties, isolation levels, conflict
   detection, timeout.
 
-## Phase 10 — Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) ✅
+## Phase 10 - Indexing Subsystem (B-Tree, Hash, Unique, Sparse, Auto-Maintain) ✅
 
 _Inspiration: GraniteDB (B-Tree, Hash, Unique, Sparse, Index Manager)_
 
@@ -478,7 +478,7 @@ A SQL `WHERE` that is one comparison (`sal > 1000`, `job = 'CLERK'`) is
 sent as that find, so the index narrows the pages before DataFusion
 applies the predicate again. The SQL reply includes the winning stage.
 
-### Phase 10 — Sub-tasks
+### Phase 10 - Sub-tasks
 
 - [x] Indexes are rebuilt from document pages. The catalog stores the spec.
   There is no second on-disk B-tree: a page pointer would go stale when a
@@ -493,7 +493,7 @@ applies the predicate again. The SQL reply includes the winning stage.
 - [x] Add index tests: range, hash, id lookup, unique, sparse, update,
   drop, and restart.
 
-## Phase 11 — Replication & High Availability (Oplog + Replica Sets + Heartbeat) ✅
+## Phase 11 - Replication & High Availability (Oplog + Replica Sets + Heartbeat) ✅
 
 Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. There is no ZooKeeper and no second election protocol. With no `[replication]` section the process stays a single writable node.
 
@@ -515,7 +515,7 @@ Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. 
 - An `arbiter` is a Raft learner. It keeps the oplog, stores no documents, and does not vote, so it cannot become primary. OpenRaft will elect any voter, and a data-less primary cannot serve the database.
 - Sharding (consistent hashing, key ranges, a shard router) is not part of this phase.
 
-### Phase 11 — Sub-tasks
+### Phase 11 - Sub-tasks
 
 - [x] Oplog on disk: the Raft log in `data/raft-{id}/oplog.json`, timestamped by log index.
 - [x] `src/replication/oplog.rs`: durable Raft log and "after this timestamp" reads.
@@ -526,7 +526,7 @@ Election, heartbeats, and the oplog are OpenRaft 0.9 inside the `kova` process. 
 - A commit is one oplog entry (`applyTransaction`). `begin`, staged statements, and `abort` stay on the primary.
 - Sharding remains a later extension.
 
-## Phase 12 — On-Disk Page Compression ✅
+## Phase 12 - On-Disk Page Compression ✅
 
 WiredTiger compresses the pages of a collection (snappy or zstd). Kova compresses the BSON payload of every page with zstd. The WAL stays the operation log: compression applies to the page file, which is where the documents live.
 
@@ -549,14 +549,14 @@ WiredTiger compresses the pages of a collection (snappy or zstd). Kova compresse
 - A page filled to the logical capacity still encodes inside `page_size`.
 - A restart reads the compressed page back to the original documents.
 
-### Phase 12 — Sub-tasks
+### Phase 12 - Sub-tasks
 
 - [x] Compress the payload with zstd in `Page::encode` and decompress it in `Page::decode`.
 - [x] Size the logical payload so `compress_bound` fits in the fixed envelope.
 - [x] Keep the buffer pool on the decompressed page. Leave the WAL uncompressed.
 - [x] Tests: smaller file for repetitive documents, full-page encode, restart round-trip.
 
-## Phase 13 — Security (RBAC, Argon2id, AES-256-GCM, users) ✅
+## Phase 13 - Security (RBAC, Argon2id, AES-256-GCM, users) ✅
 
 With `[security] enabled = false` the process stays the open server it is today. Turning it on requires a user before any other command, checks that user's roles, and encrypts page files and WAL records.
 
@@ -607,7 +607,7 @@ Users live in the catalog, not in a second database of documents.
 - Compress with zstd first, then encrypt. Each write uses a fresh 96-bit nonce. The nonce and the tag sit in the page image next to the ciphertext. The checksum covers that image.
 - Startup with encrypted files and no key fails. A data directory does not mix encrypted and plaintext pages.
 
-### Phase 13 — Sub-tasks
+### Phase 13 - Sub-tasks
 
 - [x] Catalog records for users, built-in roles, and custom roles.
 - [x] Argon2id on `createUser`. `authenticate` binds the connection.
@@ -615,7 +615,7 @@ Users live in the catalog, not in a second database of documents.
 - [x] AES-256-GCM around the compressed page and the WAL record, with a random nonce per write.
 - [x] Tests: each built-in role, a custom role, a disabled user, a bad password, and a restart that reads an encrypted page only with the key.
 
-## Phase 14 — Monitoring (17 atomic counters, `serverStatus`) ✅
+## Phase 14 - Monitoring (17 atomic counters, `serverStatus`) ✅
 
 Counters are atomics. A network task and a partition worker bump them without taking a lock on the command path. `serverStatus` returns the current values on the wire.
 
@@ -639,13 +639,13 @@ Counters are atomics. A network task and a partition worker bump them without ta
 | `transactionsCommitted` | `commitTransaction` |
 | `transactionsAborted` | `abortTransaction`, including timeout |
 
-### Phase 14 — Sub-tasks
+### Phase 14 - Sub-tasks
 
 - [x] One atomic per counter, updated where the command or the pool already runs.
 - [x] `serverStatus` returns the seventeen values and the uptime.
 - [x] A test drives one insert, one indexed find, and one scan, then reads the counters back through `serverStatus`.
 
-## Phase 15 — Connection Pool ✅
+## Phase 15 - Connection Pool ✅
 
 The listener caps how many clients can be connected. This is the server side of that cap, not a pool inside a driver.
 
@@ -655,14 +655,14 @@ The listener caps how many clients can be connected. This is the server side of 
 - `max_connection_idle_ms` closes a connection that has not sent a command in that long. `0` disables the idle close.
 - Shutdown and a disabled user close the matching connections and free the slots.
 
-### Phase 15 — Sub-tasks
+### Phase 15 - Sub-tasks
 
 - [x] Enforce `max_connections` in the accept loop.
 - [x] Track peer, start, idle deadline, and user on each live connection.
 - [x] Close idle connections and connections of a disabled user.
 - [x] Test: the connection past the cap is refused, and a closed connection frees a slot.
 
-## Phase 16 — Views and optional disk inverted index ✅
+## Phase 16 - Views and optional disk inverted index ✅
 
 A view is a MongoDB view: a name, a source collection, and a pipeline. It is not a copy of the documents. `find`, `count`, `aggregate`, and `$text` on the view run that pipeline against the source. `listCollections` reports `type: "view"`. `drop` removes the view. Dropping the source is refused while a view still reads it.
 
@@ -682,14 +682,14 @@ db.runCommand({
 })
 ```
 
-### Phase 16 — Sub-tasks
+### Phase 16 - Sub-tasks
 
 - [x] Persist the view (`name`, `viewOn`, `pipeline`, `kova`) in the catalog.
 - [x] Route `find`, `count`, `aggregate`, and `$text` on a view to the source collection.
 - [x] When `kova.inverted` is true, keep a Tantivy index on disk and discover field types.
 - [x] Test: a `$match` view, a rejected `$group` inverted view, discovered types, and a `$text` hit after restart.
 
-## Phase 17 — Map projection (`mapReduce`) ✅
+## Phase 17 - Map projection (`mapReduce`) ✅
 
 `mapReduce` reads one collection and returns one `{ key, value }` document per match. It does not write a collection. It does not fan out across the replica set: every voter already stores every document, so splitting the scan would add network cost without reducing the work. The read stays on the node that received it, the same way `find` does.
 
@@ -700,14 +700,14 @@ db.runCommand({
 - `reduce` and `out` are rejected. The error names the field. Nothing is written.
 - A command carrying `txnId` is rejected.
 
-### Phase 17 — Sub-tasks
+### Phase 17 - Sub-tasks
 
 - [x] Parse `mapReduce` into a collection, a query, and a map projection.
 - [x] Return one `{ key, value }` per matching document. Write no collection.
 - [x] Reject a JavaScript `map`, `reduce`, `out`, and `txnId`, naming what was refused.
 - [x] Test: a query keeps the matches, the pairs are the projection, and `listCollections` still shows only the source.
 
-## Phase 18 — Transactions in the oplog ✅
+## Phase 18 - Transactions in the oplog ✅
 
 A commit's writes used to live only in the primary's worker. `beginTransaction`, staged statements, and `abort` are still refused as oplog entries. This phase logs the commit, not the open transaction.
 
@@ -720,14 +720,14 @@ A commit's writes used to live only in the primary's worker. `beginTransaction`,
 - `$out` inside a transaction stays rejected. `mapReduce` inside a transaction stays rejected (Phase 17).
 - With no `[replication]` section the commit stays the local WAL record it is today.
 
-### Phase 18 — Sub-tasks
+### Phase 18 - Sub-tasks
 
 - [x] Propose the committed writes as one oplog entry from `commit`.
 - [x] Apply that entry on every follower without opening a transaction.
 - [x] Leave `beginTransaction`, staged statements, and `abort` off the oplog.
 - [x] Test: three voters commit a transaction on the primary, and a secondary `find` returns those documents. An abort leaves the secondary unchanged.
 
-## Phase 19 — Snapshot shipping ✅
+## Phase 19 - Snapshot shipping ✅
 
 A follower that falls behind the retained oplog installs a snapshot of the pages, then applies the oplog from the index that snapshot covers. The primary builds that snapshot every 64 log entries, and when a snapshot is requested. With no `[replication]` section the process does not build or ship one.
 
@@ -735,27 +735,27 @@ A follower that falls behind the retained oplog installs a snapshot of the pages
 - A follower with an empty data directory installs that snapshot, then applies only the oplog entries after it.
 - An arbiter stores the oplog and does not install document pages.
 
-### Phase 19 — Sub-tasks
+### Phase 19 - Sub-tasks
 
 - [x] Build a snapshot of the pages on the primary and record the oplog index it covers.
 - [x] Install that snapshot on a follower and replay the oplog after that index.
 - [x] Leave an arbiter without document pages.
 - [x] Test: a follower with an empty data directory catches up and a `find` returns the primary's documents.
 
-## Phase 20 — ODBC connector ✅
+## Phase 20 - ODBC connector ✅
 
 SQL already runs inside the server: `db.runCommand({ sql: "..." })` on the MongoDB wire, executed by DataFusion. This phase adds a unixODBC driver on Linux, `libkova.so`, built with the server. The driver sends that same SQL string. The Windows driver manager stays out until it is named.
 
 The connection string is `DRIVER=Kova;SERVER=host;PORT=27018;DATABASE=name`. `SERVER` is the host, including a machine on the network. `PORT` defaults to 27018. `DATABASE` is the `$db` of the command. `UID` and `PWD`, or the user and password of `SQLConnect`, send `{ authenticate, user, pwd }` on that socket before any SQL. A connection with neither value stays anonymous, which matches security left off. A connection with only one of the two is refused. A wrong password is refused with the server's `authentication failed`.
 
-### Phase 20 — Sub-tasks
+### Phase 20 - Sub-tasks
 
 - [x] Accept an SQL string over ODBC and run it through the DataFusion path.
 - [x] Return the rows to the ODBC client.
 - [x] Pin unixODBC on Linux, and the connection string `SERVER`, `PORT`, `DATABASE`, `UID`, `PWD`.
 - [x] Test: an ODBC client runs a `SELECT` and gets the same rows as `db.runCommand({ sql })`. A wrong password is refused and the right one runs the query.
 
-## Phase 21 — ODBC catalog for GUI clients ✅
+## Phase 21 - ODBC catalog for GUI clients ✅
 
 `SQLTables` returns `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`, `TABLE_TYPE`, `REMARKS` in that order. A call with an empty table name and table type `%` returns `TABLE` and `VIEW` in column 4 and does not ask the server. A GUI client fills the type filter from that column. A table pattern of `%` and a type list such as `TABLE,VIEW` returns the collections and views of the DSN database.
 
@@ -765,14 +765,14 @@ The connection string is `DRIVER=Kova;SERVER=host;PORT=27018;DATABASE=name`. `SE
 
 Windows ODBC and `?` parameter binding stay out. A client that does not speak ODBC stays out. `SQLPrimaryKeys`, `SQLStatistics`, and `SQLGetTypeInfo` wait until a client error names the missing call.
 
-### Phase 21 — Sub-tasks
+### Phase 21 - Sub-tasks
 
 - [x] `SQLTables` returns `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`, `TABLE_TYPE`, `REMARKS` in that order. The type probe (`SQLTables` with table type `%`) returns `TABLE` and `VIEW` in column 4 and does not call the server.
 - [x] `SQLColumns` returns the standard columns so a GUI reads `COLUMN_NAME` and `DATA_TYPE` by position.
 - [x] `SQLGetInfo` answers the info types a GUI asks, including quoted identifier case (93). An unknown info type returns a zero or an empty string. It does not return `HYC00`.
 - [x] Test: a GUI client's catalog sequence on DSN `Kova` returns `TABLE` and `VIEW`, lists `emp` and the views, and `SQLColumns` of `emp` returns `ename` as VARCHAR. A command-line client's table list and column list return those rows. Info type 93 returns success.
 
-## Phase 22 — `kovadump` backup and restore ✅
+## Phase 22 - `kovadump` backup and restore ✅
 
 `kovadump` is a second binary, `target/debug/kovadump`. It backs up a running Kova and restores into one. Backup and restore talk to the server over the MongoDB port. Restore writes through `insert` (and `create` / `createIndexes` / `create` of a view), so the WAL, the indexes, and replication see ordinary writes.
 
@@ -794,32 +794,32 @@ The four inputs restore accepts:
 
 PostgreSQL custom archives and MySQL binary logs stay out.
 
-### Phase 22 — Sub-tasks
+### Phase 22 - Sub-tasks
 
 - [x] `kovadump` backup writes a Kova dump of a database on a running server.
 - [x] Restore of that dump recreates the collections.
 - [x] Restore a `pg_dump` plain-SQL file, a `mysqldump` SQL file, and a `mongodump` directory or archive.
 - [x] Test: each of the four inputs restores, and a `find` returns the loaded documents.
 
-## Phase 23 — Sharding ✅
+## Phase 23 - Sharding ✅
 
 A replica set is still a full copy of every document on each voter. Sharding splits one collection across Kova processes. The router hashes `_id` onto a ring of 128 virtual nodes per shard and forwards the command to the process that owns that arc. The router is a Kova process with `[sharding] role = "router"`. It does not store the documents. A shard is the Kova process at `shards[].client`. That process can also enable `[replication]`: the router speaks OP_MSG to the listed client address and does not join the replica set.
 
 An insert with no `_id` receives one on the router, then goes to one shard. A find, count, update, or delete whose filter is one `_id` goes to that shard. The same commands without a single `_id` visit every shard, and the router merges the batches or sums `n`. A single-document update or delete that is not one `_id` stops at the first shard that changes a row. `create`, `drop`, `createIndexes`, and `dropDatabase` visit every shard, so the collection and its indexes exist wherever a document lands. `listCollections` and `listDatabases` merge the names. SQL on the router loads each named collection from every shard and runs DataFusion there. An aggregate stage other than match, project, or unwind is refused on the router, because a `$group` inside each shard is not the group of the whole collection. `mapReduce` visits every shard and the batches are concatenated. A transaction is refused on the router. With `[sharding]` absent the process is unchanged.
 
-### Phase 23 — Sub-tasks
+### Phase 23 - Sub-tasks
 
 - [x] Consistent hashing of `_id`. The router is the process with `role = "router"`.
 - [x] A command for one document is sent to the shard that owns it.
 - [x] Test: two shards hold different documents of one collection, and a `find` on the router returns both.
 
-## Phase 24 — Physical catalog (`admin`) ✅ Complete
+## Phase 24 - Physical catalog (`admin`) ✅ Complete
 
 A fresh process has database `admin`. `listDatabases` returns it before any user database exists. The catalog is a set of collections, not a second copy of the documents:
 
 - `admin.databases`
-- `admin.collections` — page lists, document count, and the `_id` set
-- `admin.fields` — field name and type
+- `admin.collections` - page lists, document count, and the `_id` set
+- `admin.fields` - field name and type
 - `admin.indexes`
 - `admin.users`, `admin.roles`, `admin.views`
 
@@ -827,7 +827,7 @@ Applying a command updates that catalog in memory. The checkpoint writes the row
 
 Startup that finds the version-2 root reads those rows. It does not scan user pages to learn which collections exist, and it does not walk documents to rebuild the search index, the secondary indexes, or the `_id` set. A collection whose field list is empty is the exception: startup reads that collection and fills `admin.fields`. The search index is the Tantivy directory `text/`. Secondary indexes are `indexes.bin`, stamped with the catalog LSN. A `find` still reads the document from its page. A find on `admin.databases` keeps one row per database.
 
-### Phase 24 — Sub-tasks
+### Phase 24 - Sub-tasks
 
 - [x] A fresh process has database `admin`. `listDatabases` returns it with no user data.
 - [x] `admin.databases`, `admin.collections`, `admin.fields`, and `admin.indexes` store the catalog. A field row is the name and the type.
@@ -836,7 +836,7 @@ Startup that finds the version-2 root reads those rows. It does not scan user pa
 - [x] Startup reads the catalog. It does not discover collections by scanning page files, and it does not walk every document to rebuild the search index, the secondary indexes, or the `_id` set.
 - [x] Test: restart a process whose documents do not fit in the buffer pool. Startup does not scan those documents. `listDatabases`, `listCollections`, and the field list match the process that shut down. `find` still returns a document from its page.
 
-## Phase 25 — Autoincrement ✅
+## Phase 25 - Autoincrement ✅
 
 The counter belongs to the collection. A SQL restore is one way to set it. Creating the collection in Kova is the other. `_id` stays a new ObjectId.
 
@@ -860,7 +860,7 @@ A restored `serial`, `bigserial`, `smallserial`, `AUTO_INCREMENT`, `GENERATED ..
 
 Each process keeps its own `admin.counters`. On a router, `create` starts every shard at `last: 0`, and an insert advances only the shard that stores the document. A find of `admin.counters` through the router keeps one row per `_id`.
 
-### Phase 25 — Sub-tasks
+### Phase 25 - Sub-tasks
 
 - [x] `admin.counters` holds one row per autoincrement field: collection, field, and `last`. `create` with `autoincrement` writes `last: 0` and adds a unique index when that field is not already covered.
 - [x] An update of that row changes `last`. The next insert that omits the field uses `last + 1`.
@@ -870,7 +870,7 @@ Each process keeps its own `admin.counters`. On a router, `create` starts every 
 - [x] Test: `create` of `orders` with `autoincrement: "id"` leaves `admin.counters` at `last: 0`. An insert without `id` stores 1 and `last` becomes 1. The next stores 2. Setting `last` to 10 by hand makes the following insert store 11. After restart, the next insert stores 12.
 - [x] Test: restore a table whose `setval` is 115 with the third argument true. `last` is 115. An insert without `id` stores 116. The next insert stores 117. After restart, the next insert stores 118.
 
-## Phase 26 — Feed (Apache Iggy) ⚪ Planned
+## Phase 26 - Feed (Apache Iggy) ⚪ Planned
 
 A program that wants to react to a write connects to a feed. It does not open a MongoDB driver, tail a collection, or read the oplog. The condition lives in that program. Kova publishes what happened.
 
@@ -902,7 +902,7 @@ A committed transaction publishes one record per document after commit. An abort
 
 If Iggy is down, the database write still stands. The publisher retries. The same write can arrive twice, and the listener tells the repeat by `ns`, `id`, and `lsn`. The feed is not a second WAL and it does not roll a write back.
 
-### Phase 26 — Sub-tasks
+### Phase 26 - Sub-tasks
 
 - [ ] `[feed]` absent or `enabled` false publishes nothing and opens no Iggy connection.
 - [ ] A committed insert, update, or delete publishes one JSON record to stream `kova`, topic `changes`, from the process that applied the write. A follower and a shard router do not publish that write again.
@@ -911,7 +911,7 @@ If Iggy is down, the database write still stands. The publisher retries. The sam
 - [ ] Iggy being unreachable leaves the database write in place. A repeated delivery of the same write keeps the same `ns`, `id`, and `lsn`.
 - [ ] Test: with the feed off, an insert does not connect. With the feed on, an update of field `A` from 1 to 2 is a record whose `before.A` is 1 and `after.A` is 2. An insert and a delete have the empty side. Stopping Iggy still lets the insert succeed.
 
-## Phase 27 — User guide ✅ Complete
+## Phase 27 - User guide ✅ Complete
 
 The repository explains the engine to a contributor. `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/CONTRACT.md`, and `docs/CONTRIBUTING.md` stay that. `make doc` stays the generated API reference.
 
@@ -928,7 +928,7 @@ The guide is a set of pages, on the pattern of a product manual: a welcome, Gett
 
 The guide does not rename a client product, and it does not copy the roadmap phase by phase.
 
-### Phase 27 — Sub-tasks
+### Phase 27 - Sub-tasks
 
 - [x] A README at the repository root explains what Kova is, how to build it, how to run it, the default port, the config file, and that security is off unless enabled.
 - [x] The site in `site/docs/` covers the wire commands, SQL, the ODBC connection keys, `kovadump`, the `admin` catalog and counters, replica sets, and sharding. The home page asks for an email.
@@ -937,7 +937,7 @@ The guide does not rename a client product, and it does not copy the roadmap pha
 - [x] `ROADMAP`, `ARCHITECTURE`, `CONTRACT`, and `CONTRIBUTING` stay the engineering documents. `make doc` stays the API reference.
 - [x] The README tells a user to install the published build and run `kova` on port `27018`. The Makefile stays the contributor path.
 
-## Phase 28 — Read path and scale ✅ Complete
+## Phase 28 - Read path and scale ✅ Complete
 
 An index hit reads the page recorded for that document. The B-tree and the hash index are stored as buffer-pool pages and opened into the cache at startup. A scan of one collection can use more than one core. The router merges a `$group` whose accumulators combine, and runs an equality `$lookup`. Adding a shard moves documents onto the new arc. A transaction on one partition can name more than one collection. This phase does not add two-phase commit, and it does not make one process both the router and a replica-set voter.
 
@@ -953,7 +953,7 @@ Adding a shard and restarting the router moves each document whose `_id` now fal
 
 A transaction can write every collection that hashes to the partition that opened it. The commit is still one log record. A collection on another partition is refused. A transaction that would span shards, or replica-set members, stays refused.
 
-### Phase 28 — Sub-tasks
+### Phase 28 - Sub-tasks
 
 - [x] An index hit reads the page recorded on the index entry. A missing id, and an empty id list, read no page. A move of the document updates the entry.
 - [x] The B-tree and the hash index are pages in the buffer pool. Startup opens those pages and does not rebuild them from documents. An old `indexes.bin` is loaded once and replaced at the next checkpoint.
@@ -974,7 +974,7 @@ A transaction can write every collection that hashes to the partition that opene
 4. **Native MongoDB**: port 27018, `OP_MSG` (+ legacy `OP_QUERY`), little-endian
    wire format, BSON parsing, `db.runCommand({ sql: "..." })` for SQL.
 5. **Multi-model indexing**: B-Tree (range), Hash (O(1)), Unique, Sparse, and
-   Full-Text (Tantivy) — all auto-maintained on write.
+   Full-Text (Tantivy) - all auto-maintained on write.
 6. **Replication & HA**: oplog-based replication, replica sets with election,
    heartbeat monitoring.
 7. **Analytical brain**: DataFusion as the internal optimizer, with SQL parsing
@@ -1045,4 +1045,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1–25, 27, and 28 are complete. Still open: the feed (Phase 26).*
+*Phases 1-25, 27, and 28 are complete. Still open: the feed (Phase 26).*

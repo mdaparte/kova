@@ -280,19 +280,19 @@ about and ignored.
 | `max_connection_idle_ms` | `KOVA_MAX_CONNECTION_IDLE_MS` | `0` | Idle close. `0` disables it |
 | `log_level` | `KOVA_LOG_LEVEL` | `info` | Minimum emitted level |
 | `warn_on_non_mongo_queries` | `KOVA_WARN_NON_MONGO_QUERIES` | `true` | WARN on non-Mongo operators |
-| `search.analyzer` | — | `default` | `default` \| `en_stem` |
-| `search.stopwords` | — | `[]` | Stop words removed at index/query time |
+| `search.analyzer` | none | `default` | `default` \| `en_stem` |
+| `search.stopwords` | none | `[]` | Stop words removed at index/query time |
 | `storage.data_dir` | `KOVA_DATA_DIR` | `data` | WAL, checkpoint, and page files |
 | `storage.page_size` | `KOVA_PAGE_SIZE` | `16384` | Fixed page size in bytes |
 | `storage.buffer_pool_pages` | `KOVA_BUFFER_POOL_PAGES` | `4096` | Buffer pool capacity in pages |
 | `storage.wal_fsync` | `KOVA_WAL_FSYNC` | `true` | fsync each WAL append |
-| `replication.enabled` | — | `false` | Replica set. False is a single writable node |
-| `replication.id` | — | `1` | This process's Raft id |
-| `replication.bootstrap` | — | `false` | Commit the voter set and campaign |
-| `replication.members` | — | `[]` | `client` (MongoDB) and `raft` (RPC) addresses |
-| `sharding.enabled` | — | `false` | Hash `_id` across the `shards` list |
-| `sharding.role` | — | `shard` | `router` forwards. `shard` stores |
-| `sharding.shards` | — | `[]` | `id` and `client` (MongoDB port) of each shard |
+| `replication.enabled` | none | `false` | Replica set. False is a single writable node |
+| `replication.id` | none | `1` | This process's Raft id |
+| `replication.bootstrap` | none | `false` | Commit the voter set and campaign |
+| `replication.members` | none | `[]` | `client` (MongoDB) and `raft` (RPC) addresses |
+| `sharding.enabled` | none | `false` | Hash `_id` across the `shards` list |
+| `sharding.role` | none | `shard` | `router` forwards. `shard` stores |
+| `sharding.shards` | none | `[]` | `id` and `client` (MongoDB port) of each shard |
 
 ## 7. Phases
 

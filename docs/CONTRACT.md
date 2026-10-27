@@ -1,4 +1,4 @@
-# Kova — Development Contract
+# Kova - Development Contract
 
 This document defines the agreement between the engineer and the codebase:
 how code must be written, structured, named, and verified.
@@ -179,7 +179,7 @@ how to produce a change that fits the project.
   WAL replay, and, in later phases, MVCC, indexes, and replication.
 - **All tests must be deterministic** and MUST NOT depend on wall-clock
   time, random values, or external services.
-- **No test may pass by accident** — failing assertions MUST fail the
+- **No test may pass by accident** - failing assertions MUST fail the
   test suite.
 - **All tests run with `cargo test`** (no separate test binary required).
 - **Test coverage metric** tracked in CI: target is 80% for all modules.

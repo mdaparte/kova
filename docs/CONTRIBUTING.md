@@ -1,4 +1,4 @@
-# Kova — Contributing Guide
+# Kova - Contributing Guide
 
 > "This is the single source of truth for how the code must be written
 > in the Kova project. Read it before opening any file."
@@ -153,68 +153,68 @@ parser + optimizer), Tantivy (full-text search).
 
 Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 
-- **Phase 1 — Networking:** TCP listener, header parsing, `OP_MSG` detection,
+- **Phase 1 - Networking:** TCP listener, header parsing, `OP_MSG` detection,
   concurrent task spawning. ✅ Complete.
-- **Phase 2 — Partitioning:** `PartitionCommand`, `crossbeam-channel` routing,
+- **Phase 2 - Partitioning:** `PartitionCommand`, `crossbeam-channel` routing,
   single-threaded partition workers. ✅ Complete.
-- **Phase 3 — Search indexing:** `tantivy` integration with hot indexing. ✅ Complete.
-- **Phase 4 — Search flexibility:** per-field indexes, `$text.$boost`, wildcards,
+- **Phase 3 - Search indexing:** `tantivy` integration with hot indexing. ✅ Complete.
+- **Phase 4 - Search flexibility:** per-field indexes, `$text.$boost`, wildcards,
   `$text.$decay`, analyzer config, `kova.toml`. ✅ Complete.
-- **Phase 5 — Analytical SQL:** DataFusion execution, including `COUNT(*)`
+- **Phase 5 - Analytical SQL:** DataFusion execution, including `COUNT(*)`
   and `GROUP BY`. ✅ Complete.
-- **Phase 6 — Disk storage engine:** WAL, buffer pool, page store, checkpoint,
+- **Phase 6 - Disk storage engine:** WAL, buffer pool, page store, checkpoint,
   and crash recovery. ✅ Complete.
-- **Phase 7 — Disk-resident collections:** documents live in pages; the buffer
+- **Phase 7 - Disk-resident collections:** documents live in pages; the buffer
   pool is the only RAM that grows with the cache. ✅ Complete.
-- **Phase 8 — Query language and aggregation:** the remaining find
+- **Phase 8 - Query language and aggregation:** the remaining find
   predicates, projection, sort, skip, limit, update operators, and the
   twelve-stage pipeline, reading pages. ✅ Complete.
-- **Phase 9 — Transactional storage:** MVCC, ACID transactions, multiple
+- **Phase 9 - Transactional storage:** MVCC, ACID transactions, multiple
   isolation levels. ✅ Complete.
-- **Phase 10 — Indexing subsystem:** B-Tree, hash, unique, and sparse indexes,
+- **Phase 10 - Indexing subsystem:** B-Tree, hash, unique, and sparse indexes,
   rebuilt from document pages and maintained on every write. ✅ Complete.
-- **Phase 11 — Replication and HA:** OpenRaft oplog, election, heartbeats,
+- **Phase 11 - Replication and HA:** OpenRaft oplog, election, heartbeats,
   and replica fields on `hello`. ✅ Complete.
-- **Phase 12 — On-disk page compression:** zstd on the BSON payload of each
+- **Phase 12 - On-disk page compression:** zstd on the BSON payload of each
   page, WiredTiger-style. The WAL stays uncompressed. ✅ Complete.
-- **Phase 13 — Security:** five built-in roles, custom roles over eleven
+- **Phase 13 - Security:** five built-in roles, custom roles over eleven
   actions, Argon2id passwords, AES-256-GCM at rest, user management. ✅ Complete.
-- **Phase 14 — Monitoring:** seventeen atomic counters and `serverStatus`. ✅ Complete.
-- **Phase 15 — Connection pool:** `max_connections`, idle close, and
+- **Phase 14 - Monitoring:** seventeen atomic counters and `serverStatus`. ✅ Complete.
+- **Phase 15 - Connection pool:** `max_connections`, idle close, and
   shutdown or a disabled user free the slot. ✅ Complete.
-- **Phase 16 — Views:** a MongoDB view (`viewOn` + pipeline). `kova.inverted`
+- **Phase 16 - Views:** a MongoDB view (`viewOn` + pipeline). `kova.inverted`
   adds a Tantivy index on disk with discovered field types. ✅ Complete.
-- **Phase 17 — Map projection:** `mapReduce` returns `{ key, value }` for each match. No `out`, no fan-out. ✅ Complete.
-- **Phase 18 — Transactions in the oplog:** `commit` proposes one
+- **Phase 17 - Map projection:** `mapReduce` returns `{ key, value }` for each match. No `out`, no fan-out. ✅ Complete.
+- **Phase 18 - Transactions in the oplog:** `commit` proposes one
   `applyTransaction` entry. Followers apply it as one WAL record.
   `begin`, staged statements, and `abort` stay on the primary. ✅ Complete.
-- **Phase 19 — Snapshot shipping:** a follower outside the retained oplog
+- **Phase 19 - Snapshot shipping:** a follower outside the retained oplog
   installs a snapshot of the pages and replays from that index. An arbiter
   does not install document pages. ✅ Complete.
-- **Phase 20 — ODBC connector:** unixODBC on Linux (`libkova.so`) runs the
+- **Phase 20 - ODBC connector:** unixODBC on Linux (`libkova.so`) runs the
   same SQL as `db.runCommand({ sql })`. `UID` and `PWD` call `authenticate`. ✅ Complete.
-- **Phase 21 — ODBC catalog for GUI clients:** `SQLTables`, `SQLColumns`,
+- **Phase 21 - ODBC catalog for GUI clients:** `SQLTables`, `SQLColumns`,
   and `SQLGetInfo` match the layout a database IDE reads by column position.
   A GUI client lists the collections and opens the SQL window. ✅ Complete.
-- **Phase 22 — `kovadump`:** backup and restore over the MongoDB port.
+- **Phase 22 - `kovadump`:** backup and restore over the MongoDB port.
   Restore reads a Kova dump, `pg_dump` plain SQL, `mongodump`, or
   `mysqldump` SQL, and writes through `insert`. ✅ Complete.
-- **Phase 23 — Sharding:** the router hashes `_id` and forwards the
+- **Phase 23 - Sharding:** the router hashes `_id` and forwards the
   command. A shard is a Kova process and can also be a replica set. ✅ Complete.
-- **Phase 24 — Physical catalog (`admin`):** database `admin` holds
+- **Phase 24 - Physical catalog (`admin`):** database `admin` holds
   databases, collections, fields, and indexes. Startup reads those rows
   instead of scanning every document. ✅ Complete.
-- **Phase 25 — Autoincrement:** `admin.counters` stores `last` for the
+- **Phase 25 - Autoincrement:** `admin.counters` stores `last` for the
   field. `create` can declare it. A SQL restore can seed it from
   `setval`. Updating the row by hand changes the next insert. ✅ Complete.
-- **Phase 26 — Feed:** a committed insert, update, or delete can publish
+- **Phase 26 - Feed:** a committed insert, update, or delete can publish
   one JSON record (`before` and `after`) to Apache Iggy. The listener
   decides what to do. `[feed]` is off unless enabled. ⚪ Planned.
-- **Phase 27 — User guide:** the site in `site/docs/` explains how to run
+- **Phase 27 - User guide:** the site in `site/docs/` explains how to run
   the server and use what is shipped, starting at Getting started. The
   home page asks for an email. The form stays closed until `SIGNUP_URL`
   is set. The engineering documents stay as they are. ✅ Complete.
-- **Phase 28 — Read path and scale:** an index hit reads the page the
+- **Phase 28 - Read path and scale:** an index hit reads the page the
   entry records, the B-tree and hash index are buffer-pool pages, a scan
   can use more than one core, the router merges `$group` and equality
   `$lookup`, adding a shard moves documents onto the new arc, and one
