@@ -529,26 +529,18 @@ sqlStep("SELECT from high_pay", "SELECT sku, sal FROM high_pay");
 function sqlWrite(label, statement) {
     run("sql", label, () => {
         const reply = command({ sql: statement });
-        if (reply.ok) {
-            return {
-                ok: true,
-                rows: 0,
-                op: statement,
-                note: "Answered ok and stored nothing. The collection is created above, not with SQL.",
-            };
-        }
-        return {
-            ok: true,
-            rows: 0,
-            op: statement,
-            note: "Not written. The rows stay in the benchmark database this run created.",
-        };
+        const info = fromCommand(reply, reply && reply.n != null ? Number(reply.n) : undefined);
+        info.op = statement;
+        return info;
     });
 }
 
 sqlWrite("Create a table with SQL", "CREATE TABLE extra (sku INT)");
-sqlWrite("Insert a row with SQL", "INSERT INTO orders (sku) VALUES (1)");
-sqlWrite("Update a row with SQL", "UPDATE orders SET qty = 1 WHERE sku = 1");
+sqlWrite("Insert a row with SQL", "INSERT INTO extra (sku) VALUES (1)");
+sqlWrite("Update one row with SQL", "UPDATE orders SET qty = 1 WHERE sku = 1");
+sqlWrite("Update many rows with SQL", "UPDATE orders SET bonus = 7 WHERE qty = 7");
+sqlWrite("Delete one row with SQL", "DELETE FROM extra WHERE sku = 1");
+sqlWrite("Delete many rows with SQL", "DELETE FROM orders WHERE qty = 7");
 
 run("mql", "listCollections", () => {
     const reply = fromCommand(command({ listCollections: 1 }));

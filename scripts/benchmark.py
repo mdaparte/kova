@@ -248,11 +248,8 @@ def human_ms(ms):
 
 def human_note(step):
     note = step.get("note") or step.get("error") or ""
-    name = step.get("name") or ""
-    if "datafusion.public" in note or "SQL writes are not stored" in note or name.startswith(("CREATE TABLE", "INSERT INTO", "UPDATE ")):
-        if "accepted" in note or "stored nothing" in note:
-            return "Answered ok and stored nothing. The collection is created above, not with SQL."
-        return "Not written. The rows stay in the benchmark database this run created."
+    if "datafusion.public" in note or "SQL writes are not stored" in note:
+        return "The statement was not stored."
     if "connection" in note and "closed" in note:
         return "The connection closed before a reply."
     return note
@@ -273,7 +270,7 @@ TIPS = {
     "ram": "Installed RAM on this machine.",
     "disk": "Free and total space on the system disk.",
     "vram": "Memory on the graphics card.",
-    "result": "ok means the server finished the step. fail means it returned an error. A SQL create, insert, or update can answer ok and still store nothing.",
+    "result": "ok means the server finished the step. fail means it returned an error.",
     "rows": "Documents or result rows counted for this step.",
     "time": "Wall-clock time for the step, measured by the client.",
     "rate": "Rows divided by the time. A step with no rows has no rate.",
@@ -282,7 +279,7 @@ TIPS = {
     "hit": "Buffer-pool pages this step served from memory.",
     "miss": "Buffer-pool pages this step had to read because they were not cached.",
     "wal": "Log records this step wrote.",
-    "note": "Extra detail for the step. A SQL write says the rows were not stored.",
+    "note": "Extra detail for the step.",
 }
 
 

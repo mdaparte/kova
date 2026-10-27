@@ -158,7 +158,9 @@ impl StorageEngine {
     /// Flushes dirty pages, records the LSN, and drops the WAL it covers.
     ///
     /// The document bodies are already in the page files. This does not
-    /// build a second BSON image of the collections.
+    /// build a second BSON image of the collections. Tests call this
+    /// directly. The server checkpoints through [`Self::checkpoint_with_indexes`].
+    #[cfg(test)]
     pub fn checkpoint_pages(&mut self) -> Result<(), String> {
         self.checkpoint_with_indexes(None)
     }
@@ -356,14 +358,13 @@ impl StorageEngine {
             .drop_database(&mut self.pool, &self.disk, database)
     }
 
-    pub fn publish_catalog(&mut self) -> Result<(), String> {
-        self.heap.publish(&mut self.pool, &self.disk)
-    }
-
     pub fn catalog_is_warm(&self) -> bool {
         self.heap.catalog_is_warm()
     }
 
+    /// Pages read for user collections since this engine opened.
+    /// Startup tests compare the counter across a reopen.
+    #[cfg(test)]
     pub fn user_page_reads(&self) -> u64 {
         self.heap.user_page_reads()
     }
@@ -372,6 +373,9 @@ impl StorageEngine {
         self.heap.applied_lsn()
     }
 
+    /// Field names and types recorded for `collection`. Tests check the
+    /// catalog after a checkpoint.
+    #[cfg(test)]
     pub fn field_types(&self, collection: &str) -> Vec<(String, String)> {
         self.heap.field_types(collection)
     }

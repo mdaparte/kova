@@ -206,7 +206,27 @@ fn action_for(command: &Document) -> Action {
     {
         return Action::GrantRole;
     }
+    if let Ok(sql) = command.get_str("sql") {
+        if let Ok(Some(actions)) = crate::dump::sql_actions(sql) {
+            if let Some(name) = actions.first() {
+                return action_named(name);
+            }
+        }
+    }
     Action::Find
+}
+
+fn action_named(name: &str) -> Action {
+    match name {
+        "insert" => Action::Insert,
+        "update" => Action::Update,
+        "remove" => Action::Remove,
+        "createCollection" => Action::CreateCollection,
+        "dropCollection" => Action::DropCollection,
+        "createIndex" => Action::CreateIndex,
+        "dropIndex" => Action::DropIndex,
+        _ => Action::Find,
+    }
 }
 
 /// Argon2id hash. Memory is 19 MiB, two iterations, parallelism 1.
@@ -295,6 +315,22 @@ mod tests {
         assert_eq!(
             required_action(&doc! { "sql": "select 1" }),
             Some(Action::Find)
+        );
+        assert_eq!(
+            required_action(&doc! { "sql": "INSERT INTO emp (a) VALUES (1)" }),
+            Some(Action::Insert)
+        );
+        assert_eq!(
+            required_action(&doc! { "sql": "CREATE TABLE emp (a INT)" }),
+            Some(Action::CreateCollection)
+        );
+        assert_eq!(
+            required_action(&doc! { "sql": "UPDATE emp SET a = 1 WHERE a = 1" }),
+            Some(Action::Update)
+        );
+        assert_eq!(
+            required_action(&doc! { "sql": "DELETE FROM emp WHERE a = 1" }),
+            Some(Action::Remove)
         );
     }
 

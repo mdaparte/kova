@@ -135,10 +135,12 @@ impl Heap {
         self.catalog_warm
     }
 
+    #[cfg(test)]
     pub fn user_page_reads(&self) -> u64 {
         self.user_page_reads
     }
 
+    #[cfg(test)]
     pub fn field_types(&self, collection: &str) -> Vec<(String, String)> {
         self.collections
             .get(collection)

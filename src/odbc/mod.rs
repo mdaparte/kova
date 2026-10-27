@@ -197,6 +197,9 @@ struct Stmt {
     next: usize,
     current: Option<usize>,
     executed: bool,
+    /// Rows a write changed. A query leaves this empty and [`SQLRowCount`]
+    /// reports the batch length.
+    affected: Option<i64>,
     closed: bool,
     prepared: Option<String>,
     bindings: Vec<Option<Binding>>,
@@ -828,7 +831,7 @@ fn column_type(rows: &[Vec<Cell>], index: usize) -> (i16, u64) {
     }
 }
 
-fn rows_of(doc: &Document) -> Result<(Vec<Column>, Vec<Vec<Cell>>), Fail> {
+fn rows_of(doc: &Document) -> Result<(Vec<Column>, Vec<Vec<Cell>>, Option<i64>), Fail> {
     if !command_ok(doc) {
         let message = match doc.get("errmsg") {
             Some(bson::Bson::String(text)) => text.clone(),
@@ -875,7 +878,16 @@ fn rows_of(doc: &Document) -> Result<(Vec<Column>, Vec<Vec<Cell>>), Fail> {
             Column { name, kind, size }
         })
         .collect();
-    Ok((columns, table))
+    Ok((columns, table, bson_count(doc, "n")))
+}
+
+fn bson_count(doc: &Document, key: &str) -> Option<i64> {
+    match doc.get(key) {
+        Some(bson::Bson::Int32(value)) => Some(i64::from(*value)),
+        Some(bson::Bson::Int64(value)) => Some(*value),
+        Some(bson::Bson::Double(value)) if value.fract() == 0.0 => Some(*value as i64),
+        _ => None,
+    }
 }
 
 fn odbc_matches(pattern: Option<&str>, value: &str) -> bool {
@@ -1114,14 +1126,16 @@ fn execute_id(stmt_id: u64, sql: &str) -> i16 {
     };
     stmt.rows.clear();
     stmt.columns.clear();
+    stmt.affected = None;
     stmt.next = 0;
     stmt.current = None;
     stmt.closed = false;
     match exchanged {
         Ok(doc) => match rows_of(&doc) {
-            Ok((columns, rows)) => {
+            Ok((columns, rows, affected)) => {
                 stmt.columns = columns;
                 stmt.rows = rows;
+                stmt.affected = affected;
                 stmt.executed = true;
                 stmt.diag = Diag::clear();
                 SQL_SUCCESS
@@ -1919,6 +1933,7 @@ fn alloc_handle(
                     next: 0,
                     current: None,
                     executed: false,
+                    affected: None,
                     closed: false,
                     prepared: None,
                     bindings: Vec::new(),
@@ -2815,7 +2830,7 @@ pub unsafe extern "C" fn SQLRowCount(handle: *mut std::ffi::c_void, count: *mut 
         return SQL_ERROR;
     }
     *count = if stmt.executed {
-        stmt.rows.len() as i64
+        stmt.affected.unwrap_or(stmt.rows.len() as i64)
     } else {
         -1
     };

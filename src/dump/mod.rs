@@ -133,6 +133,45 @@ pub fn restore(target: &Target, path: &Path, options: &RestoreOptions) -> Result
     Ok(dump.report())
 }
 
+pub use sql::SqlChange;
+
+/// Writes inside one live SQL command.
+///
+/// `Ok(None)` means the text is a query. `Ok(Some)` is the document
+/// commands that store the statement. The same parser reads a dump file.
+pub fn sql_changes(text: &str) -> Result<Option<Vec<SqlChange>>, String> {
+    sql::live(text)
+}
+
+/// Privileges a live SQL write needs. `Ok(None)` is a query.
+pub fn sql_actions(text: &str) -> Result<Option<Vec<&'static str>>, String> {
+    let Some(changes) = sql::live(text)? else {
+        return Ok(None);
+    };
+    let mut actions = Vec::new();
+    for change in changes {
+        let names: &[&str] = match change {
+            SqlChange::CreateTable { indexes, .. } => {
+                if indexes.is_empty() {
+                    &["createCollection"]
+                } else {
+                    &["createCollection", "createIndex"]
+                }
+            }
+            SqlChange::CreateIndexes { .. } => &["createIndex"],
+            SqlChange::Insert { .. } => &["insert"],
+            SqlChange::Update { .. } => &["update"],
+            SqlChange::Delete { .. } => &["remove"],
+        };
+        for name in names {
+            if !actions.contains(name) {
+                actions.push(*name);
+            }
+        }
+    }
+    Ok(Some(actions))
+}
+
 impl Target {
     fn validate(&self) -> Result<(), String> {
         if self.host.is_empty() {
