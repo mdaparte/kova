@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>Catalog — KOVA</title>
   <meta name="description" content="admin is a database of rows about the server: collections, fields, indexes, users, views, and counters.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -63,10 +66,16 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <tr><td><code>admin.views</code></td><td>A view: name, source, pipeline, and the <code>kova</code> options.</td></tr>
   </tbody>
 </table>
-<pre>mongosh "mongodb://127.0.0.1:27018/admin"
-db.fields.find({ collection: "db.emp" })
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">mongosh "mongodb://127.0.0.1:27018/admin"</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.fields.find({ collection: "db.emp" })
 db.indexes.find({ collection: "db.emp" })
-db.counters.find()</pre>
+db.counters.find()</code></pre>
+</div>
 <p>Field rows appear as documents are written and the type is learned. A collection whose field list is empty is filled on startup by reading that collection once.</p>
 
 <h2 id="writes">What you may write</h2>
@@ -82,8 +91,10 @@ db.counters.find()</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

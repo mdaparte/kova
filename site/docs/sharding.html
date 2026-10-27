@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>Sharding — KOVA</title>
   <meta name="description" content="The router hashes _id and sends the document to the process that owns it. Use it when one machine cannot hold the data.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -47,13 +50,19 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <p class="lede">The router hashes _id and sends the document to the process that owns it. Use it when one machine cannot hold the data.</p>
       
 <p>Leave <code>[sharding]</code> commented and every document stays in this process. Uncomment it when one machine cannot hold the collection or the writes. The router does not store the documents. A shard is a normal Kova process. The router speaks the MongoDB protocol to the address in <code>shards[].client</code>.</p>
-<pre>[sharding]
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">[sharding]
 enabled = true
 role = "router"
-shards = [
-  { id = 1, client = "127.0.0.1:27101" },
+shards = [</code></pre>
+</div>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">  { id = 1, client = "127.0.0.1:27101" },
   { id = 2, client = "127.0.0.1:27102" },
-]</pre>
+]</code></pre>
+</div>
 <p>Each shard has its own config, its own port, and its own data directory. <code>role = "shard"</code> on those processes is a normal server. The example ports stay off <code>27018</code>, so the single server you already run is left alone.</p>
 <div class="note"><p>A router cannot also enable <code>[replication]</code>. That combination is a config error. Put replication on the shard, and put the primary's address in <code>shards[].client</code>. The router does not join that replica set, and it does not follow an election. After a primary changes, edit the address in the router's <code>kova.toml</code> and restart the router.</p></div>
 
@@ -90,8 +99,10 @@ shards = [
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

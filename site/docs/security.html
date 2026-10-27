@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>Security — KOVA</title>
   <meta name="description" content="Off by default. Turn it on and the first command on a connection is authenticate, with both a user and a password.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -47,14 +50,19 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <p class="lede">Off by default. Turn it on and the first command on a connection is authenticate, with both a user and a password.</p>
       
 <p>With <code>[security]</code> commented, or <code>enabled</code> false, every command is accepted. That is the server the install starts. Turn it on when a connection must prove who it is, and when you want page files and the log encrypted.</p>
-<pre>[security]
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">[security]
 enabled = true
-encryption_key = ""</pre>
+encryption_key = ""</code></pre>
+</div>
 <p><code>KOVA_SECURITY_ENABLED</code> overrides <code>enabled</code>. <code>KOVA_ENCRYPTION_KEY</code> overrides the key. The key is 64 hex characters (32 bytes). Empty leaves the files compressed and readable. Set it and each page file and each log record is AES-256-GCM, with a fresh nonce per write. The buffer pool and your queries still see plaintext. Startup with encrypted files and no key fails. A data directory does not mix encrypted and plaintext pages.</p>
 
 <h2 id="first-user">The first user</h2>
 <p>The catalog starts empty. The first <code>createUser</code> has to be <code>root</code>. After that, a connection authenticates before any other command.</p>
-<pre>db.getSiblingDB("admin").runCommand({
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.getSiblingDB("admin").runCommand({
   createUser: "root",
   pwd: "secret",
   roles: ["root"]
@@ -63,7 +71,8 @@ db.getSiblingDB("admin").runCommand({
   authenticate: 1,
   user: "root",
   pwd: "secret"
-})</pre>
+})</code></pre>
+</div>
 <p>The password is stored as an Argon2id hash. The plaintext is not written to the catalog or the log. <code>authenticate</code> checks the hash and binds the connection to that user. Later commands on the same connection are checked against the user's roles. A disabled user and an unknown user fail the same way. A wrong password fails the same way.</p>
 <p><code>secret</code> for <code>root</code> and <code>ada-secret</code> for <code>ada</code> are sample values. Pick your own before anyone else can reach the port.</p>
 
@@ -97,7 +106,9 @@ db.getSiblingDB("admin").runCommand({
 </table>
 
 <h2 id="more-users">More users</h2>
-<pre>db.runCommand({
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({
   createUser: "ada",
   pwd: "ada-secret",
   roles: ["read"]
@@ -115,7 +126,8 @@ db.runCommand({
   revokeRolesFromUser: "ada",
   roles: ["payroll"]
 })
-db.runCommand({ dropRole: "payroll" })</pre>
+db.runCommand({ dropRole: "payroll" })</code></pre>
+</div>
 <p><code>updateUser</code> enables or disables the account. Disabling closes that user's open connections. <code>root</code> can be granted. The last <code>root</code> cannot be revoked or disabled.</p>
 <p>ODBC sends <code>UID</code> and <code>PWD</code> as this same <code>authenticate</code> before SQL. Both empty stays anonymous, which matches security left off. Both set logs in. One of the two is refused.</p>
 
@@ -128,8 +140,10 @@ db.runCommand({ dropRole: "payroll" })</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

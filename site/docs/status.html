@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>Status — KOVA</title>
   <meta name="description" content="serverStatus returns seventeen counters and the uptime. They move as commands run.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -47,7 +50,24 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <p class="lede">serverStatus returns seventeen counters and the uptime. They move as commands run.</p>
       
 <p>Counters are updated on the command path. <code>serverStatus</code> returns the current values.</p>
-<pre>db.runCommand({ serverStatus: 1 })</pre>
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({ serverStatus: 1 })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{
+  ok: 1,
+  uptime: 42,
+  queries: 1,
+  inserts: 1,
+  updates: 0,
+  deletes: 0,
+  connectionsActive: 1,
+  connectionsTotal: 1,
+  walWrites: 1,
+  indexLookups: 0,
+  collectionScans: 1
+}</code></pre>
+</div>
 <p>Run that against a server that is already listening. One insert, one indexed find, and one scan each move a counter.</p>
 
 <h2 id="counters">The counters</h2>
@@ -86,8 +106,10 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

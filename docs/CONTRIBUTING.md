@@ -215,6 +215,10 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   home page asks for an email. The form endpoint is still unset. The
   engineering documents stay as they are. ⚪ Planned.
 
+## 6. License
+
+Kova is licensed under the Apache License, Version 2.0 (`LICENSE`). A contribution sent to this repository is made under that license.
+
 ---
 
 *Generated from the brainstorming session based on `draft.md`.*

@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>Backup and restore — KOVA</title>
   <meta name="description" content="kovadump talks to a server that is already running. It writes a Kova file, and it can read SQL and MongoDB dumps back in.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -47,10 +50,16 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <p class="lede">kovadump talks to a server that is already running. It writes a Kova file, and it can read SQL and MongoDB dumps back in.</p>
       
 <p><code>kovadump</code> is installed next to <code>kova</code>. Backup and restore use the MongoDB port. Restore writes through ordinary <code>insert</code>, <code>create</code>, and <code>createIndexes</code>, so the log, the indexes, and a replica set see normal writes.</p>
-<pre>kovadump backup  --db shop shop.kdmp
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">kovadump backup  --db shop shop.kdmp
 kovadump restore --db shop shop.kdmp
 kovadump restore --port 27019 --db shop pg.sql
-kovadump restore --yes --table orders --table customers --db db db.kdmp</pre>
+kovadump restore --yes --table orders --table customers --db db db.kdmp</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">wrote 1 collections, 3 documents, 0 views to shop.kdmp
+restored 1 collections, 3 documents, 0 views into shop</code></pre>
+</div>
 <p>Host defaults to <code>127.0.0.1</code> and port to <code>27018</code>.</p>
 
 <h2 id="flags">Flags</h2>
@@ -91,8 +100,10 @@ kovadump restore --yes --table orders --table customers --db db db.kdmp</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

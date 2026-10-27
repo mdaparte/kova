@@ -25,3 +25,5 @@ The end-user guide is the static site in [`site/`](site/index.html). Start at [G
 `kovadump backup --db db db.kdmp` writes a backup of a running server. `kovadump restore --db db db.kdmp` reads it back.
 
 People changing Kova build from this repository with the Makefile (`make release`, `make test`). `make doc` builds the API reference.
+
+Kova is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

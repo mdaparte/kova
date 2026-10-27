@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>Configuration — KOVA</title>
   <meta name="description" content="kova.toml sets the port, the data directory, and the optional security, replica, and shard sections.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -64,9 +67,12 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <p>The warning flag logs a WARN when a query uses a Kova extension such as <code>$text.$boost</code> or <code>$text.$decay</code>, or an operator the engine does not implement. Set it to false to silence those lines. The query still runs when the extension is supported.</p>
 
 <h2 id="search">Search</h2>
-<pre>[search]
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">[search]
 analyzer = "default"
-stopwords = []</pre>
+stopwords = []</code></pre>
+</div>
 <p><code>default</code> splits on punctuation and whitespace, then lowercases. <code>en_stem</code> adds English stemming. <code>stopwords</code> is an extra list removed at index time and at query time. The analyzer is fixed when the text index is built.</p>
 
 <h2 id="storage">Storage</h2>
@@ -101,8 +107,10 @@ stopwords = []</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

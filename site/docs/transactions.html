@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>Transactions — KOVA</title>
   <meta name="description" content="Several writes on one collection commit together, or none of them do.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -50,7 +53,9 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <p>Uncommitted writes stay off the pages. Commit is one log record, so a crash publishes every write in the transaction or none of them. Abort discards them. With a replica set, followers receive that one commit record and apply it. They do not open the transaction. Abort writes nothing to the oplog.</p>
 
 <h2 id="session">A short session</h2>
-<pre>db.runCommand({
+<div class="ex">
+<div class="ex-label">MQL</div>
+<pre><code class="lang-mql">db.runCommand({
   beginTransaction: 1,
   collection: "orders",
   txnId: NumberLong(1),
@@ -65,7 +70,8 @@ db.runCommand({
   commitTransaction: 1,
   collection: "orders",
   txnId: NumberLong(1)
-})</pre>
+})</code></pre>
+</div>
 <p><code>abortTransaction</code> takes the same <code>collection</code> and <code>txnId</code>. Another client’s find sees the kettle only after commit.</p>
 <p><code>$out</code> inside a transaction is refused. <code>mapReduce</code> with <code>txnId</code> is refused. A transaction on a shard router is refused: the router does not own the documents.</p>
 
@@ -95,8 +101,10 @@ db.runCommand({
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

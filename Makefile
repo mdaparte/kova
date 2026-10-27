@@ -9,6 +9,7 @@
 #   make seed         load Oracle sample into database `db`
 #   make dump         backup database `db` to db.kdmp
 #   make restore      restore db.kdmp into database `db`
+#   make site         static site on http://127.0.0.1:4173
 #
 # Config overrides (optional, only exported when set on the make command line):
 #   make run KOVA_PORT=27018 KOVA_LOG_LEVEL=debug
@@ -30,7 +31,7 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore doc clean
+.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore doc site clean
 
 help:
 	@printf '%s\n' \
@@ -59,6 +60,7 @@ help:
 		'  dump         backup database db to db.kdmp' \
 		'  restore      restore DUMP into database db (default db.kdmp)' \
 		'  doc          cargo doc --no-deps --open' \
+		'  site         static site at http://127.0.0.1:4173' \
 		'  clean        cargo clean' \
 		'' \
 		'The mongosh and kovadump targets talk to a server that is already running.' \
@@ -164,6 +166,14 @@ restore:
 
 doc:
 	$(CARGO) doc --no-deps --open
+
+# The published site drops .html from addresses. This server does the same.
+#   make site
+#   make site SITE_PORT=4180
+SITE_PORT ?= 4173
+
+site:
+	python3 scripts/serve-site.py $(SITE_PORT)
 
 clean:
 	$(CARGO) clean

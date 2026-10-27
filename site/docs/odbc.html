@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>ODBC — KOVA</title>
   <meta name="description" content="On Linux, libkova.so is a unixODBC driver. It sends SQL to a Kova server and returns the rows.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -51,16 +54,25 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 
 <h2 id="register">Register the driver</h2>
 <p>Install unixODBC (<code>unixodbc</code> on Debian and Ubuntu). Point the driver manager at the library. In <code>~/.odbcinst.ini</code>:</p>
-<pre>[Kova]
-Driver=/home/you/.local/lib/libkova.so</pre>
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">[Kova]
+Driver=/home/you/.local/lib/libkova.so</code></pre>
+</div>
 <p>The installer writes that section for you, with your home directory in the path. In <code>~/.odbc.ini</code>, a data source names the host, the port, and the database:</p>
-<pre>[Kova]
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">[Kova]
 Driver=Kova
 SERVER=127.0.0.1
 PORT=27018
-DATABASE=db</pre>
+DATABASE=db</code></pre>
+</div>
 <p>The connection string is the same keys in one line:</p>
-<pre>DRIVER=Kova;SERVER=127.0.0.1;PORT=27018;DATABASE=db</pre>
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">DRIVER=Kova;SERVER=127.0.0.1;PORT=27018;DATABASE=db</code></pre>
+</div>
 <table class="grid">
   <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
   <tbody>
@@ -78,9 +90,46 @@ DATABASE=db</pre>
 
 <h2 id="query">Run a statement</h2>
 <p>With the server up and the sample loaded, a client connected to DSN <code>Kova</code> can run:</p>
-<pre>SELECT ename, job, sal FROM emp WHERE sal > 2000
-SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'</pre>
-<p>The rows match <code>db.runCommand({ sql })</code> on database <code>db</code>.</p>
+<div class="ex" data-switch data-default="sql">
+<div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="false">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="true">SQL</button></span></div>
+<div class="ex-pane" data-lang="mql" hidden>
+<pre><code class="lang-mql">db.runCommand({
+  sql: "SELECT ename, job, sal FROM emp WHERE sal > 2000"
+})
+db.runCommand({
+  sql: "SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'"
+})</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">{
+  cursor: {
+    firstBatch: [
+      { ename: 'JONES', job: 'MANAGER', sal: 2975 },
+      { ename: 'BLAKE', job: 'MANAGER', sal: 2850 },
+      { ename: 'CLARK', job: 'MANAGER', sal: 2450 },
+      { ename: 'SCOTT', job: 'ANALYST', sal: 3000 },
+      { ename: 'KING', job: 'PRESIDENT', sal: 5000 },
+      { ename: 'FORD', job: 'ANALYST', sal: 3000 }
+    ],
+    id: 0,
+    ns: 'db.emp'
+  },
+  ok: 1
+}</code></pre>
+</div>
+<div class="ex-pane" data-lang="sql">
+<pre><code class="lang-sql">SELECT ename, job, sal FROM emp WHERE sal > 2000
+SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">ename   job        sal
+JONES   MANAGER   2975
+BLAKE   MANAGER   2850
+CLARK   MANAGER   2450
+SCOTT   ANALYST   3000
+KING    PRESIDENT 5000
+FORD    ANALYST   3000</code></pre>
+</div>
+</div>
+<p>The rows are the same on database <code>db</code>. The shell wraps the statement in <code>runCommand</code>. A SQL client sends the statement itself.</p>
 
       <nav class="pager"><a href="/docs/sql"><span>Previous</span>SQL</a><a class="next" href="/docs/configuration"><span>Next</span>Configuration</a></nav>
     </article>
@@ -91,8 +140,10 @@ SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>

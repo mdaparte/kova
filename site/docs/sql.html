@@ -6,6 +6,9 @@
 try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
 </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>SQL — KOVA</title>
   <meta name="description" content="Send a SQL string to the same server that stores the documents. One FROM, the database you connected to.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -47,9 +50,32 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <p class="lede">Send a SQL string to the same server that stores the documents. One FROM, the database you connected to.</p>
       
 <p>SQL runs inside the server. DataFusion plans it. The collections are the tables. A command-line client, a driver, and the ODBC driver all end up at this command:</p>
-<pre>db.runCommand({
-  sql: "SELECT ename, job, sal FROM emp WHERE sal > 2000"
-})</pre>
+<div class="ex" data-switch data-default="sql">
+<div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="false">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="true">SQL</button></span></div>
+<div class="ex-pane" data-lang="mql" hidden>
+<pre><code class="lang-mql">db.emp.find({ sal: { $gt: 2000 } }, { ename: 1, job: 1, sal: 1, _id: 0 })</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { ename: 'JONES', job: 'MANAGER', sal: 2975 },
+  { ename: 'BLAKE', job: 'MANAGER', sal: 2850 },
+  { ename: 'CLARK', job: 'MANAGER', sal: 2450 },
+  { ename: 'SCOTT', job: 'ANALYST', sal: 3000 },
+  { ename: 'KING', job: 'PRESIDENT', sal: 5000 },
+  { ename: 'FORD', job: 'ANALYST', sal: 3000 }
+]</code></pre>
+</div>
+<div class="ex-pane" data-lang="sql">
+<pre><code class="lang-sql">SELECT ename, job, sal FROM emp WHERE sal > 2000</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">ename   job        sal
+JONES   MANAGER   2975
+BLAKE   MANAGER   2850
+CLARK   MANAGER   2450
+SCOTT   ANALYST   3000
+KING    PRESIDENT 5000
+FORD    ANALYST   3000</code></pre>
+</div>
+</div>
 <p>The database is <code>$db</code>. In the shell, that is the database you opened. There is one <code>FROM</code>. A join is outside this statement. Combine collections with <code>$lookup</code> in the pipeline, then read the result, or write it with <code>$out</code> and select from that collection.</p>
 
 <h2 id="statements">What a statement can do</h2>
@@ -60,19 +86,83 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <li><code>SHOW INDEXES FROM emp</code>, also <code>SHOW INDEX</code> and <code>SHOW KEYS</code>.</li>
 </ul>
 <p>Names are case-sensitive, and they are the collection names. The sample uses lowercase <code>emp</code> so <code>FROM emp</code> hits those rows. <code>FROM EMP</code> is a different collection.</p>
-<pre>db.runCommand({
-  sql: "SELECT job, COUNT(*) AS n, SUM(sal) AS payroll FROM emp GROUP BY job"
-})</pre>
+<div class="ex" data-switch data-default="sql">
+<div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="false">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="true">SQL</button></span></div>
+<div class="ex-pane" data-lang="mql" hidden>
+<pre><code class="lang-mql">db.emp.aggregate([
+  { $group: {
+      _id: "$job",
+      n: { $sum: 1 },
+      payroll: { $sum: "$sal" }
+  }}
+])</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { _id: 'MANAGER', n: 3, payroll: 8275 },
+  { _id: 'ANALYST', n: 2, payroll: 6000 },
+  { _id: 'SALESMAN', n: 4, payroll: 5600 },
+  { _id: 'PRESIDENT', n: 1, payroll: 5000 },
+  { _id: 'CLERK', n: 4, payroll: 4150 }
+]</code></pre>
+</div>
+<div class="ex-pane" data-lang="sql">
+<pre><code class="lang-sql">SELECT job, COUNT(*) AS n, SUM(sal) AS payroll FROM emp GROUP BY job</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">job        n  payroll
+MANAGER    3  8275
+ANALYST    2  6000
+SALESMAN   4  5600
+PRESIDENT  1  5000
+CLERK      4  4150</code></pre>
+</div>
+</div>
 <p>The cursor rows use the column names from the statement. Integers you stored as BSON ints come back as integers.</p>
 
 <h2 id="text">Text in the WHERE clause</h2>
 <p><code>WHERE TEXT '…'</code> is handled before the SQL planner, because a bare <code>TEXT</code> token is not standard SQL. It is the same search as <code>$text</code>. The view or collection needs the text index. After the sample is loaded, that view is <code>emp_search</code>.</p>
-<pre>SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'
+<div class="ex" data-switch data-default="sql">
+<div class="ex-label"><span class="ex-switch" role="group" aria-label="Command language"><button type="button" class="ex-pick" data-lang="mql" aria-pressed="false">MQL</button><button type="button" class="ex-pick" data-lang="sql" aria-pressed="true">SQL</button></span></div>
+<div class="ex-pane" data-lang="mql" hidden>
+<pre><code class="lang-mql">db.emp_search.find({ $text: { $search: "clerk" } })
+db.emp_search.find({ $text: { $search: "clrek", $fuzzy: 0.3 } })
+db.runCommand({
+  sql: "SELECT facet, bucket, doc_count FROM emp_search WHERE TEXT 'clerk' FACETS job TERMS, sal RANGES (1500), (1500, 3000), (3000)"
+})</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">[
+  { ename: 'SMITH', job: 'CLERK', sal: 800 },
+  { ename: 'ADAMS', job: 'CLERK', sal: 1100 },
+  { ename: 'JAMES', job: 'CLERK', sal: 950 },
+  { ename: 'MILLER', job: 'CLERK', sal: 1300 }
+]</code></pre>
+</div>
+<div class="ex-pane" data-lang="sql">
+<pre><code class="lang-sql">SELECT ename, job, sal FROM emp_search WHERE TEXT 'clerk'
 SELECT ename, job, sal FROM emp_search WHERE TEXT 'clrek' FUZZY 0.3
 SELECT facet, bucket, doc_count
 FROM emp_search
 WHERE TEXT 'clerk'
-FACETS job TERMS, sal RANGES (1500), (1500, 3000), (3000)</pre>
+FACETS job TERMS, sal RANGES (1500), (1500, 3000), (3000)</code></pre>
+<div class="ex-label">Output</div>
+<pre><code class="lang-out">ename   job        sal
+SMITH   CLERK       800
+ADAMS   CLERK      1100
+JAMES   CLERK       950
+MILLER  CLERK      1300
+
+ename   job        sal
+SMITH   CLERK       800
+ADAMS   CLERK      1100
+JAMES   CLERK       950
+MILLER  CLERK      1300
+
+facet  bucket      doc_count
+job    CLERK       4
+sal    ..1500      4
+sal    1500..3000  0
+sal    3000..      0</code></pre>
+</div>
+</div>
 <p><code>FUZZY</code> takes a fraction from 0 to 1. <code>FACETS</code> replaces the selected columns with three: <code>facet</code>, <code>bucket</code>, <code>doc_count</code>. <code>TERMS</code> buckets by value. <code>RANGES</code> buckets a number. The open end <code>(1500)</code> is everything up to 1500, and a trailing <code>(3000)</code> is everything above 3000. The full rules are on <a href="/docs/search">Text search</a>.</p>
 
 <h2 id="from-a-client">From a client that only speaks SQL</h2>
@@ -87,8 +177,10 @@ FACETS job TERMS, sal RANGES (1500), (1500, 3000), (3000)</pre>
     <nav>
       <a href="/">Home</a>
       <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
     </nav>
   </footer>
+  <script src="/js/code.js"></script>
   <script src="/js/theme.js"></script>
 </body>
 </html>
