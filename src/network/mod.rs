@@ -800,6 +800,19 @@ fn authorize(command: &mut bson::Document, session: &Option<Session>) -> Result<
         }
         return Ok(());
     }
+    if let Ok(sql) = command.get_str("sql") {
+        if let Ok(Some(actions)) = crate::dump::sql_actions(sql) {
+            let Some(session) = session else {
+                return Err("authentication required".into());
+            };
+            for name in actions {
+                if !session.actions.iter().any(|held| held == name) {
+                    return Err(format!("unauthorized: {name}"));
+                }
+            }
+            return Ok(());
+        }
+    }
     let Some(action) = crate::security::required_action(command) else {
         return Ok(());
     };
@@ -849,6 +862,9 @@ async fn dispatch_command(
     replica: Option<&crate::replication::Replica>,
     shards: Option<&crate::shard::ShardRouter>,
 ) -> bson::Document {
+    if let Some(reply) = sql_write(command, router, local_addr, replica, shards).await {
+        return reply;
+    }
     if let Some(shards) = shards {
         if command.contains_key("sql") {
             return crate::shard::SQL_ROUTER
@@ -982,6 +998,173 @@ fn split_namespace(namespace: &str) -> (String, String) {
     match namespace.split_once('.') {
         Some((db, collection)) => (db.to_string(), collection.to_string()),
         None => (String::new(), namespace.to_string()),
+    }
+}
+
+/// Turns a SQL write into the document commands the log already stores.
+///
+/// A query returns `None` so the caller keeps the read path. Each change
+/// is proposed when this process is a replica leader, forwarded when it
+/// is a shard router, and applied locally otherwise.
+async fn sql_write(
+    command: &bson::Document,
+    router: &PartitionRouter,
+    local_addr: std::net::SocketAddr,
+    replica: Option<&crate::replication::Replica>,
+    shards: Option<&crate::shard::ShardRouter>,
+) -> Option<bson::Document> {
+    let sql_text = command.get_str("sql").ok()?;
+    let changes = match crate::dump::sql_changes(sql_text) {
+        Ok(Some(changes)) => changes,
+        Ok(None) => return None,
+        Err(message) => return Some(bson::doc! { "ok": 0.0, "errmsg": message }),
+    };
+    Some(apply_sql_changes(command, changes, router, local_addr, replica, shards).await)
+}
+
+async fn apply_sql_changes(
+    source: &bson::Document,
+    changes: Vec<crate::dump::SqlChange>,
+    router: &PartitionRouter,
+    local_addr: std::net::SocketAddr,
+    replica: Option<&crate::replication::Replica>,
+    shards: Option<&crate::shard::ShardRouter>,
+) -> bson::Document {
+    let mut affected = 0i64;
+    for change in changes {
+        let (commands, if_not_exists) = sql_change_commands(change);
+        for (index, command) in commands.into_iter().enumerate() {
+            let command = stamp_sql_command(source, command);
+            let reply = apply_client_write(&command, router, local_addr, replica, shards).await;
+            if !reply_ok(&reply) {
+                let exists = if_not_exists
+                    && index == 0
+                    && reply
+                        .get_str("errmsg")
+                        .unwrap_or("")
+                        .contains("already exists");
+                if exists {
+                    continue;
+                }
+                return reply;
+            }
+            affected += reply_n(&reply);
+        }
+    }
+    bson::doc! {
+        "ok": 1.0,
+        "n": affected,
+        "cursor": {
+            "id": 0i64,
+            "ns": "sql.write",
+            "firstBatch": [],
+        },
+    }
+}
+
+fn sql_change_commands(change: crate::dump::SqlChange) -> (Vec<bson::Document>, bool) {
+    match change {
+        crate::dump::SqlChange::CreateTable {
+            name,
+            if_not_exists,
+            autoincrement,
+            indexes,
+        } => {
+            let mut create = bson::doc! { "create": name.clone() };
+            if !autoincrement.is_empty() {
+                create.insert(
+                    "autoincrement",
+                    autoincrement
+                        .into_iter()
+                        .map(bson::Bson::String)
+                        .collect::<Vec<_>>(),
+                );
+            }
+            let mut commands = vec![create];
+            if !indexes.is_empty() {
+                commands.push(bson::doc! {
+                    "createIndexes": name,
+                    "indexes": indexes.into_iter().map(bson::Bson::Document).collect::<Vec<_>>(),
+                });
+            }
+            (commands, if_not_exists)
+        }
+        crate::dump::SqlChange::CreateIndexes { name, indexes } => (
+            vec![bson::doc! {
+                "createIndexes": name,
+                "indexes": indexes.into_iter().map(bson::Bson::Document).collect::<Vec<_>>(),
+            }],
+            false,
+        ),
+        crate::dump::SqlChange::Insert { name, documents } => {
+            let documents = documents
+                .into_iter()
+                .map(|mut document| {
+                    if !document.contains_key("_id") {
+                        document.insert("_id", bson::Bson::ObjectId(bson::oid::ObjectId::new()));
+                    }
+                    bson::Bson::Document(document)
+                })
+                .collect::<Vec<_>>();
+            (
+                vec![bson::doc! { "insert": name, "documents": documents }],
+                false,
+            )
+        }
+        crate::dump::SqlChange::Update { name, filter, set } => (
+            vec![bson::doc! {
+                "update": name,
+                "updates": [{ "q": filter, "u": { "$set": set }, "multi": true }],
+            }],
+            false,
+        ),
+        crate::dump::SqlChange::Delete { name, filter } => (
+            vec![bson::doc! {
+                "delete": name,
+                "deletes": [{ "q": filter, "limit": 0i32 }],
+            }],
+            false,
+        ),
+    }
+}
+
+fn stamp_sql_command(source: &bson::Document, mut command: bson::Document) -> bson::Document {
+    if let Ok(db) = source.get_str("$db") {
+        command.insert("$db", db);
+    }
+    if let Some(txn) = source.get("txnId") {
+        command.insert("txnId", txn.clone());
+    }
+    command
+}
+
+async fn apply_client_write(
+    command: &bson::Document,
+    router: &PartitionRouter,
+    local_addr: std::net::SocketAddr,
+    replica: Option<&crate::replication::Replica>,
+    shards: Option<&crate::shard::ShardRouter>,
+) -> bson::Document {
+    if let Some(shards) = shards {
+        return shards.route(command).await;
+    }
+    if let Some(replica) = replica {
+        if (is_replicated_write(command) || is_leader_local(command)) && !replica.is_leader() {
+            return crate::replication::not_primary();
+        }
+        if is_replicated_write(command) {
+            return replica.propose(command.clone()).await.0;
+        }
+    }
+    execute_command(command, router, local_addr).await
+}
+
+fn reply_n(reply: &bson::Document) -> i64 {
+    match reply.get("n") {
+        Some(bson::Bson::Int32(value)) => i64::from(*value),
+        Some(bson::Bson::Int64(value)) => *value,
+        Some(bson::Bson::Double(value)) if value.fract() == 0.0 => *value as i64,
+        _ => 0,
     }
 }
 
@@ -3366,6 +3549,103 @@ mod tests {
         assert_eq!(batch.len(), 1, "only Ada is older than 25: {:?}", batch);
         let row = batch[0].as_document().expect("row");
         assert_eq!(row.get_str("name").expect("name"), "Ada");
+    }
+
+    #[tokio::test]
+    async fn test_sql_writes_are_stored() {
+        let router = PartitionRouter::new(1);
+        let local = "127.0.0.1:1".parse().expect("addr");
+        let created = dispatch_command(
+            &bson::doc! {
+                "sql": "CREATE TABLE extra (sku INT PRIMARY KEY, qty INT)",
+                "$db": "bench",
+            },
+            &router,
+            local,
+            None,
+            None,
+        )
+        .await;
+        assert!(reply_ok(&created), "{created:?}");
+
+        let again = dispatch_command(
+            &bson::doc! {
+                "sql": "CREATE TABLE IF NOT EXISTS extra (sku INT PRIMARY KEY, qty INT)",
+                "$db": "bench",
+            },
+            &router,
+            local,
+            None,
+            None,
+        )
+        .await;
+        assert!(reply_ok(&again), "{again:?}");
+
+        let inserted = dispatch_command(
+            &bson::doc! {
+                "sql": "INSERT INTO extra (sku, qty) VALUES (1, 4)",
+                "$db": "bench",
+            },
+            &router,
+            local,
+            None,
+            None,
+        )
+        .await;
+        assert!(reply_ok(&inserted), "{inserted:?}");
+        assert_eq!(reply_n(&inserted), 1, "{inserted:?}");
+
+        let updated = dispatch_command(
+            &bson::doc! {
+                "sql": "UPDATE extra SET qty = 9 WHERE sku = 1",
+                "$db": "bench",
+            },
+            &router,
+            local,
+            None,
+            None,
+        )
+        .await;
+        assert!(reply_ok(&updated), "{updated:?}");
+        assert_eq!(reply_n(&updated), 1, "{updated:?}");
+
+        let selected = dispatch_command(
+            &bson::doc! {
+                "sql": "SELECT sku, qty FROM extra WHERE sku = 1",
+                "$db": "bench",
+            },
+            &router,
+            local,
+            None,
+            None,
+        )
+        .await;
+        assert!(reply_ok(&selected), "{selected:?}");
+        let batch = selected
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("rows");
+        assert_eq!(batch.len(), 1, "{batch:?}");
+        let row = batch[0].as_document().expect("row");
+        let qty = row
+            .get_i32("qty")
+            .or_else(|_| row.get_i64("qty").map(|n| n as i32));
+        assert_eq!(qty, Ok(9), "{row:?}");
+
+        let removed = dispatch_command(
+            &bson::doc! {
+                "sql": "DELETE FROM extra WHERE sku = 1",
+                "$db": "bench",
+            },
+            &router,
+            local,
+            None,
+            None,
+        )
+        .await;
+        assert!(reply_ok(&removed), "{removed:?}");
+        assert_eq!(reply_n(&removed), 1, "{removed:?}");
     }
 
     #[tokio::test]

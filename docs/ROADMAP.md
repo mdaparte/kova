@@ -42,6 +42,7 @@ replication, and multi-model indexing.
 | 26 | Feed (Apache Iggy) | ⚪ Planned |
 | 27 | User guide | ✅ Complete |
 | 28 | Read path and scale | ✅ Complete |
+| 29 | Steps behind MongoDB | ⚪ Planned |
 
 ## Phase 1 - Networking & Interception ✅
 
@@ -963,6 +964,32 @@ A transaction can write every collection that hashes to the partition that opene
 - [x] One transaction can write every collection on the partition that opened it, as one log record. A transaction across partitions, shards, or replica-set members is refused.
 - [x] Test: a selective `IXSCAN` on a collection larger than the buffer pool does not read every page. After a restart, the index pages are opened and documents are not scanned to rebuild them. A `$group` through the router matches a `$group` on one process that holds the whole collection. Adding a shard moves a document whose `_id` changed arc, and a find returns it once.
 
+## Phase 29 - Steps behind MongoDB ⚪ Planned
+
+The five-pass benchmark is the list. A step counts as behind when both engines finished it and MongoDB's mean is lower by more than the sample standard deviation of the paired differences. A similar step stays as it is. The SQL table is Kova only, so it is not on this list.
+
+On the run in `site/docs/benchmark-result.json`, these MQL steps are behind:
+
+- `insert orders`
+- `updateOne` by `sku`, `findAndModify` by `sku`, and `deleteOne` by `sku`
+- `count` of `orders`
+- `findOne` by `sku`, both passes
+- `find` of `sal` greater than 2000
+- `find` of `qty` equal to 7
+- `$group` by `job`
+- `$lookup` of `dept`
+
+This waits. The next pass on the engine picks it up. A new benchmark run replaces the list above when the means move.
+
+### Phase 29 - Sub-tasks
+
+- [ ] Bring `insert orders` inside the standard deviation of MongoDB, or past it.
+- [ ] Bring `updateOne`, `findAndModify`, and `deleteOne` by `sku` inside that band, or past it.
+- [ ] Bring `count` of `orders` inside that band, or past it.
+- [ ] Bring both `findOne` passes, the `sal` range, and the unindexed `qty` find inside that band, or past it.
+- [ ] Bring `$group` by `job` and the equality `$lookup` of `dept` inside that band, or past it.
+- [ ] A later `make benchmark` is the check. A step that the page calls similar, or a step Kova wins, is done.
+
 ## Architecture Principles
 
 1. **Hybrid memory+disk**: documents live in pages. RAM holds the buffer
@@ -988,6 +1015,7 @@ A transaction can write every collection that hashes to the partition that opene
 | Gap | Phase | Notes |
 |-----|-------|-------|
 | A committed write has no feed for other programs | 26 | `[feed]` will publish one JSON record per committed insert, update, or delete to Apache Iggy. The listener decides what to do with `before` and `after`. Today a program tails a collection or the oplog. |
+| Five-pass means behind MongoDB | 29 | Insert, point update, `findAndModify`, point delete, count, point find, range find, unindexed find, `$group`, and `$lookup`. A similar step is left alone. Later. |
 
 ## Architecture Diagram (updated)
 
@@ -1045,4 +1073,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1-25, 27, and 28 are complete. Still open: the feed (Phase 26).*
+*Phases 1-25, 27, and 28 are complete. Still open: the feed (Phase 26) and the steps behind MongoDB (Phase 29).*

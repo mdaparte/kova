@@ -452,6 +452,7 @@ impl PartitionWorker {
                 for document in &stored {
                     self.note_view_document(&collection, document);
                 }
+                self.save_inverted(&collection);
                 PartitionResult::Inserted {
                     inserted_count: stored.len() as u32,
                 }
@@ -603,6 +604,7 @@ impl PartitionWorker {
                 for doc in &updated {
                     self.note_view_document(&collection, doc);
                 }
+                self.save_inverted(&collection);
                 PartitionResult::Modified {
                     matched_count,
                     modified_count: updated.len() as u32,
@@ -1147,6 +1149,7 @@ impl PartitionWorker {
                 for doc in &removed {
                     self.note_view_removal(&collection, &document_id_string(doc));
                 }
+                self.save_inverted(&collection);
                 PartitionResult::Deleted {
                     deleted_count: removed.len() as u32,
                 }
@@ -2476,6 +2479,25 @@ impl PartitionWorker {
         for name in names {
             if let Some(index) = self.inverted.get_mut(&name) {
                 if let Err(message) = index.remove(id) {
+                    LOGGER.warn(format!("view {name} index: {message}"));
+                }
+            }
+        }
+    }
+
+    /// Persists inverted-view updates for `collection` once per command.
+    fn save_inverted(&mut self, collection: &str) {
+        let names: Vec<String> = self
+            .engine
+            .heap
+            .views()
+            .iter()
+            .filter(|view| view.inverted() && view.source == collection)
+            .map(|view| view.name.clone())
+            .collect();
+        for name in names {
+            if let Some(index) = self.inverted.get_mut(&name) {
+                if let Err(message) = index.save() {
                     LOGGER.warn(format!("view {name} index: {message}"));
                 }
             }

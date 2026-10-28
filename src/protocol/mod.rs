@@ -577,8 +577,54 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
         );
     }
 
+    // findAndModify carries an `update` document. That key must be read
+    // before the update command, which expects `update` to be a collection name.
+    if let Ok(collection) = command
+        .get_str("findAndModify")
+        .or_else(|_| command.get_str("findandmodify"))
+    {
+        if collection.contains('.') {
+            return Err("collection names cannot contain '.'".to_string());
+        }
+        if command.get_bool("upsert").unwrap_or(false) {
+            return Err("findAndModify upsert is not supported".to_string());
+        }
+        let filter = command
+            .get_document("query")
+            .cloned()
+            .unwrap_or_else(|_| doc! {});
+        if command.get_bool("remove").unwrap_or(false) {
+            return bind_txn(
+                txn_id,
+                PartitionCommand::Delete {
+                    collection: namespaced(collection),
+                    filter,
+                    limit: 1,
+                },
+            );
+        }
+        let update = match command.get("update") {
+            Some(bson::Bson::Document(update)) => update.clone(),
+            Some(_) => return Err("findAndModify update must be a document".to_string()),
+            None => {
+                return Err("findAndModify requires an update document or remove: true".to_string())
+            }
+        };
+        return bind_txn(
+            txn_id,
+            PartitionCommand::Update {
+                collection: namespaced(collection),
+                filter,
+                update,
+                multi: false,
+            },
+        );
+    }
+
     if command.contains_key("update") {
-        let collection = command.get_str("update").unwrap();
+        let Ok(collection) = command.get_str("update") else {
+            return Err("update requires a collection name".to_string());
+        };
         let updates = command
             .get_array("updates")
             .map_err(|_| "update requires an 'updates' array")?;
@@ -609,7 +655,9 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
     }
 
     if command.contains_key("delete") {
-        let collection = command.get_str("delete").unwrap();
+        let Ok(collection) = command.get_str("delete") else {
+            return Err("delete requires a collection name".to_string());
+        };
         let deletes = command
             .get_array("deletes")
             .map_err(|_| "delete requires a 'deletes' array")?;
@@ -2374,6 +2422,30 @@ mod tests {
                 assert!(!multi, "update must default to single-document");
             }
             other => panic!("expected Update, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_command_find_and_modify_is_one_update() {
+        let command = doc! {
+            "findAndModify": "orders",
+            "query": { "sku": 2 },
+            "update": { "$inc": { "qty": 1 } },
+            "$db": "benchmark",
+        };
+        match command_from_document(&command).expect("parse") {
+            PartitionCommand::Update {
+                collection,
+                filter,
+                update,
+                multi,
+            } => {
+                assert_eq!(collection, "benchmark.orders");
+                assert_eq!(filter.get_i32("sku").unwrap(), 2);
+                assert!(update.contains_key("$inc"));
+                assert!(!multi);
+            }
+            other => panic!("expected Update, got {other:?}"),
         }
     }
 

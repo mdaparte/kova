@@ -41,7 +41,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql" class="here">SQL</a><a href="/docs/odbc">ODBC</a></div>
-<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
 <div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
@@ -85,10 +85,17 @@ FORD    ANALYST   3000</code></pre>
   <li><code>WHERE</code> with comparisons. One comparison, such as <code>sal &gt; 1000</code> or <code>job = 'CLERK'</code>, uses the same index a find would use. DataFusion checks the predicate again.</li>
   <li><code>COUNT(*)</code> and <code>GROUP BY</code>.</li>
   <li><code>SHOW INDEXES FROM emp</code>, also <code>SHOW INDEX</code> and <code>SHOW KEYS</code>.</li>
+  <li><code>CREATE TABLE</code> and <code>CREATE INDEX</code>.</li>
+  <li><code>INSERT</code>, <code>UPDATE</code>, and <code>DELETE</code>.</li>
 </ul>
 
 <h2 id="writes">Creating and changing rows</h2>
-<p>The SQL string reads the rows that are already stored. Creating the table, inserting, updating, and adding an index are document commands: <code>createCollection</code> or the first <code>insertOne</code>, then <code>updateOne</code>, and <code>createIndex</code>. A <code>SELECT</code> after those commands sees the change. <code>CREATE TABLE</code>, <code>INSERT</code>, and <code>UPDATE</code> sent as SQL are not written to the pages. The commands and examples are on <a href="/docs/documents">Documents</a> and <a href="/docs/indexes">Indexes</a>.</p>
+<p><code>CREATE TABLE</code>, <code>CREATE INDEX</code>, <code>INSERT</code>, <code>UPDATE</code>, and <code>DELETE</code> are written to the pages. The server turns each statement into the same log records as <code>create</code>, <code>createIndexes</code>, <code>insert</code>, <code>update</code>, and <code>delete</code>. A later <code>SELECT</code> reads those rows. A schema name is dropped, so <code>public.orders</code> is the collection <code>orders</code>. <code>serial</code>, <code>bigserial</code>, <code>smallserial</code>, <code>AUTO_INCREMENT</code>, and <code>GENERATED ... AS IDENTITY</code> become an autoincrement field. A primary key or <code>UNIQUE</code> becomes a unique index.</p>
+<p><code>INSERT</code> needs a column list, unless the same command already ran <code>CREATE TABLE</code> for that collection. <code>UPDATE</code> and <code>DELETE</code> take one comparison in <code>WHERE</code>, such as <code>sku = 1</code>. Without <code>WHERE</code>, every row in the collection changes. A value in <code>SET</code> is a literal. <code>CREATE TABLE IF NOT EXISTS</code> leaves a collection that is already there. A <code>SELECT</code> stays in its own command. The write statements above can share one.</p>
+<pre><code class="lang-sql">CREATE TABLE orders (sku INT, qty INT);
+INSERT INTO orders (sku, qty) VALUES (1, 2);
+UPDATE orders SET qty = 3 WHERE sku = 1;
+DELETE FROM orders WHERE sku = 1;</code></pre>
 
 <p>Names are case-sensitive, and they are the collection names. The sample uses lowercase <code>emp</code> so <code>FROM emp</code> hits those rows. <code>FROM EMP</code> is a different collection.</p>
 <div class="ex" data-switch data-default="sql">
@@ -171,7 +178,7 @@ sal    3000..      0</code></pre>
 <p><code>FUZZY</code> takes a fraction from 0 to 1. <code>FACETS</code> replaces the selected columns with three: <code>facet</code>, <code>bucket</code>, <code>doc_count</code>. <code>TERMS</code> buckets by value. <code>RANGES</code> buckets a number. The open end <code>(1500)</code> is everything up to 1500, and a trailing <code>(3000)</code> is everything above 3000. The full rules are on <a href="/docs/search">Text search</a>.</p>
 
 <h2 id="from-a-client">From a client that only speaks SQL</h2>
-<p>The ODBC driver sends the string you typed and returns the rows. Connection keys are on the <a href="/docs/odbc">ODBC</a> page. The server must already be running. SQL does not start it.</p>
+<p>The ODBC driver sends the string you typed. A query returns the rows. A create, insert, update, or delete is written, and the driver reports how many rows changed. Connection keys are on the <a href="/docs/odbc">ODBC</a> page. The server must already be running. SQL does not start it.</p>
 
       <nav class="pager"><a href="/docs/catalog"><span>Previous</span>Catalog</a><a class="next" href="/docs/odbc"><span>Next</span>ODBC</a></nav>
     </article>

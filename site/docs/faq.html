@@ -41,7 +41,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
-<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
 <div><h2>About</h2><a href="/docs/faq" class="here">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
 <div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
     </nav>
@@ -88,9 +88,12 @@ db.orders.insertOne({ sku: "kettle", qty: 2 })
 db.orders.updateOne({ sku: "kettle" }, { $set: { qty: 3 } })
 db.orders.createIndex({ sku: 1 })</code></pre>
 <div class="ex-label">SQL</div>
-<pre><code class="lang-sql">SELECT sku, qty FROM orders WHERE qty &gt; 1</code></pre>
+<pre><code class="lang-sql">CREATE TABLE orders (sku VARCHAR, qty INT);
+INSERT INTO orders (sku, qty) VALUES ('kettle', 2);
+UPDATE orders SET qty = 3 WHERE sku = 'kettle';
+CREATE INDEX sku_1 ON orders (sku);</code></pre>
 </div>
-<p>A SQL string does the reading. <code>CREATE TABLE</code>, <code>INSERT</code>, and <code>UPDATE</code> sent as SQL are not stored. The writes above are. Details are on <a href="/docs/documents">Documents</a>, <a href="/docs/indexes">Indexes</a>, and <a href="/docs/sql">SQL</a>.</p>
+<p>The SQL statements are stored. They become the same log records as the document commands above. Details are on <a href="/docs/documents">Documents</a>, <a href="/docs/indexes">Indexes</a>, and <a href="/docs/sql">SQL</a>.</p>
 
 <h3 id="restart">What survives a restart?</h3>
 <p>Committed documents, indexes, views, users, and autoincrement counters. They are in the page files under <code>data/</code>. An open transaction that had not committed is gone: its writes never reached a page. Start the process again from the same directory and the listener answers with the same data.</p>

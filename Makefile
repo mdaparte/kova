@@ -28,10 +28,16 @@ endif
 ifneq ($(KOVA_WARN_NON_MONGO_QUERIES),)
 export KOVA_WARN_NON_MONGO_QUERIES
 endif
+ifneq ($(BENCH_ROWS),)
+export BENCH_ROWS
+endif
+ifneq ($(BENCH_LOOKUPS),)
+export BENCH_LOOKUPS
+endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore doc site clean
+.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site clean
 
 help:
 	@printf '%s\n' \
@@ -54,6 +60,7 @@ help:
 		'  seed         Oracle sample, emp indexes, and views into database db' \
 		'  indexes      index tour over the seeded emp collection' \
 		'  server-status  serverStatus counters' \
+		'  benchmark    time MQL and SQL five times on database benchmark, write the docs page' \
 		'  views        checks the views seed left on emp' \
 		'  security     users, roles, and authenticate' \
 		'  demos        server-status, views, then security' \
@@ -69,7 +76,10 @@ help:
 		'  make demos KOVA_PORT=27018' \
 		'  make dump                 database db -> db.kdmp' \
 		'  make restore DUMP=pg.sql  database db, port 27018' \
-		'  make dump KOVA_DB=shop KOVA_PORT=27019 DUMP=shop.kdmp'
+		'  make dump KOVA_DB=shop KOVA_PORT=27019 DUMP=shop.kdmp' \
+		'  make benchmark            database benchmark, port 27018' \
+		'  make benchmark KOVA_PORT=27019 BENCH_ROWS=1000 BENCH_LOOKUPS=100' \
+		'  BENCH_MONGO=1 make benchmark   also time MongoDB on port 27017'
 
 build:
 	$(CARGO) build
@@ -143,6 +153,15 @@ views:
 
 security:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/security.js
+
+# Times MQL and SQL on a server that is already listening. Drops and
+# Runs the pass five times, recreating only the database `benchmark`, then writes the means.
+# Asks whether to repeat the same steps on MongoDB (port 27017).
+#   make benchmark
+#   make benchmark KOVA_PORT=27019 BENCH_ROWS=1000 BENCH_LOOKUPS=100
+#   BENCH_MONGO=1 make benchmark
+benchmark:
+	python3 scripts/benchmark.py
 
 demos: server-status views security
 

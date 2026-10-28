@@ -78,19 +78,24 @@ impl DiskIndex {
     }
 
     /// Replaces one document. `Ok(true)` means a new field appeared and
-    /// the caller should [`Self::rebuild`].
+    /// the caller should [`Self::rebuild`]. The change stays in the
+    /// writer until [`Self::save`].
     pub fn upsert(&mut self, id: &str, document: &Document) -> Result<bool, String> {
         if self.grows(document) {
             return Ok(true);
         }
         self.delete_id(id);
         self.add(id, document)?;
-        self.commit()?;
         Ok(false)
     }
 
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
         self.delete_id(id);
+        Ok(())
+    }
+
+    /// Makes queued inserts and deletes visible to the next search.
+    pub fn save(&mut self) -> Result<(), String> {
         self.commit()
     }
 

@@ -154,9 +154,148 @@ pub(super) fn parse(text: &str, dialect: Dialect) -> Result<Dump, String> {
     Ok(dump)
 }
 
+enum CreateKind {
+    Table { name: String, if_not_exists: bool },
+    Index { name: String },
+    Other,
+}
+
+/// One write a live SQL command turns into a document command.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SqlChange {
+    CreateTable {
+        name: String,
+        if_not_exists: bool,
+        autoincrement: Vec<String>,
+        indexes: Vec<Document>,
+    },
+    CreateIndexes {
+        name: String,
+        indexes: Vec<Document>,
+    },
+    Insert {
+        name: String,
+        documents: Vec<Document>,
+    },
+    Update {
+        name: String,
+        filter: Document,
+        set: Document,
+    },
+    Delete {
+        name: String,
+        filter: Document,
+    },
+}
+
 struct Sql<'a> {
     text: &'a str,
     index: usize,
+}
+
+/// Reads one live SQL command.
+///
+/// `Ok(None)` is a query, which the caller still hands to DataFusion.
+/// `Ok(Some)` is a script of `CREATE TABLE`, `CREATE INDEX`, `INSERT`,
+/// `UPDATE`, and `DELETE`. A query and a write in the same command is
+/// an error. Column types from `CREATE TABLE` apply to a later `INSERT`
+/// in that same command.
+pub(crate) fn live(text: &str) -> Result<Option<Vec<SqlChange>>, String> {
+    let prepared = ensure_semi(text);
+    let dialect = detect_live(&prepared);
+    let mut sql = Sql {
+        text: &prepared,
+        index: 0,
+    };
+    let mut columns: BTreeMap<String, Vec<Column>> = BTreeMap::new();
+    let mut changes = Vec::new();
+    let mut saw_query = false;
+    while !sql.eof() {
+        sql.skip()?;
+        if sql.eof() {
+            break;
+        }
+        if sql.peek() == ';' {
+            sql.bump();
+            continue;
+        }
+        let start = sql.index;
+        let word = sql.read_word()?;
+        if is_query_word(&word) {
+            if !changes.is_empty() {
+                return Err("SQL cannot mix a query and a write".into());
+            }
+            saw_query = true;
+            sql.skip_statement()?;
+            continue;
+        }
+        if saw_query {
+            return Err("SQL cannot mix a query and a write".into());
+        }
+        if word.eq_ignore_ascii_case("create") || word.eq_ignore_ascii_case("insert") {
+            sql.index = start;
+            let keyword = sql.read_word()?;
+            let mut one = Dump::default();
+            if keyword.eq_ignore_ascii_case("create") {
+                match sql.parse_create(&mut columns, &mut one)? {
+                    CreateKind::Table {
+                        name,
+                        if_not_exists,
+                    } => {
+                        let collection = one
+                            .collections
+                            .iter_mut()
+                            .find(|collection| collection.name == name)
+                            .ok_or_else(|| format!("CREATE TABLE {name} stored nothing"))?;
+                        finish_serial(&name, &columns, collection);
+                        changes.push(SqlChange::CreateTable {
+                            name,
+                            if_not_exists,
+                            autoincrement: collection.autoincrement.clone(),
+                            indexes: collection.indexes.clone(),
+                        });
+                    }
+                    CreateKind::Index { name } => {
+                        let indexes = one
+                            .collections
+                            .iter()
+                            .find(|collection| collection.name == name)
+                            .map(|collection| collection.indexes.clone())
+                            .unwrap_or_default();
+                        changes.push(SqlChange::CreateIndexes { name, indexes });
+                    }
+                    CreateKind::Other => {
+                        return Err("this CREATE is not stored".into());
+                    }
+                }
+            } else {
+                sql.parse_insert(dialect, &columns, &mut one)?;
+                let collection = one
+                    .collections
+                    .pop()
+                    .ok_or_else(|| "INSERT stored nothing".to_string())?;
+                changes.push(SqlChange::Insert {
+                    name: collection.name,
+                    documents: collection.documents,
+                });
+            }
+            continue;
+        }
+        if word.eq_ignore_ascii_case("update") {
+            changes.push(sql.parse_update_stmt(dialect)?);
+            continue;
+        }
+        if word.eq_ignore_ascii_case("delete") {
+            changes.push(sql.parse_delete_stmt(dialect)?);
+            continue;
+        }
+        return Err(format!("SQL statement {word} is not applied"));
+    }
+    if changes.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(changes))
+    }
 }
 
 impl Sql<'_> {
@@ -164,7 +303,7 @@ impl Sql<'_> {
         &mut self,
         columns: &mut BTreeMap<String, Vec<Column>>,
         dump: &mut Dump,
-    ) -> Result<(), String> {
+    ) -> Result<CreateKind, String> {
         let mut word = self.read_word()?;
         while matches_modifier(&word) {
             word = self.read_word()?;
@@ -174,13 +313,16 @@ impl Sql<'_> {
             word = self.read_word()?;
         }
         if word.eq_ignore_ascii_case("index") {
-            return self.parse_index(dump, unique_index);
+            let name = self.parse_index(dump, unique_index)?;
+            return Ok(CreateKind::Index { name });
         }
         if !word.eq_ignore_ascii_case("table") {
             self.skip_statement()?;
-            return Ok(());
+            return Ok(CreateKind::Other);
         }
+        let mut if_not_exists = false;
         if self.peek_word("if") {
+            if_not_exists = true;
             self.read_word()?;
             let not = self.read_word()?;
             let exists = self.read_word()?;
@@ -212,11 +354,14 @@ impl Sql<'_> {
         columns.insert(name.clone(), declared);
         let slot = collection_indexes(dump, &name)?;
         adopt_indexes(slot, indexes);
-        Ok(())
+        Ok(CreateKind::Table {
+            name,
+            if_not_exists,
+        })
     }
 
     /// `CREATE [UNIQUE] INDEX name ON table (columns)`.
-    fn parse_index(&mut self, dump: &mut Dump, unique: bool) -> Result<(), String> {
+    fn parse_index(&mut self, dump: &mut Dump, unique: bool) -> Result<String, String> {
         if self.peek_word("concurrently") {
             self.read_word()?;
         }
@@ -246,7 +391,7 @@ impl Sql<'_> {
         let indexes = collection_indexes(dump, &table)?;
         push_index(indexes, index_name, fields, unique);
         self.skip_statement()?;
-        Ok(())
+        Ok(table)
     }
 
     /// `ALTER TABLE ... ADD CONSTRAINT` and `ALTER SEQUENCE ... OWNED BY`.
@@ -451,6 +596,113 @@ impl Sql<'_> {
             ));
         }
         Ok(())
+    }
+
+    fn parse_update_stmt(&mut self, dialect: Dialect) -> Result<SqlChange, String> {
+        if self.peek_word("only") {
+            self.read_word()?;
+        }
+        let name = self.read_qualified()?;
+        check_name(&name)?;
+        let set = self.read_word()?;
+        if !set.eq_ignore_ascii_case("set") {
+            return Err(format!("UPDATE {name} is missing SET {}", self.here()));
+        }
+        let mut assignments = Document::new();
+        loop {
+            let column = self.read_ident()?;
+            self.skip()?;
+            if !self.eat('=') {
+                return Err(format!(
+                    "UPDATE {name} expected '=' after {column} {}",
+                    self.here()
+                ));
+            }
+            let value = self.read_value(dialect)?;
+            assignments.insert(column, value);
+            self.skip()?;
+            if self.eat(',') {
+                continue;
+            }
+            break;
+        }
+        let filter = self.read_optional_where(dialect)?;
+        self.end_statement()?;
+        Ok(SqlChange::Update {
+            name,
+            filter,
+            set: assignments,
+        })
+    }
+
+    fn parse_delete_stmt(&mut self, dialect: Dialect) -> Result<SqlChange, String> {
+        let from = self.read_word()?;
+        if !from.eq_ignore_ascii_case("from") {
+            return Err(format!("DELETE is missing FROM {}", self.here()));
+        }
+        let name = self.read_qualified()?;
+        check_name(&name)?;
+        let filter = self.read_optional_where(dialect)?;
+        self.end_statement()?;
+        Ok(SqlChange::Delete { name, filter })
+    }
+
+    /// One comparison, or an empty filter when the statement has no WHERE.
+    fn read_optional_where(&mut self, dialect: Dialect) -> Result<Document, String> {
+        self.skip()?;
+        if self.eof() || self.peek() == ';' {
+            return Ok(Document::new());
+        }
+        let word = self.read_word()?;
+        if !word.eq_ignore_ascii_case("where") {
+            return Err(format!("unexpected {word} {}", self.here()));
+        }
+        let field = self.read_qualified()?;
+        self.skip()?;
+        let op = if self.starts_with("<>") || self.starts_with("!=") {
+            self.index += 2;
+            "ne"
+        } else if self.starts_with(">=") {
+            self.index += 2;
+            "gte"
+        } else if self.starts_with("<=") {
+            self.index += 2;
+            "lte"
+        } else if self.eat('=') {
+            "eq"
+        } else if self.eat('>') {
+            "gt"
+        } else if self.eat('<') {
+            "lt"
+        } else {
+            return Err(format!("WHERE supports one comparison {}", self.here()));
+        };
+        let value = self.read_value(dialect)?;
+        self.skip()?;
+        if !self.eof() && self.peek() != ';' {
+            let extra = self.peek_word_text();
+            if !extra.is_empty() {
+                return Err(format!("WHERE supports one comparison {}", self.here()));
+            }
+        }
+        if op == "eq" {
+            let mut filter = Document::new();
+            filter.insert(field, value);
+            return Ok(filter);
+        }
+        let mut bound = Document::new();
+        bound.insert(format!("${op}"), value);
+        let mut filter = Document::new();
+        filter.insert(field, bound);
+        Ok(filter)
+    }
+
+    fn end_statement(&mut self) -> Result<(), String> {
+        self.skip()?;
+        if self.eof() || self.eat(';') {
+            return Ok(());
+        }
+        Err(format!("statement ended without ';' {}", self.here()))
     }
 
     fn parse_copy(
@@ -1423,6 +1675,60 @@ impl Sql<'_> {
     }
 }
 
+fn finish_serial(
+    name: &str,
+    columns: &BTreeMap<String, Vec<Column>>,
+    collection: &mut CollectionDump,
+) {
+    let Some(declared) = columns.get(name) else {
+        return;
+    };
+    for column in declared.iter().filter(|column| column.serial) {
+        if !collection
+            .autoincrement
+            .iter()
+            .any(|field| field == &column.name)
+        {
+            collection.autoincrement.push(column.name.clone());
+        }
+        push_index(
+            &mut collection.indexes,
+            String::new(),
+            vec![column.name.clone()],
+            true,
+        );
+    }
+}
+
+fn ensure_semi(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.ends_with(';') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed};")
+    }
+}
+
+fn detect_live(text: &str) -> Dialect {
+    match detect(text) {
+        Ok(dialect) => dialect,
+        Err(_) => {
+            if text.contains('`') {
+                Dialect::Mysql
+            } else {
+                Dialect::Postgres
+            }
+        }
+    }
+}
+
+fn is_query_word(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "select" | "with" | "show" | "describe" | "desc" | "explain" | "values"
+    )
+}
+
 fn is_serial_type(sql_type: &str) -> bool {
     let word = sql_type
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -2341,5 +2647,65 @@ SELECT pg_catalog.setval('public.banco_id_seq', 115, true);
             .find(|collection| collection.name == "banco")
             .unwrap();
         assert_eq!(called_false.last, vec![("id".to_string(), 9)]);
+    }
+
+    #[test]
+    fn test_live_sql_becomes_create_insert_and_update() {
+        assert!(live("SELECT sku FROM orders").unwrap().is_none());
+        let mixed = live("SELECT 1; INSERT INTO orders (sku) VALUES (1)").unwrap_err();
+        assert!(mixed.contains("mix"), "{mixed}");
+
+        let changes = live(
+            "CREATE TABLE extra (id serial PRIMARY KEY, sku int);
+             INSERT INTO extra (sku) VALUES (7);
+             UPDATE extra SET sku = 8 WHERE sku = 7;
+             DELETE FROM extra WHERE sku = 8",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            &changes[0],
+            SqlChange::CreateTable {
+                name,
+                autoincrement,
+                ..
+            } if name == "extra" && autoincrement == &vec!["id".to_string()]
+        ));
+        match &changes[1] {
+            SqlChange::Insert { name, documents } => {
+                assert_eq!(name, "extra");
+                assert_eq!(documents[0].get_i32("sku"), Ok(7));
+            }
+            other => panic!("expected insert, got {other:?}"),
+        }
+        match &changes[2] {
+            SqlChange::Update { name, filter, set } => {
+                assert_eq!(name, "extra");
+                assert_eq!(filter.get_i32("sku"), Ok(7));
+                assert_eq!(set.get_i32("sku"), Ok(8));
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+        match &changes[3] {
+            SqlChange::Delete { name, filter } => {
+                assert_eq!(name, "extra");
+                assert_eq!(filter.get_i32("sku"), Ok(8));
+            }
+            other => panic!("expected delete, got {other:?}"),
+        }
+        let again = live("CREATE TABLE IF NOT EXISTS extra (sku int)")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &again[0],
+            SqlChange::CreateTable {
+                if_not_exists: true,
+                ..
+            }
+        ));
+        let refused = live("UPDATE extra SET sku = sku + 1 WHERE sku = 1").unwrap_err();
+        assert!(refused.contains("unsupported value"), "{refused}");
+        let wide = live("DELETE FROM extra WHERE sku = 1 AND qty = 2").unwrap_err();
+        assert!(wide.contains("one comparison"), "{wide}");
     }
 }

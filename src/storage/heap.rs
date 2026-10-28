@@ -135,10 +135,28 @@ impl Heap {
         self.catalog_warm
     }
 
+    #[cfg(test)]
+    pub fn page_count(&self, collection: &str) -> usize {
+        self.collections
+            .get(collection)
+            .map(|state| state.pages.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub fn overflow_count(&self, collection: &str) -> usize {
+        self.collections
+            .get(collection)
+            .map(|state| state.overflow_heads.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
     pub fn user_page_reads(&self) -> u64 {
         self.user_page_reads
     }
 
+    #[cfg(test)]
     pub fn field_types(&self, collection: &str) -> Vec<(String, String)> {
         self.collections
             .get(collection)
@@ -1043,9 +1061,7 @@ impl Heap {
         }
         self.collections
             .insert(name.to_string(), CollectionState::empty());
-        for document in documents {
-            self.place(pool, name, &document)?;
-        }
+        self.place_all(pool, name, &documents)?;
         Ok(())
     }
 
@@ -1249,15 +1265,16 @@ impl Heap {
     ) -> Result<Vec<Document>, String> {
         self.ensure_collection(collection);
         let mut stored = Vec::new();
+        let mut seen = HashSet::new();
         for document in documents {
             self.observe_counters(collection, &document);
             let id = document_id_string(&document);
-            if self.contains_id(collection, &id) {
+            if self.contains_id(collection, &id) || !seen.insert(id) {
                 continue;
             }
-            self.place(pool, collection, &document)?;
             stored.push(document);
         }
+        self.place_all(pool, collection, &stored)?;
         Ok(stored)
     }
 
@@ -1767,48 +1784,98 @@ impl Heap {
         Ok(())
     }
 
-    /// Appends to the last normal page. When that page is full, the
-    /// document starts a new page. Earlier pages stay as they are.
-    fn place(
+    /// Packs `documents` onto as few pages as possible.
+    ///
+    /// The last normal page is read once. New documents stay in memory
+    /// until the next one does not fit, then that page is written once.
+    /// A document that does not fit on an empty page becomes an overflow
+    /// chain. Earlier pages stay as they are.
+    fn place_all(
         &mut self,
         pool: &mut BufferPool,
         collection: &str,
-        document: &Document,
+        documents: &[Document],
     ) -> Result<(), String> {
-        let tail = self.collections[collection]
+        let mut page_id = self.normal_tail(collection);
+        let mut docs = Vec::new();
+        let mut body_bytes = 0usize;
+        let mut fresh = 0usize;
+        if let Some(id) = page_id {
+            docs = self.read_docs(pool, id)?;
+            for doc in &docs {
+                let body = bson::to_vec(doc).map_err(|err| format!("document encode: {err}"))?;
+                body_bytes += body.len();
+            }
+            fresh = docs.len();
+        }
+        let capacity = self.capacity();
+        for document in documents {
+            let body = bson::to_vec(document).map_err(|err| format!("document encode: {err}"))?;
+            let next = page_docs_size(collection, docs.len() + 1, body_bytes + body.len())?;
+            if next <= capacity {
+                docs.push(document.clone());
+                body_bytes += body.len();
+                continue;
+            }
+            self.seal_open(pool, collection, page_id, &docs, fresh)?;
+            docs.clear();
+            body_bytes = 0;
+            fresh = 0;
+            page_id = None;
+            let alone = page_docs_size(collection, 1, body.len())?;
+            if alone <= capacity {
+                docs.push(document.clone());
+                body_bytes = body.len();
+                continue;
+            }
+            let head = self.attach_overflow(pool, collection, document)?;
+            self.note_stored(collection, document, head);
+        }
+        self.seal_open(pool, collection, page_id, &docs, fresh)
+    }
+
+    fn normal_tail(&self, collection: &str) -> Option<u64> {
+        let state = self.collections.get(collection)?;
+        state
             .pages
             .iter()
             .rev()
             .copied()
-            .find(|page_id| {
-                !self.collections[collection]
-                    .overflow_heads
-                    .contains(page_id)
-            });
-        if let Some(page_id) = tail {
-            let mut docs = self.read_docs(pool, page_id)?;
-            docs.push(document.clone());
-            if encode_docs(collection, &docs, self.capacity()).is_ok() {
-                self.write_normal(pool, collection, page_id, &docs)?;
-                self.note_stored(collection, document, page_id);
-                return Ok(());
-            }
-        }
-        if encode_docs(collection, std::slice::from_ref(document), self.capacity()).is_ok() {
-            let payload = encode_docs(collection, std::slice::from_ref(document), self.capacity())?;
-            let id = self.alloc(pool, payload)?;
-            self.collections.get_mut(collection).unwrap().pages.push(id);
-            self.note_stored(collection, document, id);
+            .find(|page_id| !state.overflow_heads.contains(page_id))
+    }
+
+    /// Writes the open page when it holds documents that are not yet stored.
+    /// `fresh` is the index of the first document added in this batch.
+    fn seal_open(
+        &mut self,
+        pool: &mut BufferPool,
+        collection: &str,
+        page_id: Option<u64>,
+        docs: &[Document],
+        fresh: usize,
+    ) -> Result<(), String> {
+        if docs.is_empty() || (page_id.is_some() && fresh == docs.len()) {
             return Ok(());
         }
-        let head = self.attach_overflow(pool, collection, document)?;
-        self.note_stored(collection, document, head);
+        let id = if let Some(page_id) = page_id {
+            self.write_normal(pool, collection, page_id, docs)?;
+            page_id
+        } else {
+            let payload = encode_docs(collection, docs, self.capacity())?;
+            let id = self.alloc(pool, payload)?;
+            self.collections.get_mut(collection).unwrap().pages.push(id);
+            id
+        };
+        for doc in &docs[fresh..] {
+            self.note_stored(collection, doc, id);
+        }
         Ok(())
     }
 
-    /// Writes `docs` back to `page_id`. Documents that no longer fit spill
-    /// onto overflow pages. `doc_count` is left unchanged: these documents
-    /// were already counted.
+    /// Writes `docs` back to `page_id`. Documents that no longer fit are
+    /// packed onto new normal pages. A document that does not fit on an
+    /// empty page becomes an overflow chain. `doc_count` is left
+    /// unchanged: these documents were already counted.
     fn write_docs(
         &mut self,
         pool: &mut BufferPool,
@@ -1817,28 +1884,70 @@ impl Heap {
         docs: Vec<Document>,
     ) -> Result<(), String> {
         if encode_docs(collection, &docs, self.capacity()).is_ok() {
-            self.write_normal(pool, collection, page_id, &docs)?;
-            for doc in &docs {
-                self.remember(collection, doc, page_id);
-            }
+            self.store_batch(pool, collection, Some(page_id), &docs)?;
             return Ok(());
         }
-        let mut kept = Vec::new();
-        let mut spill = Vec::new();
+        let capacity = self.capacity();
+        let mut batch = Vec::new();
+        let mut body_bytes = 0usize;
+        let mut using_original = true;
         for doc in docs {
-            kept.push(doc.clone());
-            if encode_docs(collection, &kept, self.capacity()).is_err() {
-                kept.pop();
-                spill.push(doc);
+            let body = bson::to_vec(&doc).map_err(|err| format!("document encode: {err}"))?;
+            let next = page_docs_size(collection, batch.len() + 1, body_bytes + body.len())?;
+            if next <= capacity {
+                batch.push(doc);
+                body_bytes += body.len();
+                continue;
             }
-        }
-        self.write_normal(pool, collection, page_id, &kept)?;
-        for doc in &kept {
-            self.remember(collection, doc, page_id);
-        }
-        for doc in spill {
+            if !batch.is_empty() {
+                let target = if using_original { Some(page_id) } else { None };
+                self.store_batch(pool, collection, target, &batch)?;
+                using_original = false;
+                batch.clear();
+                body_bytes = 0;
+            }
+            let alone = page_docs_size(collection, 1, body.len())?;
+            if alone <= capacity {
+                batch.push(doc);
+                body_bytes = body.len();
+                continue;
+            }
+            if using_original {
+                self.store_batch(pool, collection, Some(page_id), &[])?;
+                using_original = false;
+            }
             let head = self.attach_overflow(pool, collection, &doc)?;
             self.remember(collection, &doc, head);
+        }
+        let target = if using_original { Some(page_id) } else { None };
+        if target.is_some() || !batch.is_empty() {
+            self.store_batch(pool, collection, target, &batch)?;
+        }
+        Ok(())
+    }
+
+    /// Writes `docs` to `page_id`, or allocates a new page when `page_id`
+    /// is absent. Each document's location becomes that page.
+    fn store_batch(
+        &mut self,
+        pool: &mut BufferPool,
+        collection: &str,
+        page_id: Option<u64>,
+        docs: &[Document],
+    ) -> Result<(), String> {
+        let id = if let Some(page_id) = page_id {
+            self.write_normal(pool, collection, page_id, docs)?;
+            page_id
+        } else if docs.is_empty() {
+            return Ok(());
+        } else {
+            let payload = encode_docs(collection, docs, self.capacity())?;
+            let id = self.alloc(pool, payload)?;
+            self.collections.get_mut(collection).unwrap().pages.push(id);
+            id
+        };
+        for doc in docs {
+            self.remember(collection, doc, id);
         }
         Ok(())
     }
@@ -2171,23 +2280,27 @@ fn count_slots(payload: &[u8]) -> Result<u64, String> {
     Ok(live)
 }
 
+fn page_docs_size(collection: &str, count: usize, body_bytes: usize) -> Result<usize, String> {
+    if collection.len() > u16::MAX as usize {
+        return Err("collection name is too long for a page header".into());
+    }
+    if count > u16::MAX as usize {
+        return Err("too many documents for one page".into());
+    }
+    Ok(10 + collection.len() + 2 + 8 * count + body_bytes)
+}
+
 fn encode_docs(collection: &str, docs: &[Document], capacity: usize) -> Result<Vec<u8>, String> {
     let mut bodies = Vec::with_capacity(docs.len());
     for doc in docs {
         bodies.push(bson::to_vec(doc).map_err(|err| format!("document encode: {err}"))?);
     }
     let name = collection.as_bytes();
-    if name.len() > u16::MAX as usize {
-        return Err("collection name is too long for a page header".into());
-    }
-    if bodies.len() > u16::MAX as usize {
-        return Err("too many documents for one page".into());
-    }
-    let dir = 10 + name.len() + 2 + 8 * bodies.len();
-    let mut size = dir;
-    for body in &bodies {
-        size += body.len();
-    }
+    let size = page_docs_size(
+        collection,
+        bodies.len(),
+        bodies.iter().map(|body| body.len()).sum(),
+    )?;
     if size > capacity {
         return Err("documents do not fit in one page".into());
     }
@@ -2452,4 +2565,90 @@ fn catalog_body(payload: &[u8]) -> Result<Document, String> {
         return Err(format!("catalog magic {magic:08x} is not CATA"));
     }
     bson::from_slice(&payload[4..]).map_err(|err| format!("catalog decode: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn scratch() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("kova-heap-{}-{}", std::process::id(), n));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn pool(dir: &std::path::Path) -> BufferPool {
+        let disk = PageStore::open(dir.join("pages"), 4096, None).unwrap();
+        BufferPool::new(disk, 64).unwrap()
+    }
+
+    #[test]
+    fn test_insert_reads_the_tail_page_once() {
+        let dir = scratch();
+        let mut pool = pool(&dir);
+        let mut heap = Heap::empty(4096, false);
+        let mut batch: Vec<Document> = (0..200)
+            .map(|i| doc! { "_id": i, "sku": i, "name": "order" })
+            .collect();
+        batch.push(doc! { "_id": 3, "sku": 3, "name": "dup" });
+        let stored = heap.insert(&mut pool, "orders", batch).unwrap();
+        assert_eq!(stored.len(), 200);
+        assert_eq!(pool.stats().hits, 0);
+
+        let more: Vec<Document> = (200..250)
+            .map(|i| doc! { "_id": i, "sku": i, "name": "order" })
+            .collect();
+        heap.insert(&mut pool, "orders", more).unwrap();
+        assert_eq!(pool.stats().hits, 1);
+
+        let found = heap.find(&mut pool, "orders", &doc! {}).unwrap();
+        assert_eq!(found.len(), 250);
+        let kept = found
+            .iter()
+            .find(|doc| doc.get_i32("_id").ok() == Some(3))
+            .unwrap();
+        assert_eq!(kept.get_str("name").unwrap(), "order");
+
+        let huge = doc! { "_id": 9000, "blob": "x".repeat(20_000) };
+        heap.insert(&mut pool, "orders", vec![huge]).unwrap();
+        let again = heap
+            .find(&mut pool, "orders", &doc! { "_id": 9000 })
+            .unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].get_str("blob").unwrap().len(), 20_000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_grown_documents_stay_on_normal_pages() {
+        let dir = scratch();
+        let mut pool = pool(&dir);
+        let disk = PageStore::open(dir.join("unused"), 4096, None).unwrap();
+        let mut heap = Heap::empty(4096, false);
+        let batch: Vec<Document> = (0..120)
+            .map(|i| doc! { "_id": i, "sku": i, "note": "n" })
+            .collect();
+        heap.insert(&mut pool, "orders", batch).unwrap();
+        let before = heap.page_count("orders");
+        heap.update(
+            &mut pool,
+            &disk,
+            "orders",
+            &doc! {},
+            &doc! { "$set": { "note": "clerk keeps a longer ledger line" } },
+            true,
+        )
+        .unwrap();
+        let found = heap.find(&mut pool, "orders", &doc! {}).unwrap();
+        assert_eq!(found.len(), 120);
+        assert_eq!(heap.overflow_count("orders"), 0);
+        assert!(heap.page_count("orders") < 120);
+        assert!(heap.page_count("orders") <= before.saturating_mul(3).max(4));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
