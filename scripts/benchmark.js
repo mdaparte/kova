@@ -1,4 +1,5 @@
 // Times one pass against a Kova that is already listening.
+// scripts/benchmark.py runs this five times and compares the means.
 //
 // Drops and recreates only the database `benchmark`. Prints progress,
 // then one line that starts with BENCHMARK_JSON and a JSON object.

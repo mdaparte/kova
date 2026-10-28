@@ -651,7 +651,33 @@ table.bench td.compare span.gap {
   color: var(--k-ardosia);
 }
 
+table.bench td.num span.spread,
+table.bench td.compare span.spread {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  text-align: right;
+  color: var(--k-ardosia);
+}
+
 table.bench td.compare span.na { color: var(--k-xisto); }
+
+table.bench tr.ahead td {
+  background: color-mix(in srgb, var(--k-oxido) 12%, var(--bg));
+}
+
+table.bench tr.ahead td:first-child {
+  box-shadow: inset 3px 0 0 var(--k-oxido);
+}
+
+p.bench-tally {
+  margin: 8px 0 22px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+p.bench-tally b { color: var(--k-oxido); font-weight: 500; }
 
 table.bench td.status {
   font-family: var(--f-mono);

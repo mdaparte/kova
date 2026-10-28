@@ -60,7 +60,7 @@ help:
 		'  seed         Oracle sample, emp indexes, and views into database db' \
 		'  indexes      index tour over the seeded emp collection' \
 		'  server-status  serverStatus counters' \
-		'  benchmark    time MQL and SQL on database benchmark, write the docs page' \
+		'  benchmark    time MQL and SQL five times on database benchmark, write the docs page' \
 		'  views        checks the views seed left on emp' \
 		'  security     users, roles, and authenticate' \
 		'  demos        server-status, views, then security' \
@@ -155,7 +155,7 @@ security:
 	mongosh --quiet "mongodb://127.0.0.1:$(if $(KOVA_PORT),$(KOVA_PORT),27018)/db" --file scripts/security.js
 
 # Times MQL and SQL on a server that is already listening. Drops and
-# recreates only the database `benchmark`, then writes the docs page.
+# Runs the pass five times, recreating only the database `benchmark`, then writes the means.
 # Asks whether to repeat the same steps on MongoDB (port 27017).
 #   make benchmark
 #   make benchmark KOVA_PORT=27019 BENCH_ROWS=1000 BENCH_LOOKUPS=100

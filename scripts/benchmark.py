@@ -2,7 +2,7 @@
 """Time a listening Kova and write the benchmark page.
 
 The server is already running. This drops and recreates only the database
-`benchmark`, then fills site/docs/benchmark.html from the timings.
+`benchmark` five times, then fills site/docs/benchmark.html from the means.
 
     make benchmark
     make benchmark KOVA_PORT=27019 BENCH_ROWS=1000 BENCH_LOOKUPS=100
@@ -12,6 +12,7 @@ import json
 import os
 import re
 import socket
+import statistics
 import subprocess
 import sys
 from datetime import datetime
@@ -47,6 +48,27 @@ def want_mongo():
         "This drops only the database named benchmark. [y/N] "
     )
     return answer.strip().lower() in ("y", "yes", "s", "sim")
+
+
+def repeat_count():
+    raw = os.environ.get("BENCH_REPEATS", "5").strip()
+    try:
+        count = int(raw)
+    except ValueError:
+        sys.exit("BENCH_REPEATS must be a whole number.")
+    if count < 1:
+        sys.exit("BENCH_REPEATS must be at least 1.")
+    return count
+
+
+def mean(values):
+    return statistics.fmean(values)
+
+
+def sample_stdev(values):
+    if len(values) < 2:
+        return 0.0
+    return statistics.stdev(values)
 
 
 def listening(number):
@@ -259,11 +281,23 @@ def per_second(rows, ms):
 
 
 def human_ms(ms):
+    ms = float(ms)
     if ms >= 10000:
         return f"{ms / 1000:.1f} s"
     if ms >= 1000:
         return f"{ms / 1000:.2f} s"
-    return f"{ms} ms"
+    nearest = round(ms)
+    if abs(ms - nearest) < 0.05:
+        return f"{nearest:.0f} ms"
+    return f"{ms:.1f} ms"
+
+
+def count_text(value):
+    number = float(value or 0)
+    nearest = round(number)
+    if abs(number - nearest) < 0.05:
+        return f"{nearest:,}"
+    return f"{number:,.1f}"
 
 
 def human_note(step):
@@ -291,14 +325,26 @@ TIPS = {
     "disk": "Free and total space on the system disk.",
     "vram": "Memory on the graphics card.",
     "result": "ok means the server finished the step. fail means it returned an error.",
-    "rows": "Documents or result rows counted for this step.",
-    "time": "Wall-clock time for the step, measured by the client.",
+    "rows": "Documents inserted, changed, deleted, or returned by this step.",
+    "time": (
+        "Mean wall-clock time of the passes, measured by the client from send to reply. "
+        "The smaller line is the sample standard deviation of those passes."
+    ),
     "rate": "Rows divided by the time. A step with no rows has no rate.",
-    "index": "Times this step used an index. The number is the change in indexLookups.",
-    "scan": "Collection scans this step started. The number is the change in collectionScans.",
-    "hit": "Buffer-pool pages this step served from memory.",
-    "miss": "Buffer-pool pages this step had to read because they were not cached.",
-    "wal": "Log records this step wrote.",
+    "index": (
+        "How many times this step chose an index. The number is the change in indexLookups. "
+        "One command that uses an index counts as 1, however many documents come back."
+    ),
+    "scan": (
+        "How many times this step started a collection scan. The number is the change in collectionScans. "
+        "One find that walks the collection counts as 1. The pages that walk reads are under Hit."
+    ),
+    "hit": (
+        "Kova only. Buffer-pool pages served from memory during the step. "
+        "Reading a collection once counts one hit per page, so a scan of 1 can show many hits."
+    ),
+    "miss": "Kova only. Buffer-pool pages read from disk because they were not cached.",
+    "wal": "Kova only. WAL records this step appended. Many documents can share one record.",
     "note": "Extra detail for the step.",
 }
 
@@ -311,8 +357,8 @@ def ask(key):
 
 
 def num_cell(value):
-    text = f"{value:,}"
-    tone = " zero" if value == 0 else ""
+    text = count_text(value)
+    tone = " zero" if not value else ""
     return f'<td class="num{tone}">{esc(text)}</td>'
 
 
@@ -343,10 +389,11 @@ def na_figure():
     return '<span class="peer na" title="not available"><b>Mongo</b>N/A</span>'
 
 
-def na_cell(text, zero):
+def na_cell(text, zero, extra=""):
     return (
         '<td class="num compare">'
         f"{figure(text, 'kova', 'zero' if zero else '')}"
+        f"{extra}"
         f"{na_figure()}"
         "</td>"
     )
@@ -372,14 +419,34 @@ def gap_text(kova_ms, mongo_ms):
     return milliseconds
 
 
-def timed(kova_ms, mongo_ms):
-    kova_pace, mongo_pace = pace(kova_ms, mongo_ms)
+def spread_line(stdev, samples):
+    if len(samples or []) < 2:
+        return ""
+    return span(f"± {human_ms(stdev)}", "spread")
+
+
+def timed(kova_ms, mongo_ms, kova_stdev, mongo_stdev, kova_samples, mongo_samples, similar):
+    if similar:
+        kova_pace, mongo_pace = "", ""
+        gap = "similar"
+    else:
+        kova_pace, mongo_pace = pace(kova_ms, mongo_ms)
+        gap = gap_text(kova_ms, mongo_ms)
     return (
         '<td class="num compare">'
         f"{figure(human_ms(kova_ms), 'kova', kova_pace, 'zero' if kova_ms == 0 else '')}"
+        f"{spread_line(kova_stdev, kova_samples)}"
         f"{figure(human_ms(mongo_ms), 'mongo', 'peer', mongo_pace, 'zero' if mongo_ms == 0 else '')}"
-        f"{span(gap_text(kova_ms, mongo_ms), 'gap')}"
+        f"{spread_line(mongo_stdev, mongo_samples)}"
+        f"{span(gap, 'gap', 'similar' if similar else '')}"
         "</td>"
+    )
+
+
+def time_only(ms, stdev, samples):
+    return (
+        f'<td class="num">{esc(human_ms(ms))}'
+        f"{spread_line(stdev, samples)}</td>"
     )
 
 
@@ -394,9 +461,40 @@ def peer_of(mongo_steps, step):
     return {
         "na": False,
         "ms": other.get("ms") or 0,
+        "stdev": other.get("stdev") or 0,
+        "samples": other.get("samples") or [],
         "index": (counters.get("keysExamined") or 0) if measured else None,
         "scan": (counters.get("collectionScans") or 0) if measured else None,
     }
+
+
+def noise(step, peer):
+    """Absolute mean difference, and the sample standard deviation of the paired differences."""
+    kova = [float(value) for value in (step.get("samples") or [])]
+    mongo = [float(value) for value in (peer.get("samples") or [])]
+    count = min(len(kova), len(mongo))
+    if count >= 2:
+        diffs = [kova[index] - mongo[index] for index in range(count)]
+        return abs(mean(diffs)), sample_stdev(diffs)
+    diff = abs(float(step.get("ms") or 0) - float(peer.get("ms") or 0))
+    limit = max(float(step.get("stdev") or 0), float(peer.get("stdev") or 0))
+    return diff, limit
+
+
+def verdict(step, peer):
+    """Who was faster. `similar` means the difference stayed within the standard deviation."""
+    if peer is None:
+        return None
+    if peer.get("na"):
+        return "aside"
+    if not step.get("ok"):
+        return "unfinished"
+    diff, limit = noise(step, peer)
+    if diff <= limit:
+        return "similar"
+    if (step.get("ms") or 0) < (peer.get("ms") or 0):
+        return "kova"
+    return "mongo"
 
 
 KNOWN_OPS = {
@@ -488,26 +586,38 @@ def step_row(step, report, mongo_steps):
     else:
         name_cell = f"<td>{name}</td>"
     peer = peer_of(mongo_steps, step)
+    kind = verdict(step, peer)
+    stdev = step.get("stdev") or 0
+    samples = step.get("samples") or []
     index = counters.get("indexLookups") or 0
     scan = counters.get("collectionScans") or 0
     if peer and peer.get("na"):
-        time_cell = na_cell(human_ms(ms), ms == 0)
-        index_cell = na_cell(f"{index:,}", index == 0)
-        scan_cell = na_cell(f"{scan:,}", scan == 0)
+        time_cell = na_cell(human_ms(ms), ms == 0, spread_line(stdev, samples))
+        index_cell = na_cell(count_text(index), not index)
+        scan_cell = na_cell(count_text(scan), not scan)
     elif peer:
-        time_cell = timed(ms, peer["ms"])
+        time_cell = timed(
+            ms,
+            peer["ms"],
+            stdev,
+            peer.get("stdev") or 0,
+            samples,
+            peer.get("samples") or [],
+            kind == "similar",
+        )
         if peer["index"] is None:
-            index_cell = na_cell(f"{index:,}", index == 0)
-            scan_cell = na_cell(f"{scan:,}", scan == 0)
+            index_cell = na_cell(count_text(index), not index)
+            scan_cell = na_cell(count_text(scan), not scan)
         else:
-            index_cell = paired(f"{index:,}", f"{peer['index']:,}", index == 0, peer["index"] == 0)
-            scan_cell = paired(f"{scan:,}", f"{peer['scan']:,}", scan == 0, peer["scan"] == 0)
+            index_cell = paired(count_text(index), count_text(peer["index"]), not index, not peer["index"])
+            scan_cell = paired(count_text(scan), count_text(peer["scan"]), not scan, not peer["scan"])
     else:
-        time_cell = f'<td class="num">{esc(human_ms(ms))}</td>'
+        time_cell = time_only(ms, stdev, samples)
         index_cell = num_cell(index)
         scan_cell = num_cell(scan)
+    row = ' class="ahead"' if kind == "kova" else ""
     return (
-        "<tr>"
+        f"<tr{row}>"
         f"{name_cell}"
         f'<td class="status {status}">{status}</td>'
         f"{num_cell(rows)}"
@@ -523,16 +633,33 @@ def step_row(step, report, mongo_steps):
     )
 
 
+def order_missing_last(steps, mongo_steps):
+    """Keep steps MongoDB ran first. Steps it does not have stay in their own order at the end."""
+    if not mongo_steps:
+        return steps
+    ran = []
+    missing = []
+    for step in steps:
+        if verdict(step, peer_of(mongo_steps, step)) == "aside":
+            missing.append(step)
+        else:
+            ran.append(step)
+    return ran + missing
+
+
 def times_table(steps, report, mongo_steps):
+    time_tip = "time-pair" if mongo_steps else "time"
+    index_tip = "index-pair" if mongo_steps else "index"
+    scan_tip = "scan-pair" if mongo_steps else "scan"
     head = (
         "<tr>"
         f"<th>Operation {ask('op')}</th>"
         f"<th>Result {ask('result')}</th>"
         f"<th>Rows {ask('rows')}</th>"
-        f"<th>Time {ask('time')}</th>"
+        f"<th>Time {ask(time_tip)}</th>"
         f"<th>Rows/s {ask('rate')}</th>"
-        f"<th>Index {ask('index')}</th>"
-        f"<th>Scan {ask('scan')}</th>"
+        f"<th>Index {ask(index_tip)}</th>"
+        f"<th>Scan {ask(scan_tip)}</th>"
         f"<th>Hit {ask('hit')}</th>"
         f"<th>Miss {ask('miss')}</th>"
         f"<th>WAL {ask('wal')}</th>"
@@ -540,29 +667,83 @@ def times_table(steps, report, mongo_steps):
         "</tr>"
     )
     body = "".join(step_row(step, report, mongo_steps) for step in steps)
-    return f'<div class="bench-scroll"><table class="grid bench"><thead>{head}</thead><tbody>{body}</tbody></table></div>'
+    table = (
+        f'<div class="bench-scroll"><table class="grid bench">'
+        f"<thead>{head}</thead><tbody>{body}</tbody></table></div>"
+    )
+    return table + tally_line(steps, mongo_steps)
+
+
+def count_steps(count):
+    noun = "step" if count == 1 else "steps"
+    return f"{count} {noun}"
+
+
+def tally_line(steps, mongo_steps):
+    if not mongo_steps:
+        return ""
+    counts = {"kova": 0, "mongo": 0, "similar": 0, "aside": 0, "unfinished": 0}
+    for step in steps:
+        kind = verdict(step, peer_of(mongo_steps, step))
+        if kind:
+            counts[kind] += 1
+    aside = counts["aside"]
+    if aside == 1:
+        missing = "1 step could not be compared, because MongoDB does not have that feature."
+    else:
+        missing = (
+            f"{aside} steps could not be compared, because MongoDB does not have that feature."
+        )
+    parts = [
+        f"<b>Kova</b> was faster in {count_steps(counts['kova'])}.",
+        f"MongoDB was faster in {count_steps(counts['mongo'])}.",
+    ]
+    similar = counts["similar"]
+    if similar == 1:
+        parts.append(
+            "1 step was similar: the difference stayed within the standard deviation."
+        )
+    elif similar:
+        parts.append(
+            f"{similar} steps were similar: the difference stayed within the standard deviation."
+        )
+    parts.append(missing)
+    if counts["unfinished"]:
+        parts.append(
+            f"Kova did not finish {count_steps(counts['unfinished'])} that MongoDB ran."
+        )
+    return f'<p class="bench-tally">{" ".join(parts)}</p>'
 
 
 def glossary(compared):
     tips = dict(TIPS)
     if compared:
-        tips["time"] = (
-            "Wall-clock time measured by the client. Each figure is labeled Kova or Mongo. "
-            "The third line is Kova minus Mongo in milliseconds, then Kova's time divided by Mongo's. "
-            "An oxide mark sits beside the faster time. "
+        tips["time-pair"] = (
+            "Mean wall-clock time of the passes. Each figure is labeled Kova or Mongo. "
+            "The smaller line under a time is the sample standard deviation of that engine. "
+            "The last line is Kova minus Mongo, then Kova's mean divided by Mongo's. "
+            "That line says similar when the absolute difference of the means is within "
+            "the standard deviation of the paired differences, and neither side wins. "
+            "An oxide mark sits beside the faster time, and the whole row is tinted, "
+            "only when Kova was faster by more than that. "
             "N/A means not available: MongoDB did not run that step."
         )
-        tips["index"] = (
-            "The Kova figure is indexLookups. The Mongo figure is index keys examined. "
-            "N/A means not available."
+        tips["index-pair"] = (
+            "Kova counts indexLookups: one command that chooses an index is 1, however many documents come back. "
+            "Mongo counts keys examined: a range that walks 675 index keys is 675. "
+            "The two figures count different events. "
+            "N/A means not available: MongoDB did not report that counter."
         )
-        tips["scan"] = (
-            "Collection scans started during the step, labeled Kova and Mongo. "
-            "N/A means not available."
+        tips["scan-pair"] = (
+            "Collection scans started during the step, on Kova and on Mongo. "
+            "One find that walks the collection is 1. "
+            "The pages that walk reads are under Hit, and Hit is Kova only. "
+            "N/A means not available: MongoDB did not report that counter."
         )
         tips["mongo"] = (
-            "The same steps on a MongoDB that was already listening. "
-            "Only the database named benchmark is dropped there."
+            "The same MQL steps on a MongoDB that was already listening. "
+            "Only the database named benchmark is dropped there. "
+            "The SQL table is Kova only."
         )
     items = "".join(f'<p id="tip-{key}">{esc(text)}</p>' for key, text in tips.items())
     return f'<div id="bench-glossary" hidden>{items}</div>'
@@ -610,6 +791,28 @@ def io_delta(before, after, key):
     return max(0, end - start)
 
 
+def method_note(report):
+    repeats = report.get("repeats") or 1
+    if repeats < 2:
+        return (
+            "<p>This run is one pass, so the standard deviation is zero and only equal times are similar. "
+            "The benchmark repeats each step five times. The time on the next run is the mean. "
+            "A step is similar when the absolute difference of the two means is less than or equal to "
+            "the sample standard deviation of the paired differences, and neither side wins.</p>"
+        )
+    return (
+        f"<p>This run repeated each step {repeats} times. "
+        "Each pass drops and recreates the database <code>benchmark</code>. "
+        "The time is the mean of those passes. "
+        "The smaller line is the sample standard deviation: the square root of the sum of squared "
+        "distances from the mean, after that sum is divided by one less than the number of passes. "
+        "A step is similar when MongoDB also finished it and the absolute difference of the two means "
+        "is less than or equal to the standard deviation of the paired differences, "
+        "Kova minus Mongo on the same pass. A similar step is not a win. "
+        "A tinted row is a step Kova won by more than that.</p>"
+    )
+
+
 def results_html(report):
     host = report["host"]
     before = host["before"]
@@ -624,7 +827,10 @@ def results_html(report):
         steps = [step for step in report["steps"] if step.get("lang") == lang]
         if not steps:
             continue
-        groups.append(f"<h3>{title}</h3>{times_table(steps, report, mongo_steps)}")
+        peers = mongo_steps if lang == "mql" else {}
+        if lang == "mql":
+            steps = order_missing_last(steps, peers)
+        groups.append(f"<h3>{title}</h3>{times_table(steps, report, peers)}")
     read_cell = esc(human_bytes(disk_read)) if disk_read is not None else "unavailable"
     write_cell = esc(human_bytes(disk_write)) if disk_write is not None else "unavailable"
     machine = host.get("machine") or machine_facts()
@@ -640,12 +846,21 @@ def results_html(report):
         )
         compare_note = (
             "<p>Each paired cell names Kova and Mongo. "
-            "Under the two times, the difference is Kova minus Mongo in milliseconds, "
-            "then how many times Kova's time is Mongo's. "
+            "The last line is Kova minus Mongo in milliseconds, "
+            "then how many times Kova's mean is Mongo's. "
             "An oxide mark sits beside the faster time. "
-            "N/A means not available: MongoDB did not run that step. "
-            "Index is indexLookups on Kova and keys examined on Mongo. "
-            "Scan is a collection scan on both.</p>"
+            "The whole row is tinted when Kova was faster by more than the standard deviation. "
+            "The last line says similar when the difference of the means stayed within "
+            "the standard deviation of the paired differences, and neither side wins. "
+            "Under the MQL table, the count is how many steps Kova won, how many MongoDB won, "
+            "how many were similar, and how many could not be compared because MongoDB does not have that feature. "
+            "Those steps are listed last. "
+            "The SQL table lists Kova only. "
+            "N/A means not available: MongoDB did not run that step, or did not report that counter. "
+            "Index on Kova is how many times the step chose an index. One range is 1. "
+            "Index on Mongo is how many index keys the step walked. "
+            "Scan is how many collection scans the step started, and one walk of the collection is 1. "
+            "Hit is Kova only: pages read from the buffer pool. A scan of 1 can show many hits, one per page.</p>"
         )
     return f"""<h2 id="run-facts">This run</h2>
 <table class="grid bench-memory">
@@ -674,10 +889,92 @@ def results_html(report):
   </tbody>
 </table>
 <h2 id="times">Times</h2>
-{compare_note}{''.join(groups)}
+{method_note(report)}{compare_note}{''.join(groups)}
 {glossary(bool(mongo_steps))}
 <p>An operation name opens the command. A question mark explains that column. A second point lookup runs after the first has already read the pages.</p>
 """
+
+
+def average_steps(reports):
+    expected = len(reports)
+    grouped = {}
+    order = []
+    for report in reports:
+        for step in report.get("steps") or []:
+            key = (step.get("lang"), step.get("name"))
+            if key not in grouped:
+                grouped[key] = []
+                order.append(key)
+            grouped[key].append(step)
+    merged = []
+    for key in order:
+        group = grouped[key]
+        passed = [step for step in group if step.get("ok")]
+        basis = passed or group
+        samples = [float(step.get("ms") or 0) for step in passed]
+        if not samples:
+            samples = [float(step.get("ms") or 0) for step in group]
+        names = []
+        seen = set()
+        for step in basis:
+            for name in step.get("counters") or {}:
+                if name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        counters = {
+            name: mean([(step.get("counters") or {}).get(name) or 0 for step in basis])
+            for name in names
+        }
+        failed = expected - len(passed)
+        note = next((step.get("note") for step in reversed(passed) if step.get("note")), "")
+        error = ""
+        if failed:
+            broken = next((step for step in group if not step.get("ok")), group[-1])
+            error = broken.get("error") or broken.get("note") or ""
+            extra = f"{failed} of {expected} passes failed."
+            note = f"{note} {extra}".strip()
+        op = next((step.get("op") for step in reversed(group) if step.get("op")), "")
+        merged.append({
+            "lang": key[0],
+            "name": key[1],
+            "op": op,
+            "ms": mean(samples),
+            "stdev": sample_stdev(samples) if len(passed) >= 2 else 0.0,
+            "samples": samples,
+            "rows": mean([float(step.get("rows") or 0) for step in basis]),
+            "ok": len(passed) == expected and expected > 0,
+            "error": error,
+            "note": note,
+            "counters": counters,
+        })
+    return merged
+
+
+def collect_passes(number, times):
+    reports = []
+    for index in range(1, times + 1):
+        print(f"pass {index}/{times} on 127.0.0.1:{number}", flush=True)
+        _, report = run_mongosh(number)
+        if report is None:
+            sys.exit(f"pass {index} on 127.0.0.1:{number} did not return a benchmark result.")
+        if reports:
+            have = len(report.get("steps") or [])
+            want = len(reports[0].get("steps") or [])
+            if have != want:
+                sys.exit(
+                    f"pass {index} on 127.0.0.1:{number} stopped early "
+                    f"({have} steps, expected {want})."
+                )
+        reports.append(report)
+    return reports
+
+
+def combine(reports):
+    report = dict(reports[-1])
+    report["steps"] = average_steps(reports)
+    report["repeats"] = len(reports)
+    report["ok"] = all(step.get("ok") for step in report["steps"])
+    return report
 
 
 def write_page(html):
@@ -705,22 +1002,20 @@ def main():
     pid = process_for_port(number)
     if pid is None:
         sys.exit(f"port {number} is open, and this user cannot see which process owns it.")
+    times = repeat_count()
     before = sample(pid)
-    print(f"Kova 127.0.0.1:{number}", flush=True)
-    code, report = run_mongosh(number)
+    print(f"Kova 127.0.0.1:{number}, {times} passes", flush=True)
+    report = combine(collect_passes(number, times))
     after = sample(pid)
-    if report is None:
-        sys.exit(code or 1)
     report["host"] = host_block(pid, before, after)
     if compare:
-        print(f"MongoDB 127.0.0.1:{other}", flush=True)
-        _, mongo_report = run_mongosh(other)
-        if mongo_report is None:
-            sys.exit(f"MongoDB on 127.0.0.1:{other} did not return a benchmark result.")
+        print(f"MongoDB 127.0.0.1:{other}, {times} passes", flush=True)
+        mongo_report = combine(collect_passes(other, times))
         report["mongo"] = {
             "port": other,
             "version": mongo_report.get("engine") or "",
             "steps": mongo_report.get("steps") or [],
+            "repeats": times,
         }
     documents = {
         "database": "benchmark",
