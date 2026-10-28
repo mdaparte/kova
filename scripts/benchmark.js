@@ -62,11 +62,26 @@ function command(spec) {
     }
 }
 
+function asCount(value) {
+    if (value == null) return 0;
+    if (typeof value === "number") return value;
+    if (typeof value.toNumber === "function") return value.toNumber();
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+}
+
 function snap() {
     const reply = command({ serverStatus: 1 });
     const out = {};
     for (const key of COUNTERS) {
-        out[key] = Number(reply[key] || 0);
+        out[key] = asCount(reply[key]);
+    }
+    const exec = reply.metrics && reply.metrics.queryExecutor;
+    if (exec && exec.scanned != null) {
+        out.keysExamined = asCount(exec.scanned);
+        if (reply.collectionScans == null && exec.collectionScans && exec.collectionScans.total != null) {
+            out.collectionScans = asCount(exec.collectionScans.total);
+        }
     }
     return out;
 }
@@ -85,6 +100,9 @@ function run(lang, name, fn) {
     const counters = {};
     for (const key of COUNTERS) {
         counters[key] = after[key] - before[key];
+    }
+    if (Object.prototype.hasOwnProperty.call(before, "keysExamined")) {
+        counters.keysExamined = after.keysExamined - before.keysExamined;
     }
     const step = {
         lang: lang,
@@ -569,8 +587,16 @@ function numbers(reply) {
     return out;
 }
 
+let engine = "";
+try {
+    engine = db.version();
+} catch (err) {
+    engine = "";
+}
+
 const report = {
     ok: steps.every((step) => step.ok),
+    engine: engine,
     database: "benchmark",
     rows: rows,
     lookups: lookups,

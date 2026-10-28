@@ -601,6 +601,58 @@ table.bench td.num, table.bench-memory td.num {
 
 table.bench td.num.zero { color: var(--k-xisto); }
 
+table.bench td.compare span {
+  display: flex;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 6px;
+}
+
+table.bench td.compare b {
+  font-weight: 500;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--k-oxido);
+}
+
+table.bench td.compare span.peer {
+  color: var(--k-xisto);
+  font-size: 11px;
+}
+
+table.bench td.compare span.peer b { color: var(--k-ardosia); }
+
+table.bench td.compare span.fast::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: var(--k-oxido);
+  border-radius: 1px;
+  flex: none;
+  align-self: center;
+}
+
+table.bench td.compare span.fast { color: var(--fg); }
+
+table.bench td.compare span.fast b,
+table.bench td.compare span.peer.fast b { color: var(--k-oxido); }
+
+table.bench td.compare span.slow,
+table.bench td.compare span.slow b { color: var(--k-xisto); }
+
+table.bench td.compare span.zero { color: var(--k-xisto); }
+
+table.bench td.compare span.gap {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  text-align: right;
+  color: var(--k-ardosia);
+}
+
+table.bench td.compare span.na { color: var(--k-xisto); }
+
 table.bench td.status {
   font-family: var(--f-mono);
   font-size: 11px;

@@ -78,7 +78,8 @@ help:
 		'  make restore DUMP=pg.sql  database db, port 27018' \
 		'  make dump KOVA_DB=shop KOVA_PORT=27019 DUMP=shop.kdmp' \
 		'  make benchmark            database benchmark, port 27018' \
-		'  make benchmark KOVA_PORT=27019 BENCH_ROWS=1000 BENCH_LOOKUPS=100'
+		'  make benchmark KOVA_PORT=27019 BENCH_ROWS=1000 BENCH_LOOKUPS=100' \
+		'  BENCH_MONGO=1 make benchmark   also time MongoDB on port 27017'
 
 build:
 	$(CARGO) build
@@ -155,8 +156,10 @@ security:
 
 # Times MQL and SQL on a server that is already listening. Drops and
 # recreates only the database `benchmark`, then writes the docs page.
+# Asks whether to repeat the same steps on MongoDB (port 27017).
 #   make benchmark
 #   make benchmark KOVA_PORT=27019 BENCH_ROWS=1000 BENCH_LOOKUPS=100
+#   BENCH_MONGO=1 make benchmark
 benchmark:
 	python3 scripts/benchmark.py
 
