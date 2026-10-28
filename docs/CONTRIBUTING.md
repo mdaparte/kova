@@ -219,6 +219,9 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   can use more than one core, the router merges `$group` and equality
   `$lookup`, adding a shard moves documents onto the new arc, and one
   partition can commit more than one collection in one log record. ✅ Complete.
+- **Phase 29 - Steps behind MongoDB:** the five-pass benchmark steps whose
+  mean is slower than MongoDB by more than the standard deviation of the
+  paired differences. Similar steps stay as they are. ⚪ Planned.
 
 ## 6. License
 
