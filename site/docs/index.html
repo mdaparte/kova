@@ -41,9 +41,9 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <div><h2>Start</h2><a href="/docs" class="here">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
-<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a><a href="/docs/feed">Feed</a></div>
 <div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
-<div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
+
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
@@ -87,7 +87,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 
 <h2 id="one-process">One process, until you ask for more</h2>
 <p>The default <code>kova.toml</code> is one writable process. It stores every document you insert. Security is off, so a client connects and sends commands. Turn security on when you want a user and a password. Add a replica set when you want copies of the same data. Add shards when one machine cannot hold the collection or the writes.</p>
-<div class="note later"><p>A feed of committed writes, published to <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, is planned. It is off. The shape of the record is on the <a href="/docs/feed">Feed</a> page. Today a program reads with <code>find</code>, or tails <code>local.oplog.rs</code> on a replica set.</p></div>
+<div class="note"><p>A feed of committed writes goes to <a href="https://iggy.apache.org/docs/">Apache Iggy</a>. It is off unless <code>[feed]</code> is enabled. The shape of the record is on the <a href="/docs/feed">Feed</a> page.</p></div>
 
 <h2 id="where-the-files-are">Where the files are</h2>
 <table class="grid">

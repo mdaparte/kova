@@ -123,6 +123,8 @@ pub struct PartitionWorker {
     storage: StorageConfig,
     /// Disk Tantivy indexes for views with `kova.inverted`.
     inverted: std::collections::HashMap<String, crate::search::DiskIndex>,
+    /// Committed changes to publish. `None` when the feed is off.
+    feed: Option<std::sync::Arc<crate::feed::Feed>>,
 }
 
 impl PartitionWorker {
@@ -132,6 +134,7 @@ impl PartitionWorker {
         partition_count: usize,
         receiver: Receiver<CommandEnvelope>,
         storage: StorageConfig,
+        feed: Option<std::sync::Arc<crate::feed::Feed>>,
     ) -> Self {
         let mut engine = StorageEngine::open(id, &storage).unwrap_or_else(|err| {
             abort_storage(id, err);
@@ -161,6 +164,7 @@ impl PartitionWorker {
             data_dir,
             storage,
             inverted: std::collections::HashMap::new(),
+            feed,
         };
         if let Err(err) = worker.recover(pending) {
             abort_storage(id, err);
@@ -1364,6 +1368,19 @@ impl PartitionWorker {
             }
         }
         self.versions.gc(self.transactions.oldest_snapshot());
+        self.emit(
+            &writes
+                .iter()
+                .map(|write| CommittedImage {
+                    collection: write.collection.clone(),
+                    id: write.id.clone(),
+                    previous: write.page_previous.clone(),
+                    after: write.after.clone(),
+                    deleted: write.after.is_none(),
+                })
+                .collect::<Vec<_>>(),
+            lsn,
+        );
         if self.engine.should_checkpoint() {
             self.write_checkpoint()?;
         }
@@ -1984,6 +2001,66 @@ impl PartitionWorker {
             );
         }
         self.versions.gc(self.transactions.oldest_snapshot());
+        self.emit(images, lsn);
+    }
+
+    /// Publishes one record per document. Catalog pages stay off the feed.
+    /// A missing feed, or a follower, publishes nothing and does not fail
+    /// the write.
+    fn emit(&self, images: &[CommittedImage], lsn: u64) {
+        let Some(feed) = &self.feed else {
+            return;
+        };
+        let records = images
+            .iter()
+            .filter(|image| !is_catalog(&image.collection))
+            .map(|image| {
+                let (op, before, after) = if image.deleted || image.after.is_none() {
+                    (
+                        "delete",
+                        image
+                            .previous
+                            .as_ref()
+                            .map(crate::feed::document_json)
+                            .unwrap_or_else(crate::feed::empty_document),
+                        crate::feed::empty_document(),
+                    )
+                } else if image.previous.is_none() {
+                    (
+                        "insert",
+                        crate::feed::empty_document(),
+                        image
+                            .after
+                            .as_ref()
+                            .map(crate::feed::document_json)
+                            .unwrap_or_else(crate::feed::empty_document),
+                    )
+                } else {
+                    (
+                        "update",
+                        image
+                            .previous
+                            .as_ref()
+                            .map(crate::feed::document_json)
+                            .unwrap_or_else(crate::feed::empty_document),
+                        image
+                            .after
+                            .as_ref()
+                            .map(crate::feed::document_json)
+                            .unwrap_or_else(crate::feed::empty_document),
+                    )
+                };
+                crate::feed::Record::new(
+                    op,
+                    image.collection.clone(),
+                    image.id.clone(),
+                    before,
+                    after,
+                    lsn,
+                )
+            })
+            .collect();
+        feed.submit(records);
     }
 
     /// Flushes dirty pages and truncates the WAL they cover.
@@ -3405,6 +3482,15 @@ impl PartitionRouter {
 
     /// Spawns workers that persist under `storage.data_dir`.
     pub fn with_storage(partition_count: usize, storage: StorageConfig) -> Self {
+        Self::opening(partition_count, storage, None)
+    }
+
+    /// Spawns workers that publish committed writes to `feed`.
+    pub fn opening(
+        partition_count: usize,
+        storage: StorageConfig,
+        feed: Option<std::sync::Arc<crate::feed::Feed>>,
+    ) -> Self {
         assert!(partition_count > 0, "at least one partition is required");
 
         let scratch = if storage.ephemeral {
@@ -3420,11 +3506,12 @@ impl PartitionRouter {
             let (tx, rx) = unbounded();
             senders.push(tx);
             let storage = storage.clone();
+            let feed = feed.clone();
 
             let handle = std::thread::Builder::new()
                 .name(format!("kova-partition-{}", id))
                 .spawn(move || {
-                    let mut worker = PartitionWorker::new(id, partition_count, rx, storage);
+                    let mut worker = PartitionWorker::new(id, partition_count, rx, storage, feed);
                     worker.run();
                 })
                 .expect("failed to spawn partition worker thread");
@@ -7129,5 +7216,129 @@ mod tests {
                 .expect("an id"),
             other => panic!("expected the orders, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn the_feed_records_an_update_and_leaves_the_empty_sides() {
+        let feed = crate::feed::Feed::memory();
+        let router = PartitionRouter::opening(1, StorageConfig::ephemeral(), Some(feed.clone()));
+        let collection = "db.C1";
+        dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: collection.into(),
+                documents: vec![doc! { "_id": "c1", "A": 1i32 }],
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::Update {
+                collection: collection.into(),
+                filter: doc! { "_id": "c1" },
+                update: doc! { "$set": { "A": 2i32 } },
+                multi: false,
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::Delete {
+                collection: collection.into(),
+                filter: doc! { "_id": "c1" },
+                limit: 1,
+            },
+        )
+        .await;
+        let records = feed.records();
+        assert_eq!(records.len(), 3, "{records:?}");
+        assert_eq!(records[0].op, "insert");
+        assert_eq!(records[0].ns, "db.C1");
+        assert_eq!(records[0].id, "c1");
+        assert_eq!(records[0].before, serde_json::json!({}));
+        assert_eq!(records[0].after["A"], 1);
+        assert_eq!(records[1].op, "update");
+        assert_eq!(records[1].before["A"], 1);
+        assert_eq!(records[1].after["A"], 2);
+        assert_eq!(records[2].op, "delete");
+        assert_eq!(records[2].before["A"], 2);
+        assert_eq!(records[2].after, serde_json::json!({}));
+        assert_ne!(records[0].lsn, 0);
+
+        let before = feed.records().len();
+        let txn = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: txn,
+                inner: Box::new(PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "_id": "gone", "A": 9i32 }],
+                }),
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::AbortTransaction {
+                collection: "db.emp".into(),
+                txn_id: txn,
+            },
+        )
+        .await;
+        assert_eq!(feed.records().len(), before);
+
+        let txn = txn_id(dispatch(&router, begin("snapshot", None)).await);
+        dispatch(
+            &router,
+            PartitionCommand::Transactional {
+                txn_id: txn,
+                inner: Box::new(PartitionCommand::Insert {
+                    collection: "db.emp".into(),
+                    documents: vec![doc! { "_id": "kept", "A": 3i32 }],
+                }),
+            },
+        )
+        .await;
+        dispatch(
+            &router,
+            PartitionCommand::CommitTransaction {
+                collection: "db.emp".into(),
+                txn_id: txn,
+            },
+        )
+        .await;
+        let records = feed.records();
+        assert_eq!(records.len(), before + 1, "{records:?}");
+        let committed = records.last().expect("commit record");
+        assert_eq!(committed.op, "insert");
+        assert_eq!(committed.ns, "db.emp");
+        assert_eq!(committed.id, "kept");
+        assert_eq!(committed.before, serde_json::json!({}));
+        assert_eq!(committed.after["A"], 3);
+    }
+
+    #[tokio::test]
+    async fn an_insert_succeeds_when_the_feed_cannot_reach_iggy() {
+        let mut config = crate::config::Config::default();
+        config.feed.enabled = true;
+        config.feed.address = "127.0.0.1:1".into();
+        let feed = crate::feed::open(&config).expect("feed on");
+        feed.arm_without_connection(true);
+        let router = PartitionRouter::opening(1, StorageConfig::ephemeral(), Some(feed.clone()));
+        let result = dispatch(
+            &router,
+            PartitionCommand::Insert {
+                collection: "db.C1".into(),
+                documents: vec![doc! { "_id": "c1", "A": 1i32 }],
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, PartitionResult::Inserted { inserted_count: 1 }),
+            "{result:?}"
+        );
+        assert_eq!(feed.accepted(), 1);
+        assert_eq!(crate::feed::connections(), 0);
     }
 }

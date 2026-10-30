@@ -38,3 +38,4 @@ openraft = { version = "0.9", default-features = false, features = ["serde", "st
 zstd = "0.13"
 argon2 = "0.5"
 aes-gcm = "0.10"
+iggy = "0.7"

@@ -10,7 +10,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>Feed - KOVA</title>
-  <meta name="description" content="Planned. A committed write will publish one JSON record to Apache Iggy. The condition stays in the listener.">
+  <meta name="description" content="A committed write publishes one JSON record to Apache Iggy. The condition stays in the listener. Off unless enabled.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
@@ -41,18 +41,16 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
-<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a><a href="/docs/feed" class="here">Feed</a></div>
 <div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
-<div><h2>Later</h2><a href="/docs/feed" class="here">Feed <span class="tag">Planned</span></a></div>
+
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
       <h1>Feed</h1>
-      <p class="lede">Planned. A committed write will publish one JSON record to Apache Iggy. The condition stays in the listener.</p>
-      
-<div class="note later"><p>This is not in the server yet. With the section absent, a write opens no extra connection and the insert path stays as it is. The rest of this page is the shape that will land, so a listener can be designed against it.</p></div>
-<p>A program that wants to react to a write will connect to a feed. It will not open a MongoDB driver, tail a collection, or read the oplog for that reaction. Kova will publish what happened. The listener decides what to do.</p>
-<p>The sidecar is <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, a separate process. Kova will be a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client, or receives the same JSON over HTTP and applies its own condition. Kova will not embed the Iggy server. Iggy's own documentation is the guide to streams, topics, offsets, and the SDKs.</p>
+      <p class="lede">A committed write publishes one JSON record to Apache Iggy. The condition stays in the listener. Off unless enabled.</p>
+<p>A program that wants to react to a write connects to a feed. It does not open a MongoDB driver, tail a collection, or read the oplog for that reaction. Kova publishes what happened. The listener decides what to do.</p>
+<p>The sidecar is <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, a separate process. Kova is a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client, or receives the same JSON over HTTP and applies its own condition. Kova does not start the Iggy server. Iggy's own documentation is the guide to streams, topics, offsets, and the SDKs.</p>
 
 <h2 id="config">The switch</h2>
 <div class="ex">
@@ -65,7 +63,7 @@ password = "iggy"
 stream = "kova"
 topic = "changes"</code></pre>
 </div>
-<p><code>enabled</code> false, or a missing section, publishes nothing. The username and password in that sketch are the sample Iggy root. They are not a default you should expose.</p>
+<p><code>enabled</code> false, or a missing section, publishes nothing and opens no connection. An empty username connects without credentials. The username and password in that sketch are the sample Iggy root. They are not a default you should expose. The address, stream, and topic in the sketch are the defaults.</p>
 
 <h2 id="record">The record</h2>
 <p>After a committed insert, update, or delete, the process that applied the write publishes one JSON record to stream <code>kova</code>, topic <code>changes</code>:</p>
@@ -97,7 +95,7 @@ topic = "changes"</code></pre>
     <tr><td><code>lsn</code></td><td>The log position of the write. Together with <code>ns</code> and <code>id</code>, it identifies a repeat.</td></tr>
   </tbody>
 </table>
-<p>A listener that wants “<code>qty</code> on <code>orders</code> changed from 1 to 2” compares <code>before.qty</code> and <code>after.qty</code>. Another listener on the same feed can watch another collection. Kova will not store that rule.</p>
+<p>A listener that wants <code>qty</code> on <code>orders</code> to have changed from 1 to 2 compares <code>before.qty</code> and <code>after.qty</code>. Another listener on the same feed can watch another collection. Kova does not store that rule.</p>
 
 <h2 id="who">Who publishes</h2>
 <ul>
@@ -105,8 +103,8 @@ topic = "changes"</code></pre>
   <li>A shard router forwards the command and does not publish it. The shard that stored the document publishes.</li>
   <li>A committed transaction publishes one record per document after commit. An abort publishes nothing.</li>
 </ul>
-<p>If Iggy is down, the database write still stands. The publisher retries. The same write can arrive twice. The feed is not a second log, and it does not roll a write back.</p>
-<p>Until this lands, read with <code>find</code>, or tail <code>local.oplog.rs</code> on a replica set. The oplog is how members catch up. It is not a public change feed with <code>before</code> and <code>after</code>.</p>
+<p>If Iggy is down, the database write still stands. The publisher retries. The same write can arrive twice, with the same <code>ns</code>, <code>id</code>, and <code>lsn</code>. The feed is not a second log, and it does not roll a write back.</p>
+<p>The oplog is how replica set members catch up. It is not this feed.</p>
 
       <nav class="pager"><a href="/docs/sharding"><span>Previous</span>Sharding</a></nav>
     </article>

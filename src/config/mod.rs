@@ -109,6 +109,8 @@ pub struct Config {
     pub sharding: ShardingConfig,
     /// Users, roles, and the optional encryption key (Phase 13).
     pub security: SecurityConfig,
+    /// Change feed. Absent or `enabled = false` publishes nothing.
+    pub feed: FeedConfig,
 }
 
 /// Full-text search configuration.
@@ -139,6 +141,7 @@ impl Default for Config {
             replication: ReplicationConfig::default(),
             sharding: ShardingConfig::default(),
             security: SecurityConfig::default(),
+            feed: FeedConfig::default(),
         }
     }
 }
@@ -164,6 +167,94 @@ impl Default for SecurityConfig {
             encryption_key: String::new(),
         }
     }
+}
+
+fn default_feed_address() -> String {
+    "127.0.0.1:8090".into()
+}
+
+fn default_feed_stream() -> String {
+    "kova".into()
+}
+
+fn default_feed_topic() -> String {
+    "changes".into()
+}
+
+/// Publishes one JSON record after a committed insert, update, or delete.
+///
+/// `enabled = false` (the default) opens no connection. Iggy is a
+/// separate process. Kova does not start it.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FeedConfig {
+    pub enabled: bool,
+    #[serde(default = "default_feed_address")]
+    pub address: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default = "default_feed_stream")]
+    pub stream: String,
+    #[serde(default = "default_feed_topic")]
+    pub topic: String,
+}
+
+impl Default for FeedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            address: default_feed_address(),
+            username: String::new(),
+            password: String::new(),
+            stream: default_feed_stream(),
+            topic: default_feed_topic(),
+        }
+    }
+}
+
+impl FeedConfig {
+    fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.address.trim().is_empty()
+            || self.stream.trim().is_empty()
+            || self.topic.trim().is_empty()
+        {
+            return Err(format!(
+                "{CONFIG_FILE}: feed needs address, stream, and topic when enabled"
+            ));
+        }
+        Ok(())
+    }
+
+    /// TCP connection string. Credentials stay out of the log.
+    pub(crate) fn connection_string(&self) -> String {
+        if self.username.is_empty() {
+            return format!("iggy://{}", self.address);
+        }
+        format!(
+            "iggy://{}:{}@{}",
+            encode_userinfo(&self.username),
+            encode_userinfo(&self.password),
+            self.address
+        )
+    }
+}
+
+fn encode_userinfo(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn default_set_name() -> String {
@@ -597,6 +688,7 @@ impl Config {
         self.storage.validate()?;
         self.replication.validate(self.port)?;
         self.sharding.validate(self.replication.enabled)?;
+        self.feed.validate()?;
         Ok(())
     }
 }
@@ -660,6 +752,42 @@ fn parse_bool(raw: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_feed_stays_off_until_enabled() {
+        let config = Config::default();
+        assert!(!config.feed.enabled);
+        assert!(config.feed.username.is_empty());
+        assert_eq!(config.feed.address, "127.0.0.1:8090");
+        assert_eq!(config.feed.stream, "kova");
+        assert_eq!(config.feed.topic, "changes");
+        assert_eq!(config.feed.connection_string(), "iggy://127.0.0.1:8090");
+
+        let on = Config::from_toml(
+            r#"
+            [feed]
+            enabled = true
+            username = "iggy"
+            password = "iggy"
+            "#,
+        )
+        .expect("feed toml");
+        assert!(on.feed.enabled);
+        assert_eq!(
+            on.feed.connection_string(),
+            "iggy://iggy:iggy@127.0.0.1:8090"
+        );
+
+        let broken = Config::from_toml(
+            r#"
+            [feed]
+            enabled = true
+            address = ""
+            "#,
+        )
+        .expect("parse");
+        assert!(broken.validate().is_err());
+    }
 
     #[test]
     fn test_builtin_defaults() {

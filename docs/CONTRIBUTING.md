@@ -209,7 +209,7 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   `setval`. Updating the row by hand changes the next insert. ✅ Complete.
 - **Phase 26 - Feed:** a committed insert, update, or delete can publish
   one JSON record (`before` and `after`) to Apache Iggy. The listener
-  decides what to do. `[feed]` is off unless enabled. ⚪ Planned.
+  decides what to do. `[feed]` is off unless enabled. ✅ Complete.
 - **Phase 27 - User guide:** the site in `site/docs/` explains how to run
   the server and use what is shipped, starting at Getting started. The
   home page asks for an email. The form stays closed until `SIGNUP_URL`

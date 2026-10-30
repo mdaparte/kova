@@ -93,6 +93,18 @@ checkpoint_every = 128
 #   { id = 3, client = "127.0.0.1:27020", raft = "127.0.0.1:27120", arbiter = true },
 # ]
 
+# Change feed. Leave this out and a write publishes nothing.
+# Iggy is a separate process. Kova does not start it. The username
+# and password below are the sample Iggy root, not a default to expose.
+#
+# [feed]
+# enabled = false
+# address = "127.0.0.1:8090"
+# username = "iggy"
+# password = "iggy"
+# stream = "kova"
+# topic = "changes"
+
 # Sharding. Leave this out and every document stays in this process.
 # role = "router" hashes `_id` and forwards. It does not store the
 # documents, and it cannot also join a replica set. role = "shard" is a

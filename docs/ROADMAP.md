@@ -39,7 +39,7 @@ replication, and multi-model indexing.
 | 23 | Sharding | ✅ Complete |
 | 24 | Physical catalog (`admin`) | ✅ Complete |
 | 25 | Autoincrement | ✅ Complete |
-| 26 | Feed (Apache Iggy) | ⚪ Planned |
+| 26 | Feed (Apache Iggy) | ✅ Complete |
 | 27 | User guide | ✅ Complete |
 | 28 | Read path and scale | ✅ Complete |
 | 29 | Steps behind MongoDB | ⚪ Planned |
@@ -871,7 +871,7 @@ Each process keeps its own `admin.counters`. On a router, `create` starts every 
 - [x] Test: `create` of `orders` with `autoincrement: "id"` leaves `admin.counters` at `last: 0`. An insert without `id` stores 1 and `last` becomes 1. The next stores 2. Setting `last` to 10 by hand makes the following insert store 11. After restart, the next insert stores 12.
 - [x] Test: restore a table whose `setval` is 115 with the third argument true. `last` is 115. An insert without `id` stores 116. The next insert stores 117. After restart, the next insert stores 118.
 
-## Phase 26 - Feed (Apache Iggy) ⚪ Planned
+## Phase 26 - Feed (Apache Iggy) ✅ Complete
 
 A program that wants to react to a write connects to a feed. It does not open a MongoDB driver, tail a collection, or read the oplog. The condition lives in that program. Kova publishes what happened.
 
@@ -905,12 +905,12 @@ If Iggy is down, the database write still stands. The publisher retries. The sam
 
 ### Phase 26 - Sub-tasks
 
-- [ ] `[feed]` absent or `enabled` false publishes nothing and opens no Iggy connection.
-- [ ] A committed insert, update, or delete publishes one JSON record to stream `kova`, topic `changes`, from the process that applied the write. A follower and a shard router do not publish that write again.
-- [ ] The record carries `op`, `ns`, `id`, `before`, `after`, and `lsn`. An insert has an empty `before`. A delete has an empty `after`. An update carries both documents.
-- [ ] A committed transaction publishes one record per document after commit. An abort publishes nothing.
-- [ ] Iggy being unreachable leaves the database write in place. A repeated delivery of the same write keeps the same `ns`, `id`, and `lsn`.
-- [ ] Test: with the feed off, an insert does not connect. With the feed on, an update of field `A` from 1 to 2 is a record whose `before.A` is 1 and `after.A` is 2. An insert and a delete have the empty side. Stopping Iggy still lets the insert succeed.
+- [x] `[feed]` absent or `enabled` false publishes nothing and opens no Iggy connection.
+- [x] A committed insert, update, or delete publishes one JSON record to stream `kova`, topic `changes`, from the process that applied the write. A follower and a shard router do not publish that write again.
+- [x] The record carries `op`, `ns`, `id`, `before`, `after`, and `lsn`. An insert has an empty `before`. A delete has an empty `after`. An update carries both documents.
+- [x] A committed transaction publishes one record per document after commit. An abort publishes nothing.
+- [x] Iggy being unreachable leaves the database write in place. A repeated delivery of the same write keeps the same `ns`, `id`, and `lsn`.
+- [x] Test: with the feed off, an insert does not connect. With the feed on, an update of field `A` from 1 to 2 is a record whose `before.A` is 1 and `after.A` is 2. An insert and a delete have the empty side. Stopping Iggy still lets the insert succeed.
 
 ## Phase 27 - User guide ✅ Complete
 
@@ -925,7 +925,7 @@ The guide is a set of pages, on the pattern of a product manual: a welcome, Gett
 - SQL, and the ODBC keys `SERVER`, `PORT`, `DATABASE`, `UID`, and `PWD`.
 - Configuration, security, `serverStatus`, and `kovadump` (including the dump shapes it reads).
 - Replica sets and sharding: when each one is for, and that one process is not both the router and a voter.
-- The feed is a planned page. It describes the record and points at Phase 26. It does not claim the publisher is running.
+- The feed page describes the record. The publisher is off unless `[feed]` is enabled.
 
 The guide does not rename a client product, and it does not copy the roadmap phase by phase.
 
@@ -934,7 +934,7 @@ The guide does not rename a client product, and it does not copy the roadmap pha
 - [x] A README at the repository root explains what Kova is, how to build it, how to run it, the default port, the config file, and that security is off unless enabled.
 - [x] The site in `site/docs/` covers the wire commands, SQL, the ODBC connection keys, `kovadump`, the `admin` catalog and counters, replica sets, and sharding. The home page asks for an email.
 - [x] The first iteration ships with the form closed. `SIGNUP_URL` in `site/js/signup.js` stays empty until an endpoint is pasted.
-- [x] The text is English and describes what is shipped. The feed is a pointer to Phase 26 until that phase is done.
+- [x] The text is English and describes what is shipped. The feed page matches the publisher, which stays off unless enabled.
 - [x] `ROADMAP`, `ARCHITECTURE`, `CONTRACT`, and `CONTRIBUTING` stay the engineering documents. `make doc` stays the API reference.
 - [x] The README tells a user to install the published build and run `kova` on port `27018`. The Makefile stays the contributor path.
 
@@ -1014,7 +1014,6 @@ This waits. The next pass on the engine picks it up. A new benchmark run replace
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| A committed write has no feed for other programs | 26 | `[feed]` will publish one JSON record per committed insert, update, or delete to Apache Iggy. The listener decides what to do with `before` and `after`. Today a program tails a collection or the oplog. |
 | Five-pass means behind MongoDB | 29 | Insert, point update, `findAndModify`, point delete, count, point find, range find, unindexed find, `$group`, and `$lookup`. A similar step is left alone. Later. |
 
 ## Architecture Diagram (updated)
@@ -1073,4 +1072,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1-25, 27, and 28 are complete. Still open: the feed (Phase 26) and the steps behind MongoDB (Phase 29).*
+*Phases 1-28 are complete. Still open: the steps behind MongoDB (Phase 29).*

@@ -41,9 +41,9 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
-<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a><a href="/docs/feed">Feed</a></div>
 <div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by" class="here">Powered by</a></div>
-<div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
+
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
@@ -128,7 +128,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <svg class="lib-mark" width="84" height="84" viewBox="0 0 72 72" fill="currentColor" aria-hidden="true"><rect x="16" y="18" width="8" height="4"/><rect x="16" y="18" width="4" height="36"/><rect x="16" y="50" width="8" height="4"/><rect x="48" y="18" width="8" height="4"/><rect x="52" y="18" width="4" height="36"/><rect x="48" y="50" width="8" height="4"/><rect x="32" y="34" width="8" height="4" fill="var(--k-oxido)"/></svg>
     <span class="lib-name">serde_json</span>
     <span class="lib-ver">1</span>
-    <span class="lib-job">JSON where the payload is not BSON. The planned feed record is JSON.</span>
+    <span class="lib-job">JSON where the payload is not BSON. The feed record is JSON.</span>
   </a>
   <a class="lib" href="https://docs.rs/crossbeam-channel">
     <svg class="lib-mark" width="84" height="84" viewBox="0 0 72 72" fill="currentColor" aria-hidden="true"><rect x="8" y="28" width="10" height="16"/><rect x="22" y="28" width="10" height="16"/><rect x="36" y="28" width="10" height="16"/><rect x="52" y="22" width="14" height="28" fill="var(--k-oxido)"/></svg>
@@ -161,9 +161,9 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <div class="libs">
   <a class="lib wide" href="https://iggy.apache.org/docs/">
     <img class="lib-mark" src="/img/powered/iggy.svg" alt="" width="84" height="84">
-    <span class="lib-name">Apache Iggy <span class="tag">Planned</span></span>
-    <span class="lib-ver">Not linked in 0.1.0</span>
-    <span class="lib-job">The neighbor for the feed. Kova 0.1.0 does not link an Iggy crate and does not start an Iggy process. When the feed lands, Kova publishes one JSON record after a committed write, and Iggy stores the stream.</span>
+    <span class="lib-name">Apache Iggy</span>
+    <span class="lib-ver">0.7</span>
+    <span class="lib-job">The neighbor for the feed. Kova links the Iggy client and publishes one JSON record after a committed write. Iggy stores the stream. Kova does not start the Iggy process. The feed is off unless enabled.</span>
   </a>
 </div>
 <p>The record shape is on the <a href="/docs/feed">Feed</a> page.</p>
