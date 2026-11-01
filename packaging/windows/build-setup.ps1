@@ -1,5 +1,5 @@
 # Build Kova-x64-setup.exe with Inno Setup 6.
-# BINS is the directory that holds kova.exe, kova-setup.exe, kovadump.exe, and iggy-server.exe.
+# BINS is the directory that holds kova.exe, kova-setup.exe, kovadump.exe, kova.dll, and iggy-server.exe.
 # OUT is the directory for the installer. The default is dist\ next to the repository.
 
 $ErrorActionPreference = 'Stop'
@@ -9,7 +9,7 @@ $root = Split-Path -Parent (Split-Path -Parent $here)
 $bins = if ($env:BINS) { $env:BINS } else { Join-Path $root 'target\release' }
 $out = if ($env:OUT) { $env:OUT } else { Join-Path $root 'dist' }
 
-foreach ($name in @('kova.exe', 'kova-setup.exe', 'kovadump.exe', 'iggy-server.exe')) {
+foreach ($name in @('kova.exe', 'kova-setup.exe', 'kovadump.exe', 'kova.dll', 'iggy-server.exe')) {
     $path = Join-Path $bins $name
     if (-not (Test-Path -LiteralPath $path)) {
         Write-Error "missing $path"

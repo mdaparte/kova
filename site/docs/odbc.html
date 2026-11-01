@@ -10,7 +10,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>ODBC - KOVA</title>
-  <meta name="description" content="On Linux, libkova.so is a unixODBC driver. It sends SQL to a Kova server and returns the rows.">
+  <meta name="description" content="libkova.so on Linux and kova.dll on 64-bit Windows send SQL to a Kova server and return the rows.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
@@ -48,10 +48,10 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
       <h1>ODBC</h1>
-      <p class="lede">On Linux, libkova.so is a unixODBC driver. It sends SQL to a Kova server and returns the rows.</p>
-      
-<p>The install puts the driver at <code>~/.local/lib/libkova.so</code>, next to the directory that holds <code>kova</code>. It speaks unixODBC. A client loads that library, connects, and runs SQL. The server runs the same <code>{ sql }</code> command a shell would send.</p>
-<div class="note"><p>The driver is Linux. A client maps <code>libkova.so</code> for the life of its process, so a rebuilt library loads after that process quits and opens again.</p></div>
+      <p class="lede">libkova.so on Linux and kova.dll on 64-bit Windows send SQL to a Kova server and return the rows.</p>
+
+<p>On Linux the install puts the driver at <code>~/.local/lib/libkova.so</code>, next to the directory that holds <code>kova</code>. It speaks unixODBC. On 64-bit Windows the installer puts <code>kova.dll</code> in <code>C:\Program Files\Kova</code> and registers it with the ODBC driver manager. A client loads that library, connects, and runs SQL. The server runs the same <code>{ sql }</code> command a shell would send.</p>
+<div class="note"><p>A client maps the driver for the life of its process, so a rebuilt library loads after that process quits and opens again. The Windows installer is 64-bit. A 32-bit program does not see this driver.</p></div>
 
 <h2 id="register">Register the driver</h2>
 <p>Install unixODBC (<code>unixodbc</code> on Debian and Ubuntu). Point the driver manager at the library. In <code>~/.odbcinst.ini</code>:</p>
@@ -69,7 +69,9 @@ SERVER=127.0.0.1
 PORT=27018
 DATABASE=db</code></pre>
 </div>
-<p>The connection string is the same keys in one line:</p>
+<h2 id="windows">Windows</h2>
+<p>The 64-bit installer registers the driver name <code>Kova</code> and a system data source of the same name. That data source points at <code>127.0.0.1</code>, port <code>27018</code>, database <code>db</code>. The ODBC Data Source Administrator lists it under System DSN. Add, configure, and remove call <code>ConfigDSN</code> in <code>kova.dll</code>. The dialog asks for the data source name, the server, the port, the database, the user, and the password. A blank password leaves the stored password in place.</p>
+<p>The same keys work as one line, from Linux or from Windows:</p>
 <div class="ex">
 <div class="ex-label">Config</div>
 <pre><code class="lang-cfg">DRIVER=Kova;SERVER=127.0.0.1;PORT=27018;DATABASE=db</code></pre>
@@ -134,7 +136,7 @@ FORD    ANALYST   3000</code></pre>
 
       <nav class="pager"><a href="/docs/sql"><span>Previous</span>SQL</a><a class="next" href="/docs/configuration"><span>Next</span>Configuration</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#register">Register the driver</a><a href="#catalog">What a client can list</a><a href="#query">Run a statement</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#register">Register the driver</a><a href="#windows">Windows</a><a href="#catalog">What a client can list</a><a href="#query">Run a statement</a></nav>
   </div>
   <footer>
     <span>KOVA</span>

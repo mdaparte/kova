@@ -20,10 +20,14 @@
 //! connection with neither value stays open, which is the server with
 //! security left off. A connection with only one of the two fails.
 //!
-//! This is the Linux driver (LP64, `SQLLEN` is 64 bits). The Windows
-//! driver manager is a later platform.
+//! On Linux the library is `libkova.so` and a DSN is read from unixODBC.
+//! On 64-bit Windows the library is `kova.dll`. A DSN is read through
+//! `odbccp32.dll`, and `ConfigDSN` writes one from the ODBC administrator.
 
 #![allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
+
+#[cfg(windows)]
+mod windows;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -409,7 +413,24 @@ fn profile_fn() -> Option<ProfileFn> {
     *SLOT.get_or_init(|| unsafe { load_profile() })
 }
 
+/// `SQLGetPrivateProfileString` from unixODBC or from `odbccp32.dll`.
 unsafe fn load_profile() -> Option<ProfileFn> {
+    #[cfg(unix)]
+    {
+        return load_profile_unix();
+    }
+    #[cfg(windows)]
+    {
+        return windows::load_profile_fn();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+unsafe fn load_profile_unix() -> Option<ProfileFn> {
     extern "C" {
         fn dlopen(filename: *const std::ffi::c_char, flags: i32) -> *mut std::ffi::c_void;
         fn dlsym(
@@ -3257,6 +3278,23 @@ pub unsafe extern "C" fn SQLCancel(handle: *mut std::ffi::c_void) -> i16 {
     }
 }
 
+/// Keyword pairs from a doubly null-terminated ODBC setup attribute list.
+#[cfg(any(windows, test))]
+pub(crate) fn setup_attribute_pairs(entries: &[u8]) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for entry in entries.split(|byte| *byte == 0) {
+        if entry.is_empty() {
+            break;
+        }
+        let entry = String::from_utf8_lossy(entry);
+        let Some((key, value)) = entry.split_once('=') else {
+            continue;
+        };
+        pairs.push((key.trim().to_ascii_uppercase(), value.trim().to_string()));
+    }
+    pairs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3357,6 +3395,20 @@ mod tests {
             info_value(SQL_DBMS_NAME, "db"),
             InfoValue::Text("Kova")
         ));
+    }
+
+    #[test]
+    fn setup_attributes_stop_at_the_extra_null() {
+        let raw = b"DSN=Shop\0SERVER=10.0.0.8\0PORT=27019\0\0IGNORED=1\0";
+        let pairs = setup_attribute_pairs(raw);
+        assert_eq!(
+            pairs,
+            vec![
+                ("DSN".into(), "Shop".into()),
+                ("SERVER".into(), "10.0.0.8".into()),
+                ("PORT".into(), "27019".into()),
+            ]
+        );
     }
 
     #[test]
