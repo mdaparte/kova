@@ -209,7 +209,7 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   `setval`. Updating the row by hand changes the next insert. ✅ Complete.
 - **Phase 26 - Feed:** a committed insert, update, or delete can publish
   one JSON record (`before` and `after`) to Apache Iggy. The listener
-  decides what to do. `[feed]` is off unless enabled. ⚪ Planned.
+  decides what to do. `[feed]` is off unless enabled. ✅ Complete.
 - **Phase 27 - User guide:** the site in `site/docs/` explains how to run
   the server and use what is shipped, starting at Getting started. The
   home page asks for an email. The form stays closed until `SIGNUP_URL`
@@ -222,6 +222,11 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 29 - Steps behind MongoDB:** the five-pass benchmark steps whose
   mean is slower than MongoDB by more than the standard deviation of the
   paired differences. Similar steps stay as they are. ⚪ Planned.
+- **Phase 30 - Configuration:** `kova-setup` writes `kova.toml` and opens
+  again with the current values. Security is suggested closed. A window
+  asks the same questions. systemd, a Windows service, and launchd can
+  start Kova with the operating system. Logs can rotate by date, size, or
+  both. ✅ Complete.
 
 ## 6. License
 

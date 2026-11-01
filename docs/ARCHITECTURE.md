@@ -279,6 +279,11 @@ about and ignored.
 | `max_connections` | `KOVA_MAX_CONNECTIONS` | `128` | Simultaneous clients. One more is refused |
 | `max_connection_idle_ms` | `KOVA_MAX_CONNECTION_IDLE_MS` | `0` | Idle close. `0` disables it |
 | `log_level` | `KOVA_LOG_LEVEL` | `info` | Minimum emitted level |
+| `log.target` | none | `stderr` | `stderr` or a file path |
+| `log.rotate` | none | `none` | `none`, `date`, `size`, or `date-and-size` |
+| `log.max_bytes` | none | `10485760` | Roll a size-based file past this many bytes |
+| `log.keep` | none | `7` | Files kept, including the one being written |
+| `feed.server.run` | none | `false` | The service starts bundled `iggy-server` first. Kova does not |
 | `warn_on_non_mongo_queries` | `KOVA_WARN_NON_MONGO_QUERIES` | `true` | WARN on non-Mongo operators |
 | `search.analyzer` | none | `default` | `default` \| `en_stem` |
 | `search.stopwords` | none | `[]` | Stop words removed at index/query time |
@@ -325,6 +330,7 @@ about and ignored.
 | 25 | Autoincrement: `admin.counters.last` is the last value handed out. `create` declares the field. A hand update of the row changes the next insert |
 | 26 | Feed: a committed write can publish `before` and `after` to Apache Iggy. The listener applies its own condition. Off unless `[feed]` is enabled |
 | 27 | User guide: `site/docs/` for the running server, from Getting started through backup, ODBC, replica sets, and sharding. The home page asks for an email. The engineering documents stay as they are |
+| 30 | Configuration: `kova-setup` writes `kova.toml` and opens again. A window asks the same questions. systemd, a Windows service, and launchd. Log rotation by date, size, or both |
 
 ---
 

@@ -68,7 +68,9 @@ impl Ring {
     }
 
     fn index_of(&self, shard_id: u64) -> Option<usize> {
-        self.order.iter().position(|candidate| *candidate == shard_id)
+        self.order
+            .iter()
+            .position(|candidate| *candidate == shard_id)
     }
 }
 
@@ -386,7 +388,8 @@ impl ShardRouter {
     }
 
     async fn route_group(&self, command: &Document, stages: &[Bson], index: usize) -> Document {
-        if let Some(message) = prefix_refusal(&stages[..index]).or_else(|| tail_refusal(stages, index))
+        if let Some(message) =
+            prefix_refusal(&stages[..index]).or_else(|| tail_refusal(stages, index))
         {
             return fail(&message);
         }
@@ -415,7 +418,8 @@ impl ShardRouter {
     }
 
     async fn route_lookup(&self, command: &Document, stages: &[Bson], index: usize) -> Document {
-        if let Some(message) = prefix_refusal(&stages[..index]).or_else(|| tail_refusal(stages, index))
+        if let Some(message) =
+            prefix_refusal(&stages[..index]).or_else(|| tail_refusal(stages, index))
         {
             return fail(&message);
         }
@@ -435,7 +439,8 @@ impl ShardRouter {
         let as_field = spec.get_str("as").unwrap_or(from);
         let db = command.get_str("$db").ok();
         let local = if index == 0 {
-            let mut find = bson::doc! { "find": command.get_str("aggregate").unwrap_or(""), "filter": {} };
+            let mut find =
+                bson::doc! { "find": command.get_str("aggregate").unwrap_or(""), "filter": {} };
             if let Some(db) = db {
                 find.insert("$db", db);
             }
@@ -781,10 +786,7 @@ fn group_refusal(spec: &Document) -> Option<String> {
         else {
             return Some(format!("aggregate accumulator {name} cannot be merged"));
         };
-        if !matches!(
-            op.as_str(),
-            "$sum" | "$min" | "$max" | "$avg" | "$count"
-        ) {
+        if !matches!(op.as_str(), "$sum" | "$min" | "$max" | "$avg" | "$count") {
             return Some(format!("aggregate accumulator {op} cannot be merged"));
         }
     }
@@ -1381,7 +1383,11 @@ mod tests {
             "$db": "db",
         })
         .expect("insert");
-        whole.dispatch(parsed).expect("dispatch").await.expect("reply");
+        whole
+            .dispatch(parsed)
+            .expect("dispatch")
+            .await
+            .expect("reply");
 
         let group = bson::doc! {
             "aggregate": "emp",
@@ -1396,7 +1402,12 @@ mod tests {
         };
         let routed = documents_of(&router.route(&group).await).expect("router groups");
         let local = protocol::command_from_document(&group).expect("group");
-        let local = match whole.dispatch(local).expect("dispatch").await.expect("reply") {
+        let local = match whole
+            .dispatch(local)
+            .expect("dispatch")
+            .await
+            .expect("reply")
+        {
             PartitionResult::Found { documents } => documents,
             other => panic!("expected groups, got {other:?}"),
         };

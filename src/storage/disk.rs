@@ -43,6 +43,11 @@ impl PageStore {
         atomic_write(&path, &bytes)
     }
 
+    /// Whether this page has a file on disk.
+    pub fn stored(&self, page_id: u64) -> bool {
+        self.path(page_id).is_file()
+    }
+
     /// Reads one page. A truncated file or a bad checksum is an error.
     pub fn read(&self, page_id: u64) -> Result<Page, String> {
         let path = self.path(page_id);

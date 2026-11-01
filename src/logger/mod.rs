@@ -8,9 +8,13 @@
 //! - **Extensible**: external sinks can be registered to forward logs
 //!   to files, syslog, or any custom consumer.
 
+mod file;
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+
+pub(crate) use file::install_log;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The log level of a record.
@@ -209,7 +213,7 @@ fn civil_utc(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 
 /// The global logger facade.
 pub struct Logger {
-    sink: Arc<dyn LogSink>,
+    sink: Mutex<Arc<dyn LogSink>>,
     /// Minimum level a record must reach to be emitted. Configured
     /// once at startup from `log_level` (defaults to `Debug`, i.e.
     /// everything is emitted).
@@ -220,9 +224,14 @@ impl Logger {
     /// Creates a new logger backed by the given sink.
     pub fn new(sink: Arc<dyn LogSink>) -> Self {
         Self {
-            sink,
+            sink: Mutex::new(sink),
             min_level: AtomicU8::new(Level::Debug.rank()),
         }
+    }
+
+    /// Replaces the sink. Startup calls this after reading `[log]`.
+    pub fn set_sink(&self, sink: Arc<dyn LogSink>) {
+        *self.sink.lock().unwrap_or_else(|err| err.into_inner()) = sink;
     }
 
     /// Sets the minimum level a record must reach to be emitted.
@@ -239,7 +248,10 @@ impl Logger {
             return;
         }
         let record = LogRecord::new(level, message);
-        self.sink.emit(&record);
+        self.sink
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .emit(&record);
     }
 
     /// Logs an info record.

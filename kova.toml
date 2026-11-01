@@ -24,6 +24,16 @@ max_connection_idle_ms = 0
 # Env: KOVA_LOG_LEVEL
 log_level = "info"
 
+# Where records go, and how a file turns over. kova-setup writes this.
+# target is "stderr" or a file path. rotate is none, date, size, or
+# date-and-size. keep counts the active file. stderr does not rotate.
+#
+# [log]
+# target = "stderr"
+# rotate = "none"
+# max_bytes = 10485760
+# keep = 7
+
 # Emit a WARN log when a query uses operators MongoDB does not define:
 # Kova extensions such as $text.$boost / $text.$decay, or operators the
 # engine does not implement yet. Set to false to silence them.
@@ -92,6 +102,40 @@ checkpoint_every = 128
 #   { id = 2, client = "127.0.0.1:27019", raft = "127.0.0.1:27119" },
 #   { id = 3, client = "127.0.0.1:27020", raft = "127.0.0.1:27120", arbiter = true },
 # ]
+
+# Change feed. Leave this out and a write publishes nothing.
+# The Linux release includes iggy-server (Apache Iggy tag server-0.5.0).
+# `make iggy-server` builds it. `make run-iggy` starts it from [feed.server].
+# Kova does not start it. The username and password are the sample Iggy root.
+#
+[feed]
+enabled = true
+address = "127.0.0.1:8091"
+username = "kova-user"
+password = "iggy"
+stream = "kova"
+topic = "changes"
+
+# Settings for the iggy-server that ships with Kova. Another Iggy ignores this.
+# An empty address listens on [feed] address. Data stays out of data/.
+# run = true tells the service from kova-setup to start iggy-server first.
+# Kova itself does not start it. Absent means false.
+[feed.server]
+path = "iggy-data"
+address = "127.0.0.1:8091"
+http_enabled = true
+quic_enabled = true
+log_level = "info"
+run = true
+
+[security]
+enabled = true
+
+[log]
+target = "stderr"
+rotate = "none"
+max_bytes = 10485760
+keep = 7
 
 # Sharding. Leave this out and every document stays in this process.
 # role = "router" hashes `_id` and forwards. It does not store the

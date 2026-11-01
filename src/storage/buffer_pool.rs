@@ -164,9 +164,14 @@ impl BufferPool {
     }
 
     /// Whether `page_id` is currently cached.
+    pub fn is_cached(&self, page_id: u64) -> bool {
+        self.index.contains_key(&page_id)
+    }
+
+    /// Whether `page_id` is currently cached.
     #[cfg(test)]
     pub fn contains(&self, page_id: u64) -> bool {
-        self.index.contains_key(&page_id)
+        self.is_cached(page_id)
     }
 
     /// Snapshot of the counters.

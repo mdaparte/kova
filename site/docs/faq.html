@@ -41,9 +41,9 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
-<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a><a href="/docs/feed">Feed</a></div>
 <div><h2>About</h2><a href="/docs/faq" class="here">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
-<div><h2>Later</h2><a href="/docs/feed">Feed <span class="tag">Planned</span></a></div>
+
     </nav>
     <article class="doc">
       <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
@@ -153,17 +153,17 @@ CREATE INDEX sku_1 ON orders (sku);</code></pre>
 <h3 id="dump-where">Router, one shard, or one process?</h3>
 <p>Point <code>kovadump</code> at the address you want to read. Against one process, the file has that process's database. Against a router, the file has the whole database when every shard answers. If a shard is down, the dump fails and no partial file is written. Against one shard, the file has that piece.</p>
 
-<h2 id="copies">Copies, and what is still planned</h2>
+<h2 id="copies">Copies</h2>
 
 <h3 id="replica">What is a replica set?</h3>
 <p>Photocopies of one process. Every voter stores every document of that set. The primary appends the log. Followers apply the same records. <a href="https://github.com/databendlabs/openraft">OpenRaft</a> runs the election. The router does not join the set. See <a href="/docs/replication">Replica sets</a>.</p>
 
 <h3 id="feed">Is there a change feed?</h3>
-<p>The feed is planned. A committed insert, update, or delete will publish one JSON record, with <code>before</code> and <code>after</code>, to <a href="https://iggy.apache.org/docs/">Apache Iggy</a> running as a separate process. Kova will not embed that process. Until the feed is in the server, read with <code>find</code>, or tail <code>local.oplog.rs</code> on a replica set. The record shape is on the <a href="/docs/feed">Feed</a> page. The libraries the server links today are on <a href="/docs/powered-by">Powered by</a>.</p>
+<p>A committed insert, update, or delete publishes one JSON record, with <code>before</code> and <code>after</code>, to <a href="https://iggy.apache.org/docs/">Apache Iggy</a> running as a separate process. Kova does not start that process. The feed is off unless <code>[feed]</code> has <code>enabled</code> set to true. The record shape is on the <a href="/docs/feed">Feed</a> page. The libraries the server links are on <a href="/docs/powered-by">Powered by</a>.</p>
 
       <nav class="pager"><a href="/docs"><span>Previous</span>Welcome</a><a class="next" href="/docs/powered-by"><span>Next</span>Powered by</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#running">Running the server</a><a href="#writes">Creating and changing rows</a><a href="#storage">How a document is stored</a><a href="#backup">How backup works</a><a href="#copies">Copies, and what is still planned</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#running">Running the server</a><a href="#writes">Creating and changing rows</a><a href="#storage">How a document is stored</a><a href="#backup">How backup works</a><a href="#copies">Copies</a></nav>
   </div>
   <footer>
     <span>KOVA</span>

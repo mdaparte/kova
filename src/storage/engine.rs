@@ -393,6 +393,11 @@ impl StorageEngine {
         self.heap.refresh_ids(&mut self.pool, collection)
     }
 
+    /// Forgets page ids whose files are already gone.
+    pub fn release_missing_pages(&mut self) -> usize {
+        self.heap.release_missing_pages(&self.pool, &self.disk)
+    }
+
     pub fn bson_size(&mut self, collection: &str) -> Result<Option<(u64, u64)>, String> {
         self.heap.bson_size(&mut self.pool, collection)
     }

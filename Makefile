@@ -37,13 +37,17 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site clean
+.PHONY: help build release iggy-server run-iggy setup setup-window test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site mac-dmg win-setup clean
 
 help:
 	@printf '%s\n' \
 		'Targets:' \
 		'  build        cargo build' \
 		'  release      cargo build --release' \
+		'  iggy-server  build the Apache Iggy server that matches the linked client' \
+		'  run-iggy     start that server from [feed.server] in kova.toml' \
+		'  setup        kova-setup, the configuration walkthrough' \
+		'  setup-window the same questions in a window' \
 		'  test         cargo test --all-targets' \
 		'  test-sql     query_engine tests (--nocapture)' \
 		'  test-one     one test: make test-one TEST=name' \
@@ -68,6 +72,8 @@ help:
 		'  restore      restore DUMP into database db (default db.kdmp)' \
 		'  doc          cargo doc --no-deps --open' \
 		'  site         static site at http://127.0.0.1:4173' \
+		'  mac-dmg      Mac disk image. BINS=dir with kova, kova-setup, kovadump, iggy-server' \
+		'  win-setup    Windows installer. Run on Windows, with Inno Setup 6' \
 		'  clean        cargo clean' \
 		'' \
 		'The mongosh and kovadump targets talk to a server that is already running.' \
@@ -86,6 +92,18 @@ build:
 
 release:
 	$(CARGO) build --release
+
+iggy-server:
+	packaging/fetch-iggy-server.sh target
+
+run-iggy:
+	packaging/run-iggy-server.sh
+
+setup:
+	$(CARGO) run --bin kova-setup -- $(ARGS)
+
+setup-window:
+	$(CARGO) run --bin kova-setup -- --window $(ARGS)
 
 test:
 	$(CARGO) test --all-targets
@@ -193,6 +211,20 @@ SITE_PORT ?= 4173
 
 site:
 	python3 scripts/serve-site.py $(SITE_PORT)
+
+# Apple silicon disk image. BINS is the directory that holds the four
+# Mach-O files. Without it the image still has the icon and the launcher.
+#   make mac-dmg BINS=target/release
+BINS ?=
+OUT ?= dist/Kova.dmg
+
+mac-dmg:
+	BINS="$(BINS)" OUT="$(OUT)" packaging/macos/build-dmg.sh
+
+# Windows installer. Inno Setup 6 compiles it. BINS holds the four .exe files.
+#   make win-setup BINS=target/release
+win-setup:
+	BINS="$(BINS)" powershell.exe -NoProfile -ExecutionPolicy Bypass -File packaging/windows/build-setup.ps1
 
 clean:
 	$(CARGO) clean

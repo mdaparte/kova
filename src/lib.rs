@@ -5,6 +5,7 @@
 
 mod config;
 pub mod dump;
+mod feed;
 mod index;
 mod logger;
 mod metrics;
@@ -15,6 +16,7 @@ mod query_engine;
 mod replication;
 mod search;
 mod security;
+pub mod setup;
 mod shard;
 mod storage;
 mod types;
@@ -59,6 +61,19 @@ pub fn install_panic_hook() {
 /// ends the process.
 pub async fn serve() {
     let config = &config::CONFIG;
+    if let Err(err) = logger::install_log(
+        &config.log.target,
+        &config.log.rotate,
+        config.log.max_bytes,
+        config.log.keep,
+    ) {
+        eprintln!(
+            "[Kova] {} CONFIG ERROR: {}",
+            logger::format_timestamp(logger::now_millis()),
+            err
+        );
+        std::process::exit(1);
+    }
     logger::LOGGER.set_min_level(config.log_level());
 
     logger::LOGGER.info(format!(
@@ -70,7 +85,9 @@ pub async fn serve() {
         config.warn_on_non_mongo_queries
     ));
 
-    let router = storage::PartitionRouter::new(PARTITION_COUNT);
+    let feed = feed::open(config);
+    let router =
+        storage::PartitionRouter::opening(PARTITION_COUNT, config.storage.clone(), feed.clone());
     let shards = if config.sharding.enabled && config.sharding.role == "router" {
         logger::LOGGER.info(format!(
             "Shard router hashing _id across {} shard(s)",
@@ -112,6 +129,20 @@ pub async fn serve() {
     } else {
         None
     };
+
+    if let Some(feed) = &feed {
+        let gate: std::sync::Arc<dyn Fn() -> bool + Send + Sync> = if let Some(replica) = &replica {
+            let replica = std::sync::Arc::clone(replica);
+            std::sync::Arc::new(move || replica.is_leader())
+        } else {
+            std::sync::Arc::new(|| true)
+        };
+        logger::LOGGER.info(format!(
+            "Feed publishing to {} stream {} topic {}",
+            config.feed.address, config.feed.stream, config.feed.topic
+        ));
+        feed.arm(gate);
+    }
 
     if let Err(err) = network::start_server(router, replica, shards).await {
         logger::LOGGER.error(format!("Network server error: {}", err));

@@ -2,7 +2,11 @@
 
 Kova is a database you talk to with a MongoDB driver. One process stores the documents, answers SQL, and searches text. The listener defaults to port 27018.
 
-A merge into `main` publishes the Linux x86_64 build and a container image.
+A merge into `main` publishes the Linux x86_64 archive, a Windows x64 installer, an Apple silicon disk image, and a container image. Opening a pull request does not publish a build. The merge is the push that runs the release. The Linux archive and the container image are published first. `Kova-x64-setup.exe` and `Kova-aarch64.dmg` are attached to that same GitHub release when the Windows and Mac runners finish.
+
+On Windows, run `Kova-x64-setup.exe`. It is not signed. SmartScreen asks for More info, then Run anyway. The files land in `C:\Program Files\Kova`, and the installer then runs `kova-setup --window`.
+
+On a Mac, open `Kova-aarch64.dmg` and drag Kova to Applications. The disk image is not notarized. The first open asks you to right-click Kova and choose Open.
 
 Install on the machine, then start from a directory you want to keep:
 
@@ -18,7 +22,9 @@ Or run the image. The volume keeps the pages and the log:
 docker run --rm -p 27018:27018 -v kova:/var/lib/kova ghcr.io/mdaparte/kova:latest
 ```
 
-Configuration is `kova.toml`. Security is off unless `[security]` is enabled. The installed `seed-oracle.js` loads a sample into the database `db`.
+Configuration is `kova.toml`. Security is off unless `[security]` is enabled. `kova-setup` writes that file and opens again later with the current values. The suggestion is security closed. Leaving it open requires typing `OPEN`. `kova-setup --window` asks the same questions in a window. The installed `seed-oracle.js` loads a sample into the database `db`.
+
+The same install puts `iggy-server` on `PATH`. It is Apache Iggy tag `server-0.5.0`, the server that matches the client inside `kova`. It listens on `127.0.0.1:8090`. Kova does not start it. From a checkout, `make iggy-server` builds it and `make run-iggy` starts it from `[feed.server]` in `kova.toml`. The feed stays off until `[feed]` is enabled.
 
 The end-user guide is the static site in [`site/`](site/index.html). Start at [Getting started](site/docs/getting-started.html).
 
