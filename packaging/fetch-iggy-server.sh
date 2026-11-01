@@ -9,7 +9,12 @@ out=${1:?output directory}
 mkdir -p "$out"
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-bin="$out/iggy-server"
+# cargo names the Windows binary iggy-server.exe. The other platforms do not.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) exe=.exe ;;
+  *) exe= ;;
+esac
+bin="$out/iggy-server$exe"
 tagfile="$out/iggy-server.tag"
 
 # A binary already built for this tag is enough. Delete it to force a rebuild.
@@ -35,7 +40,7 @@ fi
   RUSTFLAGS="${RUSTFLAGS:-} -A warnings" cargo build --release --locked -p server --bin iggy-server
 )
 
-cp "$src/target/release/iggy-server" "$bin"
+cp "$src/target/release/iggy-server$exe" "$bin"
 chmod 755 "$bin"
 printf '%s\n' "$tag" > "$tagfile"
 cp "$src/NOTICE" "$out/NOTICE-iggy"

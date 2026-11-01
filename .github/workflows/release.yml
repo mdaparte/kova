@@ -2,8 +2,10 @@ name: Release
 
 # A merge into main is a push. This builds the optimized binaries and
 # publishes them on the GitHub release for that commit, and pushes the
-# same binaries as a public image on GHCR. The asset names and the
-# :latest tag stay the same, so both download URLs follow the newest build.
+# same binaries as a public image on GHCR. The Linux job opens the release.
+# The Windows and Mac jobs attach their installers after that. The asset
+# names and the :latest tag stay the same, so the download URLs follow
+# the newest build.
 on:
   push:
     branches: [main]
@@ -89,10 +91,11 @@ jobs:
           target_commitish: ${{ github.sha }}
           make_latest: true
           body: |
-            Optimized Linux x86_64 build of this commit, and an Apple silicon disk image.
+            Optimized build of this commit.
 
-            Install: `install.sh` puts `kova`, `kovadump`, `iggy-server`, and `libkova.so` under `$HOME/.local`.
+            Linux: `install.sh` puts `kova`, `kovadump`, `iggy-server`, and `libkova.so` under `$HOME/.local`.
             `iggy-server` is Apache Iggy tag server-0.5.0. Kova does not start it. It listens on 127.0.0.1:8090.
+            Windows: run `Kova-x64-setup.exe`. It is not signed.
             Mac: open `Kova-aarch64.dmg` and drag Kova to Applications. The disk image is not notarized.
             Image: `docker run --rm -p 27018:27018 -v kova:/var/lib/kova ghcr.io/mdaparte/kova:latest`
           files: |
@@ -137,3 +140,46 @@ jobs:
           files: |
             dist/Kova-aarch64.dmg
             dist/Kova-aarch64.dmg.sha256
+
+  windows:
+    needs: linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Build iggy-server
+        shell: bash
+        run: packaging/fetch-iggy-server.sh "$RUNNER_TEMP/iggy-server"
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Pack the installer
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'win-bins'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target\release\kova.exe, target\release\kova-setup.exe, target\release\kovadump.exe $stage
+          Copy-Item "$env:RUNNER_TEMP\iggy-server\iggy-server.exe" $stage
+          foreach ($extra in @('LICENSE-iggy', 'NOTICE-iggy', 'DEPENDENCIES-iggy')) {
+            $path = Join-Path "$env:RUNNER_TEMP\iggy-server" $extra
+            if (Test-Path -LiteralPath $path) { Copy-Item $path $stage }
+          }
+          $env:BINS = $stage
+          $env:OUT = 'dist'
+          ./packaging/windows/build-setup.ps1
+
+      - name: Publish the installer
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.0-${{ github.sha }}
+          files: |
+            dist/Kova-x64-setup.exe
+            dist/Kova-x64-setup.exe.sha256

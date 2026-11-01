@@ -29,6 +29,15 @@ pub fn run_iggy() -> Result<(), String> {
 define_windows_service!(ffi_kova, kova_main);
 define_windows_service!(ffi_iggy, iggy_main);
 
+fn python_output(py: &str, config: &str) -> Option<std::process::Output> {
+    for program in ["python", "python3"] {
+        if let Ok(output) = Command::new(program).arg(py).arg(config).output() {
+            return Some(output);
+        }
+    }
+    None
+}
+
 fn kova_main(_arguments: Vec<OsString>) {
     if run_until_stop(KOVA, || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -49,8 +58,8 @@ fn iggy_main(_arguments: Vec<OsString>) {
         .unwrap_or_else(|_| "packaging/iggy-server-config.py".into());
     let bin = std::env::var("KOVA_IGGY_BIN").unwrap_or_else(|_| "iggy-server.exe".into());
     if run_until_stop(IGGY, move || {
-        let script = Command::new("python").arg(&py).arg(&config).output();
-        if let Ok(output) = script {
+        let script = python_output(&py, &config);
+        if let Some(output) = script {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 let Some(rest) = line.strip_prefix("export ") else {
                     continue;

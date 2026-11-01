@@ -37,7 +37,7 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release iggy-server run-iggy setup setup-window test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site mac-dmg clean
+.PHONY: help build release iggy-server run-iggy setup setup-window test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site mac-dmg win-setup clean
 
 help:
 	@printf '%s\n' \
@@ -73,6 +73,7 @@ help:
 		'  doc          cargo doc --no-deps --open' \
 		'  site         static site at http://127.0.0.1:4173' \
 		'  mac-dmg      Mac disk image. BINS=dir with kova, kova-setup, kovadump, iggy-server' \
+		'  win-setup    Windows installer. Run on Windows, with Inno Setup 6' \
 		'  clean        cargo clean' \
 		'' \
 		'The mongosh and kovadump targets talk to a server that is already running.' \
@@ -219,6 +220,11 @@ OUT ?= dist/Kova.dmg
 
 mac-dmg:
 	BINS="$(BINS)" OUT="$(OUT)" packaging/macos/build-dmg.sh
+
+# Windows installer. Inno Setup 6 compiles it. BINS holds the four .exe files.
+#   make win-setup BINS=target/release
+win-setup:
+	BINS="$(BINS)" powershell.exe -NoProfile -ExecutionPolicy Bypass -File packaging/windows/build-setup.ps1
 
 clean:
 	$(CARGO) clean

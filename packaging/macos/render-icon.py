@@ -89,10 +89,30 @@ def background():
     return image
 
 
+def ico(images):
+    """images is a list of (size, png_bytes). Size 256 is stored as 0."""
+    header = struct.pack("<HHH", 0, 1, len(images))
+    entries = []
+    blobs = []
+    offset = 6 + 16 * len(images)
+    for size, payload in images:
+        stored = 0 if size >= 256 else size
+        entries.append(struct.pack("<BBBBHHII", stored, stored, 0, 0, 1, 32, len(payload), offset))
+        blobs.append(payload)
+        offset += len(payload)
+    return header + b"".join(entries) + b"".join(blobs)
+
+
 def main():
     here = Path(__file__).resolve().parent
     master = draw_mark(1024)
     master.save(here / "icon-1024.png")
+    windows = here.parent / "windows"
+    windows.mkdir(exist_ok=True)
+    ico_sizes = (16, 32, 48, 64, 128, 256)
+    (windows / "kova.ico").write_bytes(
+        ico([(size, png_bytes(draw_mark(size))) for size in ico_sizes])
+    )
     payloads = []
     for kind, size in ICNS:
         payloads.append((kind, png_bytes(draw_mark(size))))

@@ -177,6 +177,23 @@ fn ask_security(suggested_closed: bool) -> Result<bool, String> {
     Err(format!("unrecognized answer {typed:?}"))
 }
 
+fn spawn_window(script: &Path) -> Result<std::process::Child, String> {
+    let mut last = String::from("python3 was not found");
+    for program in ["python3", "python"] {
+        match Command::new(program)
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(err) => last = format!("{program}: {err}"),
+        }
+    }
+    Err(last)
+}
+
 fn ask_window(suggestion: &Suggestion) -> Result<(Answers, RootAccount, bool), String> {
     if !graphical_session() {
         return Err("no graphical session. Run kova-setup without --window".into());
@@ -187,13 +204,7 @@ fn ask_window(suggestion: &Suggestion) -> Result<(Answers, RootAccount, bool), S
         .or_else(|| find_up(Path::new("."), "packaging/kova-setup-window.py"))
         .ok_or_else(|| "packaging/kova-setup-window.py was not found".to_string())?;
     let input = serde_json::to_string(suggestion).map_err(|err| err.to_string())?;
-    let mut child = Command::new("python3")
-        .arg(&script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|err| format!("python3: {err}"))?;
+    let mut child = spawn_window(&script)?;
     child
         .stdin
         .take()
