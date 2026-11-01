@@ -37,13 +37,14 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site clean
+.PHONY: help build release iggy-server test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site clean
 
 help:
 	@printf '%s\n' \
 		'Targets:' \
 		'  build        cargo build' \
 		'  release      cargo build --release' \
+		'  iggy-server  Apache Iggy server that matches the linked client' \
 		'  test         cargo test --all-targets' \
 		'  test-sql     query_engine tests (--nocapture)' \
 		'  test-one     one test: make test-one TEST=name' \
@@ -86,6 +87,9 @@ build:
 
 release:
 	$(CARGO) build --release
+
+iggy-server:
+	packaging/fetch-iggy-server.sh target
 
 test:
 	$(CARGO) test --all-targets

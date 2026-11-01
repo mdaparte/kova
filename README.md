@@ -20,6 +20,8 @@ docker run --rm -p 27018:27018 -v kova:/var/lib/kova ghcr.io/mdaparte/kova:lates
 
 Configuration is `kova.toml`. Security is off unless `[security]` is enabled. The installed `seed-oracle.js` loads a sample into the database `db`.
 
+The same install puts `iggy-server` on `PATH`. It is Apache Iggy tag `server-0.5.0`, the server that matches the client inside `kova`. It listens on `127.0.0.1:8090`. Kova does not start it. The feed stays off until `[feed]` is enabled.
+
 The end-user guide is the static site in [`site/`](site/index.html). Start at [Getting started](site/docs/getting-started.html).
 
 `kovadump backup --db db db.kdmp` writes a backup of a running server. `kovadump restore --db db db.kdmp` reads it back.

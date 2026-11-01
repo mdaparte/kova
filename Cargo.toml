@@ -38,4 +38,5 @@ openraft = { version = "0.9", default-features = false, features = ["serde", "st
 zstd = "0.13"
 argon2 = "0.5"
 aes-gcm = "0.10"
+# Client 0.7.0 matches Apache Iggy tag server-0.5.0. The release builds that iggy-server.
 iggy = "0.7"

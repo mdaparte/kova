@@ -94,8 +94,9 @@ checkpoint_every = 128
 # ]
 
 # Change feed. Leave this out and a write publishes nothing.
-# Iggy is a separate process. Kova does not start it. The username
-# and password below are the sample Iggy root, not a default to expose.
+# The Linux release includes iggy-server (Apache Iggy tag server-0.5.0).
+# Run it yourself. It listens on 127.0.0.1:8090. Kova does not start it.
+# The username and password below are the sample Iggy root, not a default to expose.
 #
 # [feed]
 # enabled = false

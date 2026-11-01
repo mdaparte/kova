@@ -50,7 +50,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>Feed</h1>
       <p class="lede">A committed write publishes one JSON record to Apache Iggy. The condition stays in the listener. Off unless enabled.</p>
 <p>A program that wants to react to a write connects to a feed. It does not open a MongoDB driver, tail a collection, or read the oplog for that reaction. Kova publishes what happened. The listener decides what to do.</p>
-<p>The sidecar is <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, a separate process. Kova is a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client, or receives the same JSON over HTTP and applies its own condition. Kova does not start the Iggy server. Iggy's own documentation is the guide to streams, topics, offsets, and the SDKs.</p>
+<p>The sidecar is <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, a separate process. Kova is a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client, or receives the same JSON over HTTP and applies its own condition. Kova does not start the Iggy server. The Linux release includes <code>iggy-server</code>, built from Apache Iggy tag <code>server-0.5.0</code>, the server that matches the client Kova links. Run <code>iggy-server</code> yourself. It listens on <code>127.0.0.1:8090</code>. Iggy's own documentation is the guide to streams, topics, offsets, and the SDKs.</p>
 
 <h2 id="config">The switch</h2>
 <div class="ex">

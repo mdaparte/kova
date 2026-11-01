@@ -97,6 +97,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <tr><td><code>data/</code></td><td>Pages, the write-ahead log, and replica logs for this process.</td></tr>
     <tr><td><code>~/.local/bin/kova</code></td><td>The server, after the install.</td></tr>
     <tr><td><code>~/.local/bin/kovadump</code></td><td>Backup and restore. It talks to a server that is already running.</td></tr>
+    <tr><td><code>~/.local/bin/iggy-server</code></td><td>Apache Iggy, for the feed. It listens on <code>127.0.0.1:8090</code>. Kova does not start it.</td></tr>
     <tr><td><code>~/.local/lib/libkova.so</code></td><td>The ODBC driver on Linux.</td></tr>
     <tr><td><code>kovadb</code> on crates.io</td><td>The package. The library name is <code>kova</code>. <code>cargo install kovadb</code> installs <code>kova</code> and <code>kovadump</code> after 0.1.0 is published. It is not on crates.io yet. <a href="/docs/getting-started#crate">The dependency line</a>.</td></tr>
   </tbody>

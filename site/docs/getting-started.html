@@ -62,13 +62,15 @@ sh install.sh</code></pre>
 <pre><code class="lang-out">Installed into /home/ada/.local
   /home/ada/.local/bin/kova
   /home/ada/.local/bin/kovadump
+  /home/ada/.local/bin/iggy-server
   /home/ada/.local/lib/libkova.so
   /home/ada/.local/share/kova/kova.toml
 Start from a directory you want to keep. Pages and the log go to data/ there:
   mkdir -p "$HOME/kova-data" && cd "$HOME/kova-data"
-  KOVA_CONFIG=/home/ada/.local/share/kova/kova.toml kova</code></pre>
+  KOVA_CONFIG=/home/ada/.local/share/kova/kova.toml kova
+iggy-server is Apache Iggy. It listens on 127.0.0.1:8090. Kova does not start it.</code></pre>
 </div>
-<p><code>kova</code> and <code>kovadump</code> land in <code>~/.local/bin</code>. <code>libkova.so</code> lands in <code>~/.local/lib</code>. The config and the sample script land in <code>~/.local/share/kova</code>. If <code>~/.local/bin</code> is not on <code>PATH</code>, the script prints the line to add.</p>
+<p><code>kova</code>, <code>kovadump</code>, and <code>iggy-server</code> land in <code>~/.local/bin</code>. <code>libkova.so</code> lands in <code>~/.local/lib</code>. The config and the sample script land in <code>~/.local/share/kova</code>. If <code>~/.local/bin</code> is not on <code>PATH</code>, the script prints the line to add. <code>iggy-server</code> is Apache Iggy. It listens on <code>127.0.0.1:8090</code>. Kova does not start it.</p>
 <p>To put the files somewhere else, download the archive and run its installer with <code>PREFIX</code> set:</p>
 <div class="ex">
 <div class="ex-label">Shell</div>
@@ -79,6 +81,7 @@ PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</code></pre>
 <pre><code class="lang-out">Installed into /opt/kova
   /opt/kova/bin/kova
   /opt/kova/bin/kovadump
+  /opt/kova/bin/iggy-server
   /opt/kova/lib/libkova.so
   /opt/kova/share/kova/kova.toml</code></pre>
 </div>
@@ -94,6 +97,11 @@ PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</code></pre>
 [Kova] 2026-10-27 08:50:01.012 INFO - Network server started on port 27018 (max_connections 128, idle_ms 0)</code></pre>
 </div>
 <p>The listener inside the container is on port 27018, published on the same port of the machine. <code>-e KOVA_PORT=27019</code> changes the port inside the container. Publish that port with <code>-p 27019:27019</code>. The rest of this page talks to <code>127.0.0.1:27018</code> either way.</p>
+<p>The image also has <code>iggy-server</code>. The default command stays <code>kova</code>. To run the feed server, publish port 8090 and tell Iggy to listen on every interface inside the container:</p>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">docker run --rm -p 8090:8090 -e IGGY_TCP_ADDRESS=0.0.0.0:8090 --entrypoint iggy-server ghcr.io/mdaparte/kova:latest</code></pre>
+</div>
 <p>The sample script is in the image at <code>/usr/share/kova/seed-oracle.js</code>.</p>
 <div class="ex">
 <div class="ex-label">Shell</div>

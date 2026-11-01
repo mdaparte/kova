@@ -25,6 +25,9 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      - name: Build iggy-server
+        run: packaging/fetch-iggy-server.sh "$RUNNER_TEMP/iggy-server"
+
       - name: Pack
         run: |
           set -eu
@@ -32,8 +35,13 @@ jobs:
           stage="$RUNNER_TEMP/$name"
           mkdir -p "$stage" dist
           cp target/release/kova target/release/kovadump target/release/libkova.so "$stage/"
+          cp "$RUNNER_TEMP/iggy-server/iggy-server" "$stage/"
+          cp "$RUNNER_TEMP/iggy-server/NOTICE-iggy" "$RUNNER_TEMP/iggy-server/LICENSE-iggy" "$stage/"
+          if [ -f "$RUNNER_TEMP/iggy-server/DEPENDENCIES-iggy" ]; then
+            cp "$RUNNER_TEMP/iggy-server/DEPENDENCIES-iggy" "$stage/"
+          fi
           cp kova.toml scripts/seed-oracle.js packaging/install.sh LICENSE NOTICE "$stage/"
-          chmod 755 "$stage/kova" "$stage/kovadump" "$stage/libkova.so" "$stage/install.sh"
+          chmod 755 "$stage/kova" "$stage/kovadump" "$stage/iggy-server" "$stage/libkova.so" "$stage/install.sh"
           tar -C "$RUNNER_TEMP" -czf "dist/$name.tar.gz" "$name"
           sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
           cp packaging/get.sh dist/install.sh
@@ -83,7 +91,8 @@ jobs:
           body: |
             Optimized Linux x86_64 build of this commit.
 
-            Install: `install.sh` puts `kova`, `kovadump`, and `libkova.so` under `$HOME/.local`.
+            Install: `install.sh` puts `kova`, `kovadump`, `iggy-server`, and `libkova.so` under `$HOME/.local`.
+            `iggy-server` is Apache Iggy tag server-0.5.0. Kova does not start it. It listens on 127.0.0.1:8090.
             Image: `docker run --rm -p 27018:27018 -v kova:/var/lib/kova ghcr.io/mdaparte/kova:latest`
           files: |
             dist/kova-x86_64-unknown-linux-gnu.tar.gz

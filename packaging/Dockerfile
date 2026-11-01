@@ -1,14 +1,14 @@
 # Runtime image. The build context is the staged release directory:
-# kova, kovadump, libkova.so, kova.toml, seed-oracle.js, LICENSE, NOTICE.
+# kova, kovadump, iggy-server, libkova.so, kova.toml, seed-oracle.js, LICENSE, NOTICE.
 FROM debian:bookworm-slim
 
 RUN useradd --system --uid 10001 --home-dir /var/lib/kova --create-home kova
 
-COPY kova kovadump /usr/local/bin/
+COPY kova kovadump iggy-server /usr/local/bin/
 COPY libkova.so /usr/local/lib/libkova.so
 COPY kova.toml /etc/kova/kova.toml
 COPY seed-oracle.js /usr/share/kova/seed-oracle.js
-COPY LICENSE NOTICE /usr/share/kova/
+COPY LICENSE NOTICE LICENSE-iggy NOTICE-iggy /usr/share/kova/
 
 ENV KOVA_CONFIG=/etc/kova/kova.toml \
     KOVA_DATA_DIR=/var/lib/kova
