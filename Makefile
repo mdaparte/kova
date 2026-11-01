@@ -37,14 +37,17 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release iggy-server test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site clean
+.PHONY: help build release iggy-server run-iggy setup setup-window test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site clean
 
 help:
 	@printf '%s\n' \
 		'Targets:' \
 		'  build        cargo build' \
 		'  release      cargo build --release' \
-		'  iggy-server  Apache Iggy server that matches the linked client' \
+		'  iggy-server  build the Apache Iggy server that matches the linked client' \
+		'  run-iggy     start that server from [feed.server] in kova.toml' \
+		'  setup        kova-setup, the configuration walkthrough' \
+		'  setup-window the same questions in a window' \
 		'  test         cargo test --all-targets' \
 		'  test-sql     query_engine tests (--nocapture)' \
 		'  test-one     one test: make test-one TEST=name' \
@@ -90,6 +93,15 @@ release:
 
 iggy-server:
 	packaging/fetch-iggy-server.sh target
+
+run-iggy:
+	packaging/run-iggy-server.sh
+
+setup:
+	$(CARGO) run --bin kova-setup -- $(ARGS)
+
+setup-window:
+	$(CARGO) run --bin kova-setup -- --window $(ARGS)
 
 test:
 	$(CARGO) test --all-targets

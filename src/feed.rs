@@ -68,6 +68,7 @@ pub struct Feed {
 }
 
 enum Kind {
+    #[cfg(test)]
     Memory(Mutex<Vec<Record>>),
     Live(Live),
 }
@@ -83,6 +84,7 @@ struct Live {
 
 impl Feed {
     /// A feed that keeps records in memory. Tests read them back.
+    #[cfg(test)]
     pub fn memory() -> Arc<Self> {
         Arc::new(Self {
             kind: Kind::Memory(Mutex::new(Vec::new())),
@@ -106,8 +108,10 @@ impl Feed {
     /// Starts the publisher. `leader` is true on a standalone process and
     /// on the primary. A follower passes a check that returns false.
     pub fn arm(self: &Arc<Self>, leader: Arc<dyn Fn() -> bool + Send + Sync>) {
-        let Kind::Live(live) = &self.kind else {
-            return;
+        let live = match &self.kind {
+            #[cfg(test)]
+            Kind::Memory(_) => return,
+            Kind::Live(live) => live,
         };
         *live.leader.lock().expect("feed leader") = leader;
         live.armed.store(true, Ordering::Release);
@@ -126,6 +130,7 @@ impl Feed {
 
     /// Marks the live feed open without connecting. Tests use this to
     /// check the leader gate.
+    #[cfg(test)]
     pub fn arm_without_connection(&self, leader: bool) {
         let Kind::Live(live) = &self.kind else {
             return;
@@ -139,6 +144,7 @@ impl Feed {
             return;
         }
         match &self.kind {
+            #[cfg(test)]
             Kind::Memory(records_out) => {
                 records_out.lock().expect("feed records").extend(records);
             }
@@ -160,6 +166,7 @@ impl Feed {
         }
     }
 
+    #[cfg(test)]
     pub fn records(&self) -> Vec<Record> {
         match &self.kind {
             Kind::Memory(records) => records.lock().expect("feed records").clone(),
@@ -167,6 +174,7 @@ impl Feed {
         }
     }
 
+    #[cfg(test)]
     pub fn accepted(&self) -> u64 {
         match &self.kind {
             Kind::Memory(records) => records.lock().expect("feed records").len() as u64,
@@ -236,6 +244,7 @@ static CONNECTS: AtomicU64 = AtomicU64::new(0);
 
 /// How many times this process has tried to open Iggy. Stays at 0 when
 /// the feed is off.
+#[cfg(test)]
 pub fn connections() -> u64 {
     CONNECTS.load(Ordering::Relaxed)
 }

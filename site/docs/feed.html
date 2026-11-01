@@ -50,7 +50,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>Feed</h1>
       <p class="lede">A committed write publishes one JSON record to Apache Iggy. The condition stays in the listener. Off unless enabled.</p>
 <p>A program that wants to react to a write connects to a feed. It does not open a MongoDB driver, tail a collection, or read the oplog for that reaction. Kova publishes what happened. The listener decides what to do.</p>
-<p>The sidecar is <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, a separate process. Kova is a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client, or receives the same JSON over HTTP and applies its own condition. Kova does not start the Iggy server. The Linux release includes <code>iggy-server</code>, built from Apache Iggy tag <code>server-0.5.0</code>, the server that matches the client Kova links. Run <code>iggy-server</code> yourself. It listens on <code>127.0.0.1:8090</code>. Iggy's own documentation is the guide to streams, topics, offsets, and the SDKs.</p>
+<p>The sidecar is <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, a separate process. Kova is a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client, or receives the same JSON over HTTP and applies its own condition. Kova does not start the Iggy server. The Linux release includes <code>iggy-server</code>, built from Apache Iggy tag <code>server-0.5.0</code>, the server that matches the client Kova links. From a checkout, <code>make iggy-server</code> builds that binary and <code>make run-iggy</code> starts it. Iggy's own documentation is the guide to streams, topics, offsets, and the SDKs.</p>
 
 <h2 id="config">The switch</h2>
 <div class="ex">
@@ -61,9 +61,17 @@ address = "127.0.0.1:8090"
 username = "iggy"
 password = "iggy"
 stream = "kova"
-topic = "changes"</code></pre>
+topic = "changes"
+
+[feed.server]
+path = "iggy-data"
+address = "127.0.0.1:8090"
+http_enabled = false
+quic_enabled = false
+log_level = "info"</code></pre>
 </div>
 <p><code>enabled</code> false, or a missing section, publishes nothing and opens no connection. An empty username connects without credentials. The username and password in that sketch are the sample Iggy root. They are not a default you should expose. The address, stream, and topic in the sketch are the defaults.</p>
+<p><code>[feed.server]</code> is for the <code>iggy-server</code> that ships with Kova. <code>make run-iggy</code> reads it and starts that process. Kova does not. An empty <code>address</code> listens on the <code>[feed]</code> address. <code>path</code> is Iggy's own data directory, separate from <code>data/</code>. <code>http_enabled</code> opens <code>127.0.0.1:3000</code>. <code>quic_enabled</code> opens <code>127.0.0.1:8080</code>. <code>log_level</code> is <code>debug</code>, <code>info</code>, <code>warn</code>, or <code>error</code>. When both <code>username</code> and <code>password</code> are set, the first start creates that Iggy root user. Another Iggy installation ignores this table. Point <code>[feed]</code> at it and start it yourself.</p>
 
 <h2 id="record">The record</h2>
 <p>After a committed insert, update, or delete, the process that applied the write publishes one JSON record to stream <code>kova</code>, topic <code>changes</code>:</p>

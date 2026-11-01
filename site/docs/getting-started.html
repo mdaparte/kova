@@ -70,7 +70,7 @@ Start from a directory you want to keep. Pages and the log go to data/ there:
   KOVA_CONFIG=/home/ada/.local/share/kova/kova.toml kova
 iggy-server is Apache Iggy. It listens on 127.0.0.1:8090. Kova does not start it.</code></pre>
 </div>
-<p><code>kova</code>, <code>kovadump</code>, and <code>iggy-server</code> land in <code>~/.local/bin</code>. <code>libkova.so</code> lands in <code>~/.local/lib</code>. The config and the sample script land in <code>~/.local/share/kova</code>. If <code>~/.local/bin</code> is not on <code>PATH</code>, the script prints the line to add. <code>iggy-server</code> is Apache Iggy. It listens on <code>127.0.0.1:8090</code>. Kova does not start it.</p>
+<p><code>kova</code>, <code>kovadump</code>, and <code>iggy-server</code> land in <code>~/.local/bin</code>. <code>libkova.so</code> lands in <code>~/.local/lib</code>. The config and the sample script land in <code>~/.local/share/kova</code>. If <code>~/.local/bin</code> is not on <code>PATH</code>, the script prints the line to add. <code>iggy-server</code> is Apache Iggy. It listens on <code>127.0.0.1:8090</code>. Kova does not start it. From a checkout, <code>make iggy-server</code> builds that binary and <code>make run-iggy</code> starts it from <code>[feed.server]</code> in <code>kova.toml</code>.</p>
 <p>To put the files somewhere else, download the archive and run its installer with <code>PREFIX</code> set:</p>
 <div class="ex">
 <div class="ex-label">Shell</div>

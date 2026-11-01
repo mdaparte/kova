@@ -111,6 +111,8 @@ pub struct Config {
     pub security: SecurityConfig,
     /// Change feed. Absent or `enabled = false` publishes nothing.
     pub feed: FeedConfig,
+    /// Where records go, and how the file turns over.
+    pub log: LogConfig,
 }
 
 /// Full-text search configuration.
@@ -142,7 +144,82 @@ impl Default for Config {
             sharding: ShardingConfig::default(),
             security: SecurityConfig::default(),
             feed: FeedConfig::default(),
+            log: LogConfig::default(),
         }
+    }
+}
+
+fn default_log_target() -> String {
+    "stderr".into()
+}
+
+fn default_log_rotate() -> String {
+    "none".into()
+}
+
+fn default_log_max_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+fn default_log_keep() -> u64 {
+    7
+}
+
+/// Log destination and rotation.
+///
+/// `target` is `stderr` or a file path. `rotate` is `none`, `date`,
+/// `size`, or `date-and-size`. `keep` counts the active file. The
+/// `iggy-server` log is not this policy.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LogConfig {
+    #[serde(default = "default_log_target")]
+    pub target: String,
+    #[serde(default = "default_log_rotate")]
+    pub rotate: String,
+    #[serde(default = "default_log_max_bytes")]
+    pub max_bytes: u64,
+    #[serde(default = "default_log_keep")]
+    pub keep: u64,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            target: default_log_target(),
+            rotate: default_log_rotate(),
+            max_bytes: default_log_max_bytes(),
+            keep: default_log_keep(),
+        }
+    }
+}
+
+impl LogConfig {
+    fn validate(&self) -> Result<(), String> {
+        let target = self.target.trim();
+        let rotate = self.rotate.trim();
+        if !matches!(rotate, "none" | "date" | "size" | "date-and-size") {
+            return Err(format!(
+                "{CONFIG_FILE}: log.rotate {rotate:?} must be none, date, size, or date-and-size"
+            ));
+        }
+        if target.is_empty() {
+            return Err(format!("{CONFIG_FILE}: log.target must not be empty"));
+        }
+        if (target == "stderr") && rotate != "none" {
+            return Err(format!(
+                "{CONFIG_FILE}: log.rotate requires a file path in log.target"
+            ));
+        }
+        if self.keep == 0 {
+            return Err(format!("{CONFIG_FILE}: log.keep must be at least 1"));
+        }
+        if matches!(rotate, "size" | "date-and-size") && self.max_bytes == 0 {
+            return Err(format!(
+                "{CONFIG_FILE}: log.max_bytes must be at least 1 when rotating by size"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -199,6 +276,10 @@ pub struct FeedConfig {
     pub stream: String,
     #[serde(default = "default_feed_topic")]
     pub topic: String,
+    /// Settings for the `iggy-server` binary shipped with Kova.
+    /// `make run-iggy` reads this. Kova does not start that process.
+    #[serde(default)]
+    pub server: FeedServerConfig,
 }
 
 impl Default for FeedConfig {
@@ -210,12 +291,78 @@ impl Default for FeedConfig {
             password: String::new(),
             stream: default_feed_stream(),
             topic: default_feed_topic(),
+            server: FeedServerConfig::default(),
         }
+    }
+}
+
+fn default_feed_server_path() -> String {
+    "iggy-data".into()
+}
+
+fn default_feed_server_log() -> String {
+    "info".into()
+}
+
+/// How `make run-iggy` starts the Iggy binary that ships with Kova.
+///
+/// An empty `address` listens on [`FeedConfig::address`]. Another Iggy
+/// installation ignores this table. Kova never starts the process.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FeedServerConfig {
+    /// Directory for the Iggy data files.
+    #[serde(default = "default_feed_server_path")]
+    pub path: String,
+    /// TCP listen address. Empty uses [`FeedConfig::address`].
+    #[serde(default)]
+    pub address: String,
+    /// Open the HTTP API on `127.0.0.1:3000`.
+    #[serde(default)]
+    pub http_enabled: bool,
+    /// Open the QUIC listener on `127.0.0.1:8080`.
+    #[serde(default)]
+    pub quic_enabled: bool,
+    /// `debug`, `info`, `warn`, or `error`.
+    #[serde(default = "default_feed_server_log")]
+    pub log_level: String,
+    /// The service starts `iggy-server` before Kova when this is true.
+    /// The engine does not start that process.
+    #[serde(default)]
+    pub run: bool,
+}
+
+impl Default for FeedServerConfig {
+    fn default() -> Self {
+        Self {
+            path: default_feed_server_path(),
+            address: String::new(),
+            http_enabled: false,
+            quic_enabled: false,
+            log_level: default_feed_server_log(),
+            run: false,
+        }
+    }
+}
+
+impl FeedServerConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.path.trim().is_empty() {
+            return Err(format!("{CONFIG_FILE}: feed.server.path must not be empty"));
+        }
+        if !matches!(self.log_level.as_str(), "debug" | "info" | "warn" | "error") {
+            return Err(format!(
+                "{CONFIG_FILE}: feed.server.log_level {:?} must be one of debug, info, warn, error",
+                self.log_level
+            ));
+        }
+        Ok(())
     }
 }
 
 impl FeedConfig {
     fn validate(&self) -> Result<(), String> {
+        self.server.validate()?;
         if !self.enabled {
             return Ok(());
         }
@@ -663,7 +810,7 @@ impl Config {
     }
 
     /// Checks the resolved configuration for unusable values.
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.port == 0 {
             return Err(format!("{}: port must be non-zero", CONFIG_FILE));
         }
@@ -689,6 +836,7 @@ impl Config {
         self.replication.validate(self.port)?;
         self.sharding.validate(self.replication.enabled)?;
         self.feed.validate()?;
+        self.log.validate()?;
         Ok(())
     }
 }
@@ -762,6 +910,10 @@ mod tests {
         assert_eq!(config.feed.stream, "kova");
         assert_eq!(config.feed.topic, "changes");
         assert_eq!(config.feed.connection_string(), "iggy://127.0.0.1:8090");
+        assert_eq!(config.feed.server.path, "iggy-data");
+        assert!(config.feed.server.address.is_empty());
+        assert!(!config.feed.server.http_enabled);
+        assert!(!config.feed.server.quic_enabled);
 
         let on = Config::from_toml(
             r#"
@@ -787,6 +939,31 @@ mod tests {
         )
         .expect("parse");
         assert!(broken.validate().is_err());
+
+        let server = Config::from_toml(
+            r#"
+            [feed.server]
+            path = "streams"
+            address = "127.0.0.1:8091"
+            http_enabled = true
+            log_level = "debug"
+            "#,
+        )
+        .expect("feed server");
+        assert_eq!(server.feed.server.path, "streams");
+        assert_eq!(server.feed.server.address, "127.0.0.1:8091");
+        assert!(server.feed.server.http_enabled);
+        assert_eq!(server.feed.server.log_level, "debug");
+
+        let bad = Config::from_toml(
+            r#"
+            [feed.server]
+            log_level = "trace"
+            "#,
+        )
+        .expect("parse");
+        let err = bad.validate().expect_err("log level");
+        assert!(err.contains("log_level"), "{err}");
     }
 
     #[test]
@@ -801,6 +978,39 @@ mod tests {
         assert_eq!(config.storage, StorageConfig::default());
         assert!(config.storage.wal_fsync);
         assert!(config.storage.checkpoint_on_shutdown);
+        assert_eq!(config.log.target, "stderr");
+        assert_eq!(config.log.rotate, "none");
+        assert_eq!(config.log.max_bytes, 10 * 1024 * 1024);
+        assert_eq!(config.log.keep, 7);
+        assert!(!config.feed.server.run);
+    }
+
+    #[test]
+    fn test_log_rotation_rejects_unknown_policy() {
+        let config = Config::from_toml(
+            r#"
+            [log]
+            target = "stderr"
+            rotate = "weekly"
+            "#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("rotate");
+        assert!(err.contains("rotate"), "{err}");
+
+        let sized = Config::from_toml(
+            r#"
+            [log]
+            target = "kova.log"
+            rotate = "size"
+            max_bytes = 4096
+            keep = 2
+            "#,
+        )
+        .expect("parse");
+        sized.validate().expect("size policy");
+        assert_eq!(sized.log.rotate, "size");
+        assert_eq!(sized.log.keep, 2);
     }
 
     #[test]

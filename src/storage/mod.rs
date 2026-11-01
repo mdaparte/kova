@@ -180,6 +180,13 @@ impl PartitionWorker {
 
     /// Rebuilds indexes and the search index from the pages on disk.
     fn recover(&mut self, pending: Vec<wal::WalRecord>) -> Result<(), String> {
+        let released = self.engine.release_missing_pages();
+        if released > 0 {
+            LOGGER.warn(format!(
+                "partition {} dropped {released} missing page file(s)",
+                self.id
+            ));
+        }
         self.open_existing_indexes();
         let mut loaded = self.engine.catalog_is_warm() && self.restore_indexes();
         if loaded && !self.index.is_durable() {
@@ -3476,11 +3483,13 @@ impl PartitionRouter {
     ///
     /// The running server uses `kova.toml`. Tests get a private temp
     /// directory so parallel cases do not share a WAL.
+    #[cfg(test)]
     pub fn new(partition_count: usize) -> Self {
         Self::with_storage(partition_count, process_storage())
     }
 
     /// Spawns workers that persist under `storage.data_dir`.
+    #[cfg(test)]
     pub fn with_storage(partition_count: usize, storage: StorageConfig) -> Self {
         Self::opening(partition_count, storage, None)
     }
@@ -3766,15 +3775,9 @@ fn hides_id(spec: &Document) -> bool {
 ///
 /// Tests never touch the server's `data/` directory. The binary reads
 /// `kova.toml` (and `KOVA_DATA_DIR`).
+#[cfg(test)]
 fn process_storage() -> StorageConfig {
-    #[cfg(test)]
-    {
-        StorageConfig::ephemeral()
-    }
-    #[cfg(not(test))]
-    {
-        crate::config::CONFIG.storage.clone()
-    }
+    StorageConfig::ephemeral()
 }
 
 /// FNV-1a 64-bit hash — stable, fast, and dependency-free.
@@ -6329,11 +6332,7 @@ mod tests {
             .trim()
             .parse::<u64>()
             .expect("counter");
-        dispatch(
-            &router,
-            PartitionCommand::find("db.orders", doc! {}),
-        )
-        .await;
+        dispatch(&router, PartitionCommand::find("db.orders", doc! {})).await;
         let full = std::fs::read_to_string(dir.join("partition-0").join("page-reads.txt"))
             .expect("page counter")
             .trim()

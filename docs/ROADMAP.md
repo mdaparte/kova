@@ -43,6 +43,7 @@ replication, and multi-model indexing.
 | 27 | User guide | ✅ Complete |
 | 28 | Read path and scale | ✅ Complete |
 | 29 | Steps behind MongoDB | ⚪ Planned |
+| 30 | Configuration (walkthrough, window, service, logs) | ✅ Complete |
 
 ## Phase 1 - Networking & Interception ✅
 
@@ -990,6 +991,68 @@ This waits. The next pass on the engine picks it up. A new benchmark run replace
 - [ ] Bring `$group` by `job` and the equality `$lookup` of `dept` inside that band, or past it.
 - [ ] A later `make benchmark` is the check. A step that the page calls similar, or a step Kova wins, is done.
 
+## Phase 30 - Configuration ✅ Complete
+
+Setup writes `kova.toml` and opens again whenever the person wants to review or change it. The first run and a later run are the same script and the same window. An answer from the first run can be changed on any later run. Nothing is locked.
+
+A start that never ran setup keeps the defaults. The port is `27018`. The data directory is `data`. `[security]` is off, so every command is open. `[feed]` uses the sample Iggy account `iggy` / `iggy`. Kova does not start `iggy-server`. Skipping setup leaves those defaults as they are.
+
+### 30.1 Walkthrough
+
+A script asks one question at a time and writes `kova.toml`. The person can run it again. Enter accepts the suggestion. On a first run the suggestion is the default, except security, which is closed. On a later run the suggestion is the value already in the file, and any of these answers can be changed.
+
+- The listen port. On a first run the suggestion is `27018` when that port is free, and the next free port above it when it is taken. On a later run the suggestion is the port in the file.
+- The data directory. On a first run the suggestion is an absolute path, so a service started at boot does not depend on the directory where the script ran. Another path is accepted, including the relative `data`. On a later run the suggestion is the path in the file. Pointing at another directory writes that path. Files already stored stay where they are. The directory is created when it is missing.
+- The bundled `iggy-server`. On a first run the suggestion is no. Kova still does not start it, and `[feed]` can point at an Iggy that is already running. Yes records that this machine runs the `iggy-server` shipped with the build. The script then asks for that server's user and password. The suggestion is a generated user name and a generated password of 20 characters. The person can replace either. The accepted pair is written under `[feed]`, which is how Kova logs in. The sample `iggy` / `iggy` is what a start without the script keeps. On a later run the suggestion is what the file already says. The user is shown. Enter keeps the password already written. A new password replaces it.
+- Security. On a first run the suggestion is closed: `[security] enabled = true`. Enter accepts that. The script then asks for the first user and password. The suggestion is a generated user name and a generated password of 20 characters. That user has the `root` role. The script starts Kova, sends `createUser` while the catalog has no users, and stops it. The plaintext password is not written to `kova.toml`. Leaving security open requires an explicit confirmation. That confirmation is the only path that writes `[security] enabled = false`. The window asks the same way: closed is the selected choice, and open is a confirmation of its own. On a later run the suggestion is the value already in the file. Switching from closed to open still requires that confirmation. Switching from open to closed writes `[security] enabled = false`. A user is created only when security is on and the catalog has no users.
+
+A later run does not reset keys these questions do not cover. Page size, the buffer pool, replication, and sharding stay as they are in the file.
+
+### 30.2 Window
+
+A machine with a graphical session can open the same questions in a window, the first time and any time after. The window writes the same `kova.toml` the script writes, with the same suggestions. A machine without a display runs the script. The window is the same setup, not a second file format.
+
+### 30.3 Service
+
+The script and the window ask whether Kova starts with the operating system. On a first run the suggestion is no. On a later run the suggestion is whether a service is already installed.
+
+Yes installs or updates the native service for the account that owns the data directory. It does not leave a second copy to start by hand. No removes the service when one is installed. The data directory stays.
+
+- Linux: a systemd user unit or a system unit.
+- Windows: a Windows service under that account.
+- macOS: a launch agent or a launch daemon.
+
+The service uses the `kova.toml` the setup wrote. When the person chose the bundled `iggy-server`, the service starts that server first and then Kova. Otherwise it starts only Kova. It starts on boot and comes back after a crash. Removing the service leaves the data directory in place. Kova does not supervise itself.
+
+### 30.4 Logs
+
+The script and the window ask how Kova's log turns over. On a first run the suggestion is today's behavior: stderr, and no rotation. On a later run the suggestion is the policy already in the file, and it can be changed.
+
+A file path can be chosen instead. Rotation is `none`, `date`, `size`, or `date-and-size`. `date` opens a new file each calendar day, local time. `size` opens a new file when the current one would pass `max_bytes`. `date-and-size` does both. `keep` is how many files stay. An older file past that count is removed. `log_level` stays the minimum level. The `iggy-server` log stays in its own directory under `[feed.server]` and is not this policy.
+
+```toml
+[log]
+target = "stderr"
+rotate = "none"
+max_bytes = 10485760
+keep = 7
+```
+
+`target` is `stderr` or a file path.
+
+### Phase 30 - Sub-tasks
+
+- [x] A start that never ran setup listens on `27018`, stores data in `data`, leaves security off, and does not start `iggy-server`.
+- [x] The script suggests `27018` when it is free and the next free port when it is not, and writes the port the person accepts.
+- [x] The script suggests an absolute data directory, accepts another path, and creates it when it is missing.
+- [x] Declining the bundled `iggy-server` leaves Kova not starting it. Accepting it writes `[feed]` and `[feed.server]` and suggests a generated user and a 20-character password. A later run shows the user already written and keeps the password unless a new one is entered.
+- [x] On a first run the suggestion is security on. Accepting it creates the first user with the `root` role through `createUser` and does not write the password into `kova.toml`. Security stays off only after an explicit confirmation. A later run shows the current choice and can change it. A user is created only when security is on and the catalog has no users.
+- [x] Opening setup again shows the values in the current `kova.toml`. Each answer can be changed. Page size, the buffer pool, replication, and sharding stay as they are in the file.
+- [x] The window asks the same questions and writes the same file, the first time and any time after. Without a display, the script is the path.
+- [x] Accepting the service installs systemd on Linux, a Windows service on Windows, and launchd on macOS. A later run can update or remove that service. The bundled `iggy-server` starts first only when it was chosen. Removing the service leaves the data directory in place.
+- [x] The log stays on stderr with no rotation unless a file policy is set: by date, by size, or both, with a keep count. A later run can change that policy.
+- [x] Test: accept every suggestion and the written port is free, the data directory exists, security is on, a root user exists, the password is not in `kova.toml`, the Iggy password is not `iggy`, and no service unit is installed. Security off happens only after an explicit confirmation. Open setup again, change the port, and the new port is written while the data directory stays. Accept the service on each OS and a reboot starts Kova. Open setup again and remove the service: the data directory remains. A log set to `size` with `keep = 2` leaves two files.
+
 ## Architecture Principles
 
 1. **Hybrid memory+disk**: documents live in pages. RAM holds the buffer
@@ -1072,4 +1135,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1-28 are complete. Still open: the steps behind MongoDB (Phase 29).*
+*Phases 1-28 and 30 are complete. Still open: the steps behind MongoDB (Phase 29).*

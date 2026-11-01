@@ -67,6 +67,30 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <p>Past <code>max_connections</code> the listener accepts the socket, replies with an error, and closes it. That socket is not counted in <code>connectionsActive</code>. <code>KOVA_LOG_LEVEL=debug kova</code> raises the log level for that run.</p>
 <p>The warning flag logs a WARN when a query uses a Kova extension such as <code>$text.$boost</code> or <code>$text.$decay</code>, or an operator the engine does not implement. Set it to false to silence those lines. The query still runs when the extension is supported.</p>
 
+<h2 id="setup">Setup</h2>
+<p><code>kova-setup</code> writes <code>kova.toml</code> and opens again later with the current values filled in. Enter accepts the suggestion. The first run suggests a free port, an absolute data directory, and security closed. Leaving security open requires typing <code>OPEN</code>. <code>kova-setup --window</code> asks the same questions in a window when the machine has a graphical session.</p>
+<p>The walkthrough can also install a service that starts with the operating system: systemd on Linux, a Windows service, or launchd on macOS. The suggestion is no. Choosing the bundled <code>iggy-server</code> starts that server first. Removing the service leaves the data directory in place.</p>
+
+<h2 id="logs">Logs</h2>
+<table class="grid">
+  <thead><tr><th>Key</th><th>Default</th><th>What it changes</th></tr></thead>
+  <tbody>
+    <tr><td><code>target</code></td><td><code>stderr</code></td><td><code>stderr</code>, or a file path.</td></tr>
+    <tr><td><code>rotate</code></td><td><code>none</code></td><td><code>none</code>, <code>date</code>, <code>size</code>, or <code>date-and-size</code>.</td></tr>
+    <tr><td><code>max_bytes</code></td><td>10485760</td><td>Roll a size-based file when the next record would pass this.</td></tr>
+    <tr><td><code>keep</code></td><td>7</td><td>How many files stay, including the one being written.</td></tr>
+  </tbody>
+</table>
+<div class="ex">
+<div class="ex-label">Config</div>
+<pre><code class="lang-cfg">[log]
+target = "stderr"
+rotate = "none"
+max_bytes = 10485760
+keep = 7</code></pre>
+</div>
+<p><code>date</code> opens a new file each calendar day, local time. <code>size</code> opens a new file when the current one would pass <code>max_bytes</code>. <code>date-and-size</code> does both. <code>stderr</code> does not rotate. The <code>iggy-server</code> log stays in its own directory.</p>
+
 <h2 id="search">Search</h2>
 <div class="ex">
 <div class="ex-label">Config</div>
@@ -98,11 +122,11 @@ stopwords = []</code></pre>
   <li><a href="/docs/sharding">Sharding</a></li>
   <li><a href="/docs/feed">Feed</a></li>
 </ul>
-<p>Leaving <code>[feed]</code> out publishes nothing and opens no connection. The keys are on <a href="/docs/feed">Feed</a>.</p>
+<p>Leaving <code>[feed]</code> out publishes nothing and opens no connection. <code>[feed.server]</code> is read by <code>make run-iggy</code>, which starts the bundled <code>iggy-server</code>. The keys are on <a href="/docs/feed">Feed</a>.</p>
 
       <nav class="pager"><a href="/docs/odbc"><span>Previous</span>ODBC</a><a class="next" href="/docs/security"><span>Next</span>Security</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#listener">Listener</a><a href="#search">Search</a><a href="#storage">Storage</a><a href="#optional">Sections that start off</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#listener">Listener</a><a href="#setup">Setup</a><a href="#logs">Logs</a><a href="#search">Search</a><a href="#storage">Storage</a><a href="#optional">Sections that start off</a></nav>
   </div>
   <footer>
     <span>KOVA</span>

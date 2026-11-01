@@ -14,6 +14,7 @@ use super::buffer_pool::BufferPool;
 use super::disk::PageStore;
 use super::page::Page;
 use super::{apply_update, document_id_string, document_matches};
+use crate::logger::LOGGER;
 
 const DOCS_MAGIC: u32 = 0x444F_4353; // DOCS
 const CATA_MAGIC: u32 = 0x4341_5441; // CATA
@@ -996,6 +997,69 @@ impl Heap {
             rebuilt += 1;
         }
         Ok(rebuilt)
+    }
+
+    /// Drops page ids whose files are already gone.
+    ///
+    /// A checkpoint can record the page, and a crash during the flush can
+    /// leave the catalog pointing at a file that never landed. The bytes
+    /// are not on disk. Keeping the id makes the next start refuse to
+    /// boot. The warning names the collection and the catalog's document
+    /// count. A collection with no pages left counts 0.
+    pub fn release_missing_pages(&mut self, pool: &BufferPool, disk: &PageStore) -> usize {
+        let names = self.names();
+        let mut released = 0usize;
+        for name in names {
+            if crate::storage::catalog::is_catalog(&name) {
+                continue;
+            }
+            let counted = self
+                .collections
+                .get(&name)
+                .map(|state| state.doc_count)
+                .unwrap_or(0);
+            let pages = self
+                .collections
+                .get(&name)
+                .map(|state| {
+                    state
+                        .pages
+                        .iter()
+                        .copied()
+                        .chain(state.continuations.iter().copied())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for page_id in pages {
+                if pool.is_cached(page_id) || disk.stored(page_id) {
+                    continue;
+                }
+                self.forget_page(&name, page_id);
+                released += 1;
+                LOGGER.warn(format!(
+                    "collection {name} listed page {page_id}, the file is gone, and the catalog counts {counted} document(s). Dropping that page."
+                ));
+            }
+            if let Some(state) = self.collections.get_mut(&name) {
+                if state.pages.is_empty() && state.continuations.is_empty() {
+                    state.doc_count = 0;
+                    state.ids.clear();
+                    state.locations.clear();
+                }
+            }
+        }
+        released
+    }
+
+    fn forget_page(&mut self, collection: &str, page_id: u64) {
+        self.live.remove(&page_id);
+        let Some(state) = self.collections.get_mut(collection) else {
+            return;
+        };
+        state.pages.retain(|id| *id != page_id);
+        state.continuations.retain(|id| *id != page_id);
+        state.overflow_heads.remove(&page_id);
+        state.locations.retain(|_, page| *page != page_id);
     }
 
     /// Fills the id set from the pages the catalog already names.
@@ -2156,12 +2220,16 @@ impl Heap {
             disk.remove(id)?;
             self.live.remove(&id);
         }
-        let cap = self.capacity().checked_sub(12).filter(|n| *n > 0).ok_or_else(|| {
-            format!(
-                "page payload of {} bytes cannot hold an index header",
-                self.capacity()
-            )
-        })?;
+        let cap = self
+            .capacity()
+            .checked_sub(12)
+            .filter(|n| *n > 0)
+            .ok_or_else(|| {
+                format!(
+                    "page payload of {} bytes cannot hold an index header",
+                    self.capacity()
+                )
+            })?;
         let pieces: Vec<&[u8]> = if bytes.is_empty() {
             vec![&[]]
         } else {
@@ -2332,7 +2400,10 @@ fn decode_payloads(payloads: &[Vec<u8>]) -> Result<Vec<Vec<Document>>, String> {
         .unwrap_or(1)
         .clamp(1, 8);
     if payloads.len() < 2 || workers < 2 {
-        return payloads.iter().map(|payload| decode_docs(payload)).collect();
+        return payloads
+            .iter()
+            .map(|payload| decode_docs(payload))
+            .collect();
     }
     let width = workers.min(payloads.len());
     let size = payloads.len().div_ceil(width);
@@ -2649,6 +2720,41 @@ mod tests {
         assert_eq!(heap.overflow_count("orders"), 0);
         assert!(heap.page_count("orders") < 120);
         assert!(heap.page_count("orders") <= before.saturating_mul(3).max(4));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_page_file_is_dropped() {
+        let dir = scratch();
+        let pool = pool(&dir);
+        let disk = PageStore::open(dir.join("pages"), 4096, None).unwrap();
+        let mut heap = Heap::empty(4096, false);
+        heap.install_user(&doc! {
+            "_id": "benchmark.extra",
+            "doc_count": 0i64,
+            "pages": [99i64],
+        });
+        heap.install_user(&doc! {
+            "_id": "benchmark.dept",
+            "doc_count": 4i64,
+            "pages": [193i64],
+        });
+        fs::write(
+            dir.join("pages").join(format!("{:016x}.page", 100u64)),
+            b"page",
+        )
+        .unwrap();
+        heap.install_user(&doc! {
+            "_id": "benchmark.kept",
+            "doc_count": 2i64,
+            "pages": [100i64],
+        });
+        assert_eq!(heap.release_missing_pages(&pool, &disk), 2);
+        assert!(heap.collections["benchmark.extra"].pages.is_empty());
+        assert!(heap.collections["benchmark.dept"].pages.is_empty());
+        assert_eq!(heap.collections["benchmark.dept"].doc_count, 0);
+        assert_eq!(heap.collections["benchmark.kept"].pages, vec![100]);
+        assert_eq!(heap.collections["benchmark.kept"].doc_count, 2);
         let _ = fs::remove_dir_all(&dir);
     }
 }

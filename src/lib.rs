@@ -16,6 +16,7 @@ mod query_engine;
 mod replication;
 mod search;
 mod security;
+pub mod setup;
 mod shard;
 mod storage;
 mod types;
@@ -60,6 +61,19 @@ pub fn install_panic_hook() {
 /// ends the process.
 pub async fn serve() {
     let config = &config::CONFIG;
+    if let Err(err) = logger::install_log(
+        &config.log.target,
+        &config.log.rotate,
+        config.log.max_bytes,
+        config.log.keep,
+    ) {
+        eprintln!(
+            "[Kova] {} CONFIG ERROR: {}",
+            logger::format_timestamp(logger::now_millis()),
+            err
+        );
+        std::process::exit(1);
+    }
     logger::LOGGER.set_min_level(config.log_level());
 
     logger::LOGGER.info(format!(

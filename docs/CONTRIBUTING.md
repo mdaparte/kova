@@ -222,6 +222,11 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
 - **Phase 29 - Steps behind MongoDB:** the five-pass benchmark steps whose
   mean is slower than MongoDB by more than the standard deviation of the
   paired differences. Similar steps stay as they are. ⚪ Planned.
+- **Phase 30 - Configuration:** `kova-setup` writes `kova.toml` and opens
+  again with the current values. Security is suggested closed. A window
+  asks the same questions. systemd, a Windows service, and launchd can
+  start Kova with the operating system. Logs can rotate by date, size, or
+  both. ✅ Complete.
 
 ## 6. License
 
