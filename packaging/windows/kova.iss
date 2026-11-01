@@ -3,10 +3,10 @@
 ; The image is not signed.
 
 #ifndef BinDir
-  #error Pass /DBinDir= with kova.exe, kova-setup.exe, kovadump.exe, and iggy-server.exe
+  #error Pass /DBinDir= with kova.exe, kova-setup.exe, kovadump.exe, kova.dll, and iggy-server.exe
 #endif
 
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.1"
 
 [Setup]
 AppId={{7C4E9A2B-1D58-4F63-8E0A-6B2F4C8D9E10}
@@ -39,6 +39,7 @@ Name: desktopicon; Description: "Add a desktop shortcut"; GroupDescription: "Sho
 Source: "{#BinDir}\kova.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\kova-setup.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\kovadump.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\kova.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\iggy-server.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\LICENSE-iggy"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#BinDir}\NOTICE-iggy"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
@@ -48,6 +49,19 @@ Source: "..\iggy-server-config.py"; DestDir: "{app}\packaging"; Flags: ignorever
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\NOTICE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "kova.ico"; DestDir: "{app}"; Flags: ignoreversion
+
+; 64-bit view. uninsdeletevalue on the shared lists, uninsdeletekey only on the Kova keys.
+[Registry]
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBCINST.INI\ODBC Drivers"; ValueType: string; ValueName: "Kova"; ValueData: "Installed"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBCINST.INI\Kova"; ValueType: string; ValueName: "Driver"; ValueData: "{app}\kova.dll"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBCINST.INI\Kova"; ValueType: string; ValueName: "Setup"; ValueData: "{app}\kova.dll"
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBCINST.INI\Kova"; ValueType: dword; ValueName: "UsageCount"; ValueData: "1"
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBC.INI\ODBC Data Sources"; ValueType: string; ValueName: "Kova"; ValueData: "Kova"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBC.INI\Kova"; ValueType: string; ValueName: "Driver"; ValueData: "{app}\kova.dll"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBC.INI\Kova"; ValueType: string; ValueName: "SERVER"; ValueData: "127.0.0.1"
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBC.INI\Kova"; ValueType: string; ValueName: "PORT"; ValueData: "27018"
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBC.INI\Kova"; ValueType: string; ValueName: "DATABASE"; ValueData: "db"
+Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBC.INI\Kova"; ValueType: string; ValueName: "Description"; ValueData: "Kova"
 
 [Icons]
 Name: "{autoprograms}\Kova"; Filename: "{app}\kova-setup.exe"; Parameters: "--window"; IconFilename: "{app}\kova.ico"
