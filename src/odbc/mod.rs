@@ -405,10 +405,21 @@ type ProfileFn = unsafe extern "C" fn(
 ) -> i32;
 
 fn profile_fn() -> Option<ProfileFn> {
-    static SLOT: std::sync::OnceLock<Option<ProfileFn>> = std::sync::OnceLock::new();
-    *SLOT.get_or_init(|| unsafe { load_profile() })
+    // SQLGetPrivateProfileString lives in unixODBC. The Windows DLL does not
+    // link dlopen, so a DSN is read only on Unix. A full connection string
+    // still connects.
+    #[cfg(not(unix))]
+    {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        static SLOT: std::sync::OnceLock<Option<ProfileFn>> = std::sync::OnceLock::new();
+        *SLOT.get_or_init(|| unsafe { load_profile() })
+    }
 }
 
+#[cfg(unix)]
 unsafe fn load_profile() -> Option<ProfileFn> {
     extern "C" {
         fn dlopen(filename: *const std::ffi::c_char, flags: i32) -> *mut std::ffi::c_void;

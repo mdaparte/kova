@@ -391,21 +391,15 @@ fn host_for() -> ServiceHost {
     }
 }
 
+#[cfg(unix)]
 fn is_root() -> bool {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|text| text.trim() == "0")
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|text| text.trim() == "0")
+        .unwrap_or(false)
 }
 
 fn config_file(flag: Option<PathBuf>) -> PathBuf {
