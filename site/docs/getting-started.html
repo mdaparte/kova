@@ -50,7 +50,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>Getting started</h1>
       <p class="lede">Install Kova, start it on port 27018, insert a document, and read it back after a restart.</p>
       
-<p>Each merge into <code>main</code> publishes a Linux x86_64 build and a container image. Both are the optimized server. The examples use <code>mongosh</code>, the MongoDB shell. A driver in another language sends the same commands to the same port. The server itself does not need a MongoDB installation.</p>
+<p>Each merge into <code>main</code> publishes a Linux x86_64 build, an Apple silicon disk image, and a container image. All three are the optimized server. The examples use <code>mongosh</code>, the MongoDB shell. A driver in another language sends the same commands to the same port. The server itself does not need a MongoDB installation.</p>
 
 <h2 id="install">Install</h2>
 <p>This downloads the current build and installs it under your home directory:</p>
@@ -86,6 +86,10 @@ PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</code></pre>
   /opt/kova/share/kova/kova.toml</code></pre>
 </div>
 <p>The archive has a <code>.sha256</code> file next to it on the same release, for checking the download.</p>
+
+<h2 id="mac">Mac</h2>
+<p>The same release has <code>Kova-aarch64.dmg</code> for Apple silicon. Open the disk image and drag Kova onto Applications. Opening Kova runs the setup window. That window can install a login item that starts the server. The suggested data directory is <code>~/Library/Application Support/Kova</code>. <code>iggy-server</code> is inside the app. Kova does not start it. The setup window starts it when that option is on.</p>
+<p>The disk image is not notarized. The first open asks you to right-click Kova and choose Open.</p>
 
 <h2 id="docker">Docker</h2>
 <p>The same build is the image <code>ghcr.io/mdaparte/kova</code>. The tag <code>latest</code> is the newest merge. A tag with the commit id is that exact build. Pages and the log stay in the volume <code>kova</code>.</p>
@@ -254,7 +258,7 @@ async fn main() {
 
       <nav class="pager"><a href="/docs"><span>Previous</span>Welcome</a><a class="next" href="/docs/concepts"><span>Next</span>How data is stored</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#crate">Rust crate</a><a href="#next">What to open next</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#mac">Mac</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#crate">Rust crate</a><a href="#next">What to open next</a></nav>
   </div>
   <footer>
     <span>KOVA</span>

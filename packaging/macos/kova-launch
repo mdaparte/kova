@@ -1,0 +1,6 @@
+#!/bin/sh
+# Opening Kova.app asks the setup questions in a window.
+# The window can install the login item that starts the server.
+set -eu
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+exec "$here/kova-setup" --window

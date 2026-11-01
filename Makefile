@@ -37,7 +37,7 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release iggy-server run-iggy setup setup-window test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site clean
+.PHONY: help build release iggy-server run-iggy setup setup-window test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site mac-dmg clean
 
 help:
 	@printf '%s\n' \
@@ -72,6 +72,7 @@ help:
 		'  restore      restore DUMP into database db (default db.kdmp)' \
 		'  doc          cargo doc --no-deps --open' \
 		'  site         static site at http://127.0.0.1:4173' \
+		'  mac-dmg      Mac disk image. BINS=dir with kova, kova-setup, kovadump, iggy-server' \
 		'  clean        cargo clean' \
 		'' \
 		'The mongosh and kovadump targets talk to a server that is already running.' \
@@ -209,6 +210,15 @@ SITE_PORT ?= 4173
 
 site:
 	python3 scripts/serve-site.py $(SITE_PORT)
+
+# Apple silicon disk image. BINS is the directory that holds the four
+# Mach-O files. Without it the image still has the icon and the launcher.
+#   make mac-dmg BINS=target/release
+BINS ?=
+OUT ?= dist/Kova.dmg
+
+mac-dmg:
+	BINS="$(BINS)" OUT="$(OUT)" packaging/macos/build-dmg.sh
 
 clean:
 	$(CARGO) clean

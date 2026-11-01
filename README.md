@@ -2,7 +2,7 @@
 
 Kova is a database you talk to with a MongoDB driver. One process stores the documents, answers SQL, and searches text. The listener defaults to port 27018.
 
-A merge into `main` publishes the Linux x86_64 build and a container image.
+A merge into `main` publishes the Linux x86_64 build, an Apple silicon disk image, and a container image. On a Mac, open `Kova-aarch64.dmg` and drag Kova to Applications. The disk image is not notarized. The first open asks you to right-click Kova and choose Open.
 
 Install on the machine, then start from a directory you want to keep:
 
