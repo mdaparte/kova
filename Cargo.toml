@@ -1,12 +1,12 @@
 [package]
 name = "kovadb"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 description = "Database you talk to with a MongoDB driver. Stores documents, answers SQL, and searches text."
 repository = "https://github.com/mdaparte/kova"
 readme = "README.md"
-keywords = ["database", "mongodb", "sql"]
+keywords = ["database", "mongodb", "sql", "document", "tf-idf" ]
 categories = ["database"]
 autobins = false
 

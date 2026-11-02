@@ -1,7 +1,10 @@
 #!/bin/sh
 # Build iggy-server from the Apache Iggy tag whose Rust SDK is crates.io iggy 0.7.0.
 # That tag is server-0.5.0. The later tag named server-0.7.0 speaks a newer protocol.
-# The checkout stays in target/iggy-src so the next build does not start over.
+# The checkout stays in target/iggy-src so a local rebuild does not start over.
+# The release cache sweeps files under target/ and can leave .git behind
+# without Cargo.toml. A checkout is reused only when the server manifest
+# for this tag is still there.
 set -eu
 
 tag=server-0.5.0
@@ -28,16 +31,22 @@ fi
 
 cache="$root/target/iggy-src"
 src="$cache/src"
+stamp="$cache/tag"
+manifest="$src/core/server/Cargo.toml"
 mkdir -p "$cache"
-if [ ! -d "$src/.git" ]; then
+if [ ! -f "$manifest" ] || [ "$(cat "$stamp" 2>/dev/null || true)" != "$tag" ]; then
   rm -rf "$src"
   git clone --depth 1 --branch "$tag" https://github.com/apache/iggy.git "$src"
+  printf '%s\n' "$tag" > "$stamp"
 fi
 
 (
   cd "$src"
   # The warnings are in the Iggy tree. Allow them so this log stays on errors.
-  RUSTFLAGS="${RUSTFLAGS:-} -A warnings" cargo build --release --locked -p server --bin iggy-server
+  # The manifest path keeps Cargo on this checkout when a parent Cargo.toml exists.
+  CARGO_TARGET_DIR="$src/target" \
+    RUSTFLAGS="${RUSTFLAGS:-} -A warnings" \
+    cargo build --release --locked --manifest-path "$src/Cargo.toml" -p server --bin iggy-server
 )
 
 cp "$src/target/release/iggy-server$exe" "$bin"
