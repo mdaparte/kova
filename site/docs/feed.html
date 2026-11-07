@@ -38,7 +38,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   </header>
   <div class="doc-shell">
     <nav class="side" aria-label="Documentation">
-      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts">How data is stored</a></div>
+      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/platforms">Operating systems</a><a href="/docs/concepts">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a><a href="/docs/feed" class="here">Feed</a></div>
@@ -50,7 +50,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
       <h1>Feed</h1>
       <p class="lede">A committed write publishes one JSON record to Apache Iggy. The condition stays in the listener. Off unless enabled.</p>
 <p>A program that wants to react to a write connects to a feed. It does not open a MongoDB driver, tail a collection, or read the oplog for that reaction. Kova publishes what happened. The listener decides what to do.</p>
-<p>The sidecar is <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, a separate process. Kova is a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client, or receives the same JSON over HTTP and applies its own condition. Kova does not start the Iggy server. The Linux release includes <code>iggy-server</code>, built from Apache Iggy tag <code>server-0.5.0</code>, the server that matches the client Kova links. From a checkout, <code>make iggy-server</code> builds that binary and <code>make run-iggy</code> starts it. Iggy's own documentation is the guide to streams, topics, offsets, and the SDKs.</p>
+<p>The sidecar is <a href="https://iggy.apache.org/docs/">Apache Iggy</a>, a separate process. Kova is a client of it. Iggy stores the stream, the offset, and the consumers. A listener uses an Iggy client, or receives the same JSON over HTTP and applies its own condition. Kova does not start the Iggy server. Each release includes <code>iggy-server</code>, built from Apache Iggy tag <code>server-0.5.0</code>, the server that matches the client Kova links. The Windows binary of that tag is described on <a href="/docs/platforms#windows">Operating systems</a>. From a checkout, <code>make iggy-server</code> builds that binary and <code>make run-iggy</code> starts it. Iggy's own documentation is the guide to streams, topics, offsets, and the SDKs.</p>
 
 <h2 id="config">The switch</h2>
 <div class="ex">

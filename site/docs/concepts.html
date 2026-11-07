@@ -38,7 +38,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
   </header>
   <div class="doc-shell">
     <nav class="side" aria-label="Documentation">
-      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/concepts" class="here">How data is stored</a></div>
+      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/platforms">Operating systems</a><a href="/docs/concepts" class="here">How data is stored</a></div>
 <div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
 <div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
 <div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a><a href="/docs/feed">Feed</a></div>
@@ -77,7 +77,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <h2 id="catalog">The catalog is queryable</h2>
 <p>Database names, collections, field types, indexes, users, roles, views, and autoincrement counters are rows in <code>admin</code>. You can <code>find</code> them. They are written at checkpoint from the memory the process already keeps, and read back on startup so the process does not scan every document to remember the schema. The <a href="/docs/catalog">Catalog</a> page lists each collection and the fields on its rows.</p>
 
-      <nav class="pager"><a href="/docs/getting-started"><span>Previous</span>Getting started</a><a class="next" href="/docs/documents"><span>Next</span>Documents</a></nav>
+      <nav class="pager"><a href="/docs/platforms"><span>Previous</span>Operating systems</a><a class="next" href="/docs/documents"><span>Next</span>Documents</a></nav>
     </article>
     <nav class="onpage"><h2>On this page</h2><a href="#names">Names</a><a href="#durability">What survives a crash</a><a href="#partitions">Four workers inside one process</a><a href="#indexes-and-text">Indexes sit beside the pages</a><a href="#catalog">The catalog is queryable</a></nav>
   </div>

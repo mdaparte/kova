@@ -40,6 +40,19 @@ if [ ! -f "$manifest" ] || [ "$(cat "$stamp" 2>/dev/null || true)" != "$tag" ]; 
   printf '%s\n' "$tag" > "$stamp"
 fi
 
+# This tag refuses Windows in one line, and the segment readers call
+# read_exact_at and posix_fadvise. The patch keeps the tag. Windows fills
+# the buffer with seek_read. The sequential-read hint stays on Linux.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    marker="$src/.kova-windows-read"
+    if [ ! -f "$marker" ]; then
+      patch -p1 -d "$src" -i "$root/packaging/windows/iggy-server-0.5.0-windows.patch"
+      printf '%s\n' "$tag" > "$marker"
+    fi
+    ;;
+esac
+
 (
   cd "$src"
   # The warnings are in the Iggy tree. Allow them so this log stays on errors.

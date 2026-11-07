@@ -1,0 +1,133 @@
+--- a/core/server/src/lib.rs
++++ b/core/server/src/lib.rs
+@@ -23,9 +23,6 @@
+ #[global_allocator]
+ static GLOBAL: MiMalloc = MiMalloc;
+ 
+-#[cfg(windows)]
+-compile_error!("iggy-server doesn't support windows.");
+-
+ pub mod archiver;
+ pub mod args;
+ pub mod binary;
+--- a/core/server/src/streaming/segments/indexes/index_reader.rs
++++ b/core/server/src/streaming/segments/indexes/index_reader.rs
+@@ -24,7 +24,6 @@
+ use std::{
+     fs::File as StdFile,
+     io::ErrorKind,
+-    os::unix::fs::FileExt,
+     sync::{
+         Arc,
+         atomic::{AtomicU64, Ordering},
+@@ -339,12 +338,12 @@
+             if use_pool {
+                 let mut buf = PooledBuffer::with_capacity(len as usize);
+                 unsafe { buf.set_len(len as usize) };
+-                file.read_exact_at(&mut buf, offset as u64)?;
++                read_exact_at(&file, &mut buf, offset as u64)?;
+                 Ok(buf)
+             } else {
+                 let mut buf = BytesMut::with_capacity(len as usize);
+                 unsafe { buf.set_len(len as usize) };
+-                file.read_exact_at(&mut buf, offset as u64)?;
++                read_exact_at(&file, &mut buf, offset as u64)?;
+                 Ok(PooledBuffer::from_existing(buf))
+             }
+         })
+@@ -388,3 +387,29 @@
+         Ok(Some(index))
+     }
+ }
++
++fn read_exact_at(file: &StdFile, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
++    #[cfg(unix)]
++    {
++        std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
++    }
++    #[cfg(windows)]
++    {
++        let mut filled = 0;
++        while filled < buf.len() {
++            let n = std::os::windows::fs::FileExt::seek_read(
++                file,
++                &mut buf[filled..],
++                offset + filled as u64,
++            )?;
++            if n == 0 {
++                return Err(std::io::Error::new(
++                    std::io::ErrorKind::UnexpectedEof,
++                    "failed to fill whole buffer",
++                ));
++            }
++            filled += n;
++        }
++        Ok(())
++    }
++}
+--- a/core/server/src/streaming/segments/messages/messages_reader.rs
++++ b/core/server/src/streaming/segments/messages/messages_reader.rs
+@@ -21,7 +21,7 @@
+ use bytes::BytesMut;
+ use error_set::ErrContext;
+ use iggy_common::IggyError;
+-use std::{fs::File as StdFile, os::unix::prelude::FileExt};
++use std::fs::File as StdFile;
+ use std::{
+     io::ErrorKind,
+     sync::{
+@@ -56,8 +56,8 @@
+             })
+             .map_err(|_| IggyError::CannotReadFile)?;
+ 
+-        // posix_fadvise() doesn't exist on MacOS
+-        #[cfg(not(target_os = "macos"))]
++        // posix_fadvise() is a sequential-read hint. MacOS and Windows have no equivalent.
++        #[cfg(all(unix, not(target_os = "macos")))]
+         {
+             let _ = nix::fcntl::posix_fadvise(
+                 &file,
+@@ -182,15 +182,41 @@
+             if use_pool {
+                 let mut buf = PooledBuffer::with_capacity(len as usize);
+                 unsafe { buf.set_len(len as usize) };
+-                file.read_exact_at(&mut buf, offset as u64)?;
++                read_exact_at(&file, &mut buf, offset as u64)?;
+                 Ok(buf)
+             } else {
+                 let mut buf = BytesMut::with_capacity(len as usize);
+                 unsafe { buf.set_len(len as usize) };
+-                file.read_exact_at(&mut buf, offset as u64)?;
++                read_exact_at(&file, &mut buf, offset as u64)?;
+                 Ok(PooledBuffer::from_existing(buf))
+             }
+         })
+         .await?
+     }
+ }
++
++fn read_exact_at(file: &StdFile, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
++    #[cfg(unix)]
++    {
++        std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
++    }
++    #[cfg(windows)]
++    {
++        let mut filled = 0;
++        while filled < buf.len() {
++            let n = std::os::windows::fs::FileExt::seek_read(
++                file,
++                &mut buf[filled..],
++                offset + filled as u64,
++            )?;
++            if n == 0 {
++                return Err(std::io::Error::new(
++                    std::io::ErrorKind::UnexpectedEof,
++                    "failed to fill whole buffer",
++                ));
++            }
++            filled += n;
++        }
++        Ok(())
++    }
++}
