@@ -42,8 +42,10 @@ replication, and multi-model indexing.
 | 26 | Feed (Apache Iggy) | ✅ Complete |
 | 27 | User guide | ✅ Complete |
 | 28 | Read path and scale | ✅ Complete |
-| 29 | Steps behind MongoDB | ⚪ Planned |
-| 30 | Configuration (walkthrough, window, service, logs) | ✅ Complete |
+| 29 | Kova shell (`kova-shell`) | ⚪ Planned |
+| 30 | Graphical client (`kova-client`) | ⚪ Planned |
+| 31 | Steps behind MongoDB | ⚪ Planned |
+| 32 | Configuration (walkthrough, window, service, logs) | ✅ Complete |
 
 ## Phase 1 - Networking & Interception ✅
 
@@ -965,7 +967,78 @@ A transaction can write every collection that hashes to the partition that opene
 - [x] One transaction can write every collection on the partition that opened it, as one log record. A transaction across partitions, shards, or replica-set members is refused.
 - [x] Test: a selective `IXSCAN` on a collection larger than the buffer pool does not read every page. After a restart, the index pages are opened and documents are not scanned to rebuild them. A `$group` through the router matches a `$group` on one process that holds the whole collection. Adding a shard moves a document whose `_id` changed arc, and a find returns it once.
 
-## Phase 29 - Steps behind MongoDB ⚪ Planned
+## Phase 29 - Kova shell ⚪ Planned
+
+`kova-shell` is a terminal program shipped next to `kova` and `kovadump`. It talks to a running Kova over the MongoDB port. It does not change the server. `mongosh` stays a valid client. This program is the same conversation with the Kova mark on it.
+
+The lines are commands. A line is not JavaScript, and the program does not embed a JavaScript engine. An unknown line is an error that names the line.
+
+```text
+kova-shell
+kova-shell --host 127.0.0.1 --port 27018
+```
+
+`--host` defaults to `127.0.0.1` and `--port` to `27018`. `--user` and `--password` are both set, or both omitted. Omit them while security is off. A wrong password is refused with the server's `authentication failed`.
+
+Inside the session:
+
+- `show dbs` lists the databases.
+- `use shop` selects the database. Later commands use it.
+- `show collections` lists the collections of that database.
+- `db.orders.find({ sku: 1 })` prints the matching documents. `find()` with an empty filter prints the first batch the server returns.
+- `db.orders.insertOne({ sku: 9, qty: 1 })` inserts one document.
+- `db.orders.updateOne({ sku: 9 }, { $set: { qty: 2 } })` sends the update operators the server already accepts.
+- `db.orders.deleteOne({ sku: 9 })` deletes one document.
+- `db.runCommand({ sql: "select sku from orders" })` runs that SQL and prints the rows.
+
+Each of those spellings is parsed and sent as the wire command the server already answers: `listDatabases`, `listCollections`, `find`, `insert`, `update`, `delete`, and `sql`. No new server command is added.
+
+Documents print indented, one per block. The up arrow recalls a previous line. Tab completes a collection name after `use`.
+
+On start the banner reads `KOVA`. A terminal that can show color draws it in oxide `#c2461b` on granite `#17191c`. A terminal without color prints the same text. Archivo and the drawn mark belong to the window in Phase 30. The shell does not require them.
+
+The binary ships in the same three packages as the server: the Linux x86_64 archive, the Windows x64 installer, and the Mac Apple silicon disk image. Intel Mac, Windows on ARM, and Linux on ARM stay out, as they do for the server.
+
+The connection code this phase adds is the one Phase 30 calls. The window does not open a second protocol.
+
+### Phase 29 - Sub-tasks
+
+- [ ] `kova-shell` speaks `OP_MSG` to `--host` and `--port`, defaulting to `127.0.0.1` and `27018`. `--user` and `--password` are both sent, or neither is. A wrong password is refused with `authentication failed`.
+- [ ] `show dbs`, `use`, `show collections`, `find`, `insertOne`, `updateOne`, `deleteOne`, and `sql` are commands sent as the wire commands the server already answers. A line is not JavaScript. An unknown line names itself in the error.
+- [ ] Results print as indented documents. The up arrow recalls a line. Tab completes a collection name.
+- [ ] The banner reads `KOVA`. A color terminal uses oxide `#c2461b` on granite `#17191c`. A terminal without color prints the same text.
+- [ ] `kova-shell` ships in the Linux archive, the Windows installer, and the Mac disk image, next to `kova` and `kovadump`.
+- [ ] Test: against a running server, `show dbs` lists a database, `use` and `show collections` list a collection, `find` prints a document, `updateOne` changes it, and `sql` prints a row. A wrong password is refused. The session runs in a terminal, with no window.
+
+## Phase 30 - Graphical client ⚪ Planned
+
+`kova-client` is the window. It lists databases and collections, shows documents, runs a find and a SQL statement, and saves an edit of one document. It calls the Phase 29 connection. It does not speak `OP_MSG` on its own, and it does not add a server command.
+
+The window is drawn with the system web view, so it can use the site as it stands. Linux, Windows, and Mac each use the view that system provides. A machine without a display runs `kova-shell`.
+
+- Connect asks for the host, the port, the user, and the password. The host suggestion is `127.0.0.1` and the port suggestion is `27018`. The user and the password are both filled, or both empty. A wrong password is refused with `authentication failed`.
+- The left side lists databases and opens each one into its collections.
+- The center lists the documents of the selected collection.
+- One box runs a find filter. Another runs a SQL statement. The rows or documents replace what the center shows.
+- Choosing a document opens its text. Saving sends the edit of that `_id`. A document the server refuses keeps the text on screen and shows the error.
+
+The mark is the site mark. The oxide is `#c2461b`, the granite is `#17191c`, and the feldspar is `#eceeeb`. The wordmark is Archivo. Text is IBM Plex Sans. Documents are IBM Plex Mono. Light and dark follow the system, the same switch the site uses.
+
+An aggregation builder, charts, and a visual query designer stay out. JavaScript stays out.
+
+The binary ships in the same three packages as `kova-shell`. Intel Mac, Windows on ARM, and Linux on ARM stay out.
+
+### Phase 30 - Sub-tasks
+
+- [ ] `kova-client` calls the Phase 29 connection. It does not open its own protocol.
+- [ ] The window lists databases and collections, shows the documents of the selected collection, runs a find filter and a SQL statement, and saves an edit of one document by `_id`. A refused edit keeps the text and shows the error.
+- [ ] Connect defaults to `127.0.0.1` and `27018`. User and password are both set, or both empty. A wrong password is refused with `authentication failed`.
+- [ ] The window uses the site mark, oxide `#c2461b`, granite `#17191c`, feldspar `#eceeeb`, Archivo, IBM Plex Sans, and IBM Plex Mono. Light and dark follow the system.
+- [ ] The window is the system web view. Without a display, `kova-shell` is the path.
+- [ ] `kova-client` ships in the Linux archive, the Windows installer, and the Mac disk image.
+- [ ] Test: connect, and the tree shows a database and a collection. A find shows a document. An edit saves, and a later find returns the new value. A wrong password is refused. The same three packages each open the window.
+
+## Phase 31 - Steps behind MongoDB ⚪ Planned
 
 The five-pass benchmark is the list. A step counts as behind when both engines finished it and MongoDB's mean is lower by more than the sample standard deviation of the paired differences. A similar step stays as it is. The SQL table is Kova only, so it is not on this list.
 
@@ -980,9 +1053,9 @@ On the run in `site/docs/benchmark-result.json`, these MQL steps are behind:
 - `$group` by `job`
 - `$lookup` of `dept`
 
-This waits. The next pass on the engine picks it up. A new benchmark run replaces the list above when the means move.
+This waits until the shell and the client. The next pass on the engine picks it up. A new benchmark run replaces the list above when the means move.
 
-### Phase 29 - Sub-tasks
+### Phase 31 - Sub-tasks
 
 - [ ] Bring `insert orders` inside the standard deviation of MongoDB, or past it.
 - [ ] Bring `updateOne`, `findAndModify`, and `deleteOne` by `sku` inside that band, or past it.
@@ -991,13 +1064,13 @@ This waits. The next pass on the engine picks it up. A new benchmark run replace
 - [ ] Bring `$group` by `job` and the equality `$lookup` of `dept` inside that band, or past it.
 - [ ] A later `make benchmark` is the check. A step that the page calls similar, or a step Kova wins, is done.
 
-## Phase 30 - Configuration ✅ Complete
+## Phase 32 - Configuration ✅ Complete
 
 Setup writes `kova.toml` and opens again whenever the person wants to review or change it. The first run and a later run are the same script and the same window. An answer from the first run can be changed on any later run. Nothing is locked.
 
 A start that never ran setup keeps the defaults. The port is `27018`. The data directory is `data`. `[security]` is off, so every command is open. `[feed]` uses the sample Iggy account `iggy` / `iggy`. Kova does not start `iggy-server`. Skipping setup leaves those defaults as they are.
 
-### 30.1 Walkthrough
+### 32.1 Walkthrough
 
 A script asks one question at a time and writes `kova.toml`. The person can run it again. Enter accepts the suggestion. On a first run the suggestion is the default, except security, which is closed. On a later run the suggestion is the value already in the file, and any of these answers can be changed.
 
@@ -1008,11 +1081,11 @@ A script asks one question at a time and writes `kova.toml`. The person can run 
 
 A later run does not reset keys these questions do not cover. Page size, the buffer pool, replication, and sharding stay as they are in the file.
 
-### 30.2 Window
+### 32.2 Window
 
 A machine with a graphical session can open the same questions in a window, the first time and any time after. The window writes the same `kova.toml` the script writes, with the same suggestions. A machine without a display runs the script. The window is the same setup, not a second file format.
 
-### 30.3 Service
+### 32.3 Service
 
 The script and the window ask whether Kova starts with the operating system. On a first run the suggestion is no. On a later run the suggestion is whether a service is already installed.
 
@@ -1024,7 +1097,7 @@ Yes installs or updates the native service for the account that owns the data di
 
 The service uses the `kova.toml` the setup wrote. When the person chose the bundled `iggy-server`, the service starts that server first and then Kova. Otherwise it starts only Kova. It starts on boot and comes back after a crash. Removing the service leaves the data directory in place. Kova does not supervise itself.
 
-### 30.4 Logs
+### 32.4 Logs
 
 The script and the window ask how Kova's log turns over. On a first run the suggestion is today's behavior: stderr, and no rotation. On a later run the suggestion is the policy already in the file, and it can be changed.
 
@@ -1040,7 +1113,7 @@ keep = 7
 
 `target` is `stderr` or a file path.
 
-### Phase 30 - Sub-tasks
+### Phase 32 - Sub-tasks
 
 - [x] A start that never ran setup listens on `27018`, stores data in `data`, leaves security off, and does not start `iggy-server`.
 - [x] The script suggests `27018` when it is free and the next free port when it is not, and writes the port the person accepts.
@@ -1077,7 +1150,7 @@ keep = 7
 
 | Gap | Phase | Notes |
 |-----|-------|-------|
-| Five-pass means behind MongoDB | 29 | Insert, point update, `findAndModify`, point delete, count, point find, range find, unindexed find, `$group`, and `$lookup`. A similar step is left alone. Later. |
+| Five-pass means behind MongoDB | 31 | Insert, point update, `findAndModify`, point delete, count, point find, range find, unindexed find, `$group`, and `$lookup`. A similar step is left alone. After the shell and the client. |
 
 ## Architecture Diagram (updated)
 
@@ -1135,4 +1208,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1-28 and 30 are complete. Still open: the steps behind MongoDB (Phase 29).*
+*Phases 1-28 and 32 are complete. Still open: the Kova shell (Phase 29), the graphical client (Phase 30), and the steps behind MongoDB (Phase 31).*

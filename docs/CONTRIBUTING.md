@@ -219,10 +219,17 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   can use more than one core, the router merges `$group` and equality
   `$lookup`, adding a shard moves documents onto the new arc, and one
   partition can commit more than one collection in one log record. ✅ Complete.
-- **Phase 29 - Steps behind MongoDB:** the five-pass benchmark steps whose
+- **Phase 29 - Kova shell:** `kova-shell` talks to port `27018` and runs
+  `show dbs`, `use`, `show collections`, `find`, `insertOne`, `updateOne`,
+  `deleteOne`, and `sql` as commands. A line is not JavaScript. ⚪ Planned.
+- **Phase 30 - Graphical client:** `kova-client` uses that same connection.
+  It lists databases and collections, runs a find and a SQL statement, and
+  saves an edit of one document. The window uses the site's mark and colors.
+  ⚪ Planned.
+- **Phase 31 - Steps behind MongoDB:** the five-pass benchmark steps whose
   mean is slower than MongoDB by more than the standard deviation of the
   paired differences. Similar steps stay as they are. ⚪ Planned.
-- **Phase 30 - Configuration:** `kova-setup` writes `kova.toml` and opens
+- **Phase 32 - Configuration:** `kova-setup` writes `kova.toml` and opens
   again with the current values. Security is suggested closed. A window
   asks the same questions. systemd, a Windows service, and launchd can
   start Kova with the operating system. Logs can rotate by date, size, or
