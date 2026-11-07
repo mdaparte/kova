@@ -27,33 +27,53 @@
     --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
     --f-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
     --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    --syn-key: var(--k-oxido-prof);
+    --syn-str: #2f6f4e;
+    --syn-num: #8a5a12;
     color-scheme: light;
   }
+  html[data-theme="dark"] {
+    --bg: var(--k-granito);
+    --surface: #1f2225;
+    --fg: var(--k-feldspato);
+    --muted: var(--k-xisto);
+    --line: var(--k-basalto);
+    --accent: var(--k-oxido-claro);
+    --syn-key: var(--k-oxido-claro);
+    --syn-str: #9dceb0;
+    --syn-num: #e0b15a;
+    color-scheme: dark;
+  }
   @media (prefers-color-scheme: dark) {
-    :root {
+    html:not([data-theme="light"]) {
       --bg: var(--k-granito);
       --surface: #1f2225;
       --fg: var(--k-feldspato);
       --muted: var(--k-xisto);
       --line: var(--k-basalto);
       --accent: var(--k-oxido-claro);
+      --syn-key: var(--k-oxido-claro);
+      --syn-str: #9dceb0;
+      --syn-num: #e0b15a;
       color-scheme: dark;
     }
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
+    display: flex;
+    flex-direction: column;
     background: var(--bg);
     color: var(--fg);
     font-family: var(--f-body);
-    font-size: 15px;
-    line-height: 1.5;
+    font-size: 14px;
+    line-height: 1.4;
   }
-  header {
+  header, .toolbar {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 12px 18px;
+    gap: 8px;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--line);
     background: color-mix(in srgb, var(--bg) 92%, transparent);
   }
@@ -64,6 +84,8 @@
     letter-spacing: 0.08em;
     font-size: 15px;
   }
+  .grow { flex: 1; }
+  .who { color: var(--muted); font-family: var(--f-mono); font-size: 12px; }
   button, input, textarea {
     font: inherit;
     color: inherit;
@@ -72,125 +94,375 @@
     border-radius: 2px;
   }
   button {
-    padding: 6px 12px;
+    padding: 5px 10px;
     cursor: pointer;
     font-family: var(--f-mono);
-    font-size: 12px;
-    letter-spacing: 0.08em;
+    font-size: 11px;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
   }
   button:hover { border-color: var(--accent); color: var(--accent); }
-  input, textarea { padding: 8px 10px; }
-  textarea { width: 100%; min-height: 160px; font-family: var(--f-mono); font-size: 13px; }
-  .connect {
-    max-width: 420px;
-    margin: 48px auto;
-    display: grid;
-    gap: 10px;
-    padding: 0 18px;
-  }
-  .connect label { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
-  .error { color: var(--k-oxido); min-height: 1.4em; font-family: var(--f-mono); font-size: 12px; }
-  .work { display: grid; grid-template-columns: 240px 1fr; height: calc(100% - 49px); }
-  .tree {
-    border-right: 1px solid var(--line);
+  button.primary { background: var(--k-oxido); color: var(--k-feldspato); border-color: var(--k-oxido); }
+  button.primary:hover { color: var(--k-feldspato); background: var(--k-oxido-prof); }
+  input, textarea { padding: 6px 8px; }
+  textarea { width: 100%; min-height: 88px; font-family: var(--f-mono); font-size: 12px; }
+  .screen { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .manager { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 300px; }
+  .saved-wrap, .editor { min-height: 0; overflow: auto; }
+  .editor { border-left: 1px solid var(--line); padding: 14px; display: grid; align-content: start; gap: 8px; }
+  .editor label, .path-note { color: var(--muted); font-size: 12px; }
+  .editor label { display: grid; gap: 4px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  th { position: sticky; top: 0; background: var(--surface); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+  tr.here td { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  tbody tr { cursor: pointer; }
+  .path-note { padding: 8px 12px; font-family: var(--f-mono); }
+  .error { color: var(--k-oxido); min-height: 1.2em; font-family: var(--f-mono); font-size: 12px; }
+  .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 280px 1fr; }
+  .tree { border-right: 1px solid var(--line); overflow: auto; padding: 6px 0; }
+  .code { position: relative; }
+  .code pre, .code textarea {
+    display: block;
+    width: 100%;
+    min-height: 112px;
+    max-height: 240px;
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    font: 13px/1.45 var(--f-mono);
+    white-space: pre-wrap;
+    word-break: break-word;
     overflow: auto;
-    padding: 8px 0;
   }
-  .db, .coll {
+  .code pre {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: var(--surface);
+    color: var(--fg);
+  }
+  .code textarea {
+    position: relative;
+    background: transparent;
+    color: transparent;
+    caret-color: var(--fg);
+    resize: vertical;
+  }
+  .syn-key { color: var(--syn-key); }
+  .syn-str { color: var(--syn-str); }
+  .syn-num { color: var(--syn-num); }
+  select {
+    font: inherit;
+    color: inherit;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    padding: 5px 8px;
+  }
+  .pager { padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  .pager button, .pager select { font-size: 11px; }
+  .cell { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .cell span { overflow: hidden; text-overflow: ellipsis; }
+  .kind { flex: none; color: var(--accent); }
+  .db, .coll, .conn, .group, .field, .twist {
     display: block;
     width: 100%;
     text-align: left;
     border: 0;
     background: transparent;
-    padding: 6px 16px;
     letter-spacing: 0;
     text-transform: none;
     font-family: var(--f-body);
-    font-size: 14px;
+    font-size: 13px;
+    padding: 4px 12px;
   }
-  .coll { padding-left: 28px; color: var(--muted); font-family: var(--f-mono); font-size: 13px; }
-  .db.here, .coll.here { color: var(--accent); }
-  .main { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; }
-  .bars { display: grid; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); }
-  .row { display: flex; gap: 8px; }
-  .row input { flex: 1; font-family: var(--f-mono); font-size: 13px; }
-  .docs { overflow: auto; padding: 12px; }
-  pre {
-    margin: 0 0 10px;
-    padding: 10px 12px;
-    background: var(--surface);
-    border: 1px solid var(--line);
+  .group {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    cursor: pointer;
+    padding: 6px 8px 1px 2px;
+  }
+  .group .n { font-family: var(--f-mono); font-size: 10px; }
+  .node { display: flex; align-items: center; }
+  .node .db, .node .coll, .node .conn, .node .group { display: flex; align-items: center; width: auto; flex: 1; padding-left: 2px; gap: 6px; }
+  .node .group { align-items: baseline; }
+  .twist {
+    flex: none;
+    width: auto;
+    min-width: 14px;
+    padding: 2px 4px;
+    color: var(--fg);
     font-family: var(--f-mono);
     font-size: 13px;
-    white-space: pre-wrap;
-    cursor: pointer;
+    line-height: 1;
+    text-align: center;
   }
-  pre.here { border-color: var(--accent); }
-  .edit { padding: 12px; border-top: 1px solid var(--line); }
+  .conn-list > div > .node > .twist { margin-left: 14px; }
+  .section > .node > .twist { margin-left: 28px; }
+  .branch > .node > .twist { margin-left: 42px; }
+  .section.nested > .node > .twist { margin-left: 56px; }
+  .db, .conn { font-size: 13px; font-weight: 600; }
+  .conn .glyph { border-radius: 8px; background: var(--accent); border-color: var(--accent); }
+  .coll { font-family: var(--f-mono); font-size: 12px; font-weight: 400; }
+  .coll.view { font-style: italic; }
+  .field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px 2px 92px;
+    color: var(--muted);
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-weight: 400;
+    cursor: default;
+  }
+  .glyph {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border: 1px solid var(--muted);
+    box-sizing: border-box;
+  }
+  .db .glyph { background: var(--accent); border-color: var(--accent); }
+  .view .glyph { border-radius: 8px; border-style: dashed; }
+  .field .glyph { width: 4px; height: 4px; border: 0; border-radius: 4px; background: var(--muted); }
+  .index .glyph { width: 8px; height: 2px; border-radius: 0; }
+  .field .key { color: var(--muted); font-size: 10px; }
+  .db.here, .coll.here, .conn.here { color: var(--accent); }
+  .server { overflow: auto; padding: 16px 18px 24px; display: grid; align-content: start; gap: 18px; min-height: 0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+  .stat { border: 1px solid var(--line); padding: 8px 10px; min-width: 0; }
+  .stat .k { color: var(--muted); font-size: 10px; }
+  .stat .v { font-family: var(--f-mono); font-size: 13px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }
+  .feed-head { display: flex; align-items: baseline; gap: 8px; color: var(--muted); font-size: 10px; margin-bottom: 6px; }
+  .feed-head .n { font-family: var(--f-mono); }
+  .feed-list { font-family: var(--f-mono); font-size: 12px; }
+  .feed-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+  .feed-row .op { color: var(--accent); }
+  .feed-row .rest { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .main.server-on { grid-template-rows: 1fr; }
+  .main.server-on > :not(#server) { display: none; }
+  .main { display: grid; grid-template-rows: auto auto auto 1fr auto; min-width: 0; min-height: 0; }
+  .tabs { display: flex; overflow: auto; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .tab {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 0;
+    border-right: 1px solid var(--line);
+    border-radius: 0;
+    background: transparent;
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: var(--f-body);
+    font-size: 12px;
+    padding: 6px 8px 6px 10px;
+    white-space: nowrap;
+  }
+  .tab.here { color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+  .tab .x { border: 0; background: transparent; padding: 0 2px; letter-spacing: 0; text-transform: none; }
+  .theme-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  .modal { position: fixed; inset: 0; background: rgba(23, 25, 28, 0.55); display: grid; place-items: center; }
+  .dialog { width: min(420px, 92vw); background: var(--surface); border: 1px solid var(--line); padding: 16px; display: grid; gap: 12px; }
+  .dialog p { margin: 0; }
+  .bars { display: grid; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .crumb { font-family: var(--f-mono); font-size: 12px; color: var(--muted); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row input { flex: 1; font-family: var(--f-mono); font-size: 12px; }
+  .grid-wrap { overflow: auto; min-height: 0; }
+  .grid { font-family: var(--f-mono); font-size: 12px; }
+  .grid td { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grid td.editing { overflow: visible; padding: 2px; }
+  .grid td input { width: 100%; padding: 3px 6px; }
+  .edit { padding: 8px 10px; border-top: 1px solid var(--line); }
   .hidden { display: none; }
+  .empty { padding: 16px; color: var(--muted); }
 </style>
 </head>
 <body>
-<header>
-  <svg class="mark" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-    <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
-    <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
-    <rect x="5" y="6" width="7" height="4" fill="#c2461b"/>
-    <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
-  </svg>
-  <span class="wordmark">KOVA</span>
-</header>
-<form class="connect" id="connect">
-  <label>Host<input id="host" value="127.0.0.1" autocomplete="off"></label>
-  <label>Port<input id="port" value="27018" inputmode="numeric" autocomplete="off"></label>
-  <label>User<input id="user" autocomplete="off"></label>
-  <label>Password<input id="password" type="password" autocomplete="off"></label>
-  <button type="submit">Connect</button>
-  <div class="error" id="connect-error"></div>
-</form>
-<div class="work hidden" id="work">
-  <nav class="tree" id="tree" aria-label="Databases"></nav>
-  <div class="main">
-    <div class="bars">
+<div class="screen" id="manager">
+  <header>
+    <svg class="mark" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+      <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+      <rect x="5" y="6" width="7" height="4" fill="#c2461b"/>
+      <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+    </svg>
+    <span class="wordmark">KOVA</span>
+    <span class="who">Connection Manager</span>
+    <span class="grow"></span>
+    <label class="theme-label">Theme
+      <select class="theme" aria-label="Theme">
+        <option value="system">Auto</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </label>
+  </header>
+  <div class="toolbar">
+    <button type="button" id="new-connection">New connection</button>
+    <button type="button" id="duplicate">Duplicate</button>
+    <button type="button" id="delete-connection">Delete</button>
+    <span class="grow"></span>
+    <button type="button" class="primary" id="connect-button">Connect</button>
+  </div>
+  <div class="manager">
+    <div class="saved-wrap">
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Server</th><th>User</th><th>Last connected</th></tr>
+        </thead>
+        <tbody id="saved"></tbody>
+      </table>
+      <div class="path-note" id="connections-path"></div>
+    </div>
+    <form class="editor" id="editor-form">
+      <label>Name<input id="name" autocomplete="off"></label>
+      <label>Host<input id="host" value="127.0.0.1" autocomplete="off"></label>
+      <label>Port<input id="port" value="27018" inputmode="numeric" autocomplete="off"></label>
+      <label>User<input id="user" autocomplete="off"></label>
+      <label>Password<input id="password" type="password" autocomplete="off"></label>
       <div class="row">
-        <input id="filter" value="{}" spellcheck="false" aria-label="Find filter">
-        <button type="button" id="find">Find</button>
+        <button type="submit">Save</button>
       </div>
-      <div class="row">
-        <input id="sql" placeholder="select sku from orders" spellcheck="false" aria-label="SQL">
-        <button type="button" id="run-sql">SQL</button>
+      <div class="error" id="connect-error"></div>
+    </form>
+  </div>
+</div>
+<div class="screen hidden" id="work">
+  <header>
+    <svg class="mark" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+      <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+      <rect x="5" y="6" width="7" height="4" fill="#c2461b"/>
+      <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+    </svg>
+    <span class="wordmark">KOVA</span>
+    <span class="who" id="who"></span>
+    <span class="grow"></span>
+    <label class="theme-label">Theme
+      <select class="theme" aria-label="Theme">
+        <option value="system">Auto</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </label>
+    <button type="button" id="disconnect">Disconnect</button>
+  </header>
+  <div class="workspace">
+    <nav class="tree" id="tree" aria-label="Databases"></nav>
+    <div class="main" id="main">
+      <div class="tabs" id="tabs"></div>
+      <div class="bars">
+        <div class="crumb" id="crumb"></div>
+        <div class="row">
+          <select id="mode" aria-label="Query language">
+            <option value="mql">MQL</option>
+            <option value="sql">SQL</option>
+          </select>
+          <span class="grow"></span>
+          <button type="button" class="primary" id="run">Run</button>
+        </div>
+        <div class="code">
+          <pre id="highlight" aria-hidden="true"></pre>
+          <textarea id="query" spellcheck="false" aria-label="Query"></textarea>
+        </div>
+      </div>
+      <div class="pager row">
+        <button type="button" id="first" title="First page">|&lt;</button>
+        <button type="button" id="prev" title="Previous page">&lt;</button>
+        <select id="page-size" aria-label="Page size">
+          <option>20</option>
+          <option selected>50</option>
+          <option>100</option>
+        </select>
+        <button type="button" id="next" title="Next page">&gt;</button>
+        <button type="button" id="last" title="Last page">&gt;|</button>
+        <span class="who" id="range"></span>
+        <button type="button" id="count-docs">Count</button>
+        <span class="who" id="total"></span>
+        <span class="who" id="ms"></span>
+        <span class="grow"></span>
+        <span class="who" id="status"></span>
+        <button type="button" id="csv">CSV</button>
+      </div>
+      <div class="grid-wrap" id="grid"></div>
+      <div class="edit">
+        <textarea id="document" spellcheck="false" aria-label="Document"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button type="button" id="save">Save</button>
+          <div class="error" id="edit-error"></div>
+          <span class="grow"></span>
+          <span class="who" id="count"></span>
+        </div>
+      </div>
+      <div class="server hidden" id="server">
+        <div class="stats" id="stats"></div>
+        <div>
+          <div class="feed-head">feed <span class="n" id="feed-note"></span></div>
+          <div class="feed-list" id="feed-list"></div>
+        </div>
       </div>
     </div>
-    <div class="docs" id="docs"></div>
-    <div class="edit">
-      <textarea id="editor" spellcheck="false" aria-label="Document"></textarea>
-      <div class="row" style="margin-top:8px">
-        <button type="button" id="save">Save</button>
-        <div class="error" id="edit-error"></div>
-      </div>
+  </div>
+</div>
+<div class="modal hidden" id="leave">
+  <div class="dialog" role="dialog" aria-labelledby="leave-title">
+    <p id="leave-title">Save the open edits before closing?</p>
+    <div class="row">
+      <button type="button" class="primary" id="leave-save">Save</button>
+      <button type="button" id="leave-drop">Don't save</button>
+      <button type="button" id="leave-cancel">Cancel</button>
     </div>
   </div>
 </div>
 <script>
 let seq = 0;
 const pending = new Map();
+let connections = [];
+let selectedId = "";
+let connectionId = "";
 let database = "";
 let collection = "";
-let selectedId = "";
+let writable = false;
+let source = "";
+let resultRows = [];
+let documentId = "";
+let editing = false;
+let page = 0;
+let total = null;
+let tabs = [];
+let tabIndex = -1;
+let keepEditor = false;
+let leaveMode = "app";
+let leaveIndex = -1;
+let linkLabel = "";
+let serverTimer = 0;
+let feedTimer = 0;
+let feedAfter = 0;
+const themes = ["system", "dark", "light"];
 
 function post(body) {
   return new Promise((resolve) => {
-    const id = ++seq;
-    body.id = id;
-    pending.set(id, resolve);
+    const req = ++seq;
+    body.req = req;
+    pending.set(req, resolve);
     window.ipc.postMessage(JSON.stringify(body));
   });
 }
 window.kovaAnswer = function (message) {
-  const resolve = pending.get(message.id);
+  const resolve = pending.get(message.req);
   if (resolve) {
-    pending.delete(message.id);
+    pending.delete(message.req);
     resolve(message);
   }
 };
@@ -199,22 +471,271 @@ function showError(node, message) {
   node.textContent = message || "";
 }
 
-document.getElementById("connect").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const answer = await post({
-    op: "connect",
+function applyTheme(theme) {
+  if (!themes.includes(theme)) theme = "system";
+  if (theme === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem("kova.theme", theme); } catch (err) { /* the view may keep it for this run */ }
+  for (const select of document.querySelectorAll(".theme")) select.value = theme;
+}
+
+function pageSize() {
+  return Number(document.getElementById("page-size").value) || 50;
+}
+
+function snapshot() {
+  if (tabIndex < 0) return;
+  const tab = tabs[tabIndex];
+  const editor = document.getElementById("document");
+  tab.database = database;
+  tab.collection = collection;
+  tab.source = source;
+  tab.writable = writable;
+  tab.page = page;
+  tab.total = total;
+  tab.rows = resultRows;
+  tab.documentId = documentId;
+  tab.mode = document.getElementById("mode").value;
+  tab.query = document.getElementById("query").value;
+  tab.documentText = editor.value;
+  tab.ms = document.getElementById("ms").textContent;
+  tab.range = document.getElementById("range").textContent;
+  tab.totalText = document.getElementById("total").textContent;
+  tab.crumb = document.getElementById("crumb").textContent;
+  tab.dirty = editor.value !== tab.loadedText || Boolean(tab.pending);
+}
+
+function applyTab(tab) {
+  database = tab.database;
+  collection = tab.collection;
+  source = tab.source;
+  writable = tab.writable;
+  page = tab.page;
+  total = tab.total;
+  documentId = tab.documentId || "";
+  document.getElementById("mode").value = tab.mode;
+  document.getElementById("query").value = tab.query;
+  paintQuery();
+  document.getElementById("crumb").textContent = tab.crumb || "";
+  document.getElementById("ms").textContent = tab.ms || "";
+  document.getElementById("range").textContent = tab.range || "";
+  document.getElementById("total").textContent = tab.totalText || "";
+  document.getElementById("prev").disabled = page === 0;
+  document.getElementById("first").disabled = page === 0;
+  document.getElementById("last").disabled = total == null;
+  keepEditor = true;
+  paint(tab.rows || []);
+  keepEditor = false;
+  document.getElementById("document").value = tab.documentText || "";
+  markTree();
+}
+
+function renderTabs() {
+  const bar = document.getElementById("tabs");
+  bar.replaceChildren();
+  tabs.forEach((tab, index) => {
+    const button = document.createElement("div");
+    button.className = "tab" + (index === tabIndex ? " here" : "");
+    button.addEventListener("click", () => {
+      if (index === tabIndex) return;
+      snapshot();
+      tabIndex = index;
+      applyTab(tabs[index]);
+      renderTabs();
+    });
+    const label = document.createElement("span");
+    label.textContent = tab.title + (tab.dirty ? " •" : "");
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "x";
+    close.textContent = "×";
+    close.addEventListener("click", (event) => {
+      event.stopPropagation();
+      requestCloseTab(index);
+    });
+    button.appendChild(label);
+    button.appendChild(close);
+    bar.appendChild(button);
+  });
+}
+
+function markTree() {
+  for (const button of document.querySelectorAll(".coll")) {
+    const list = button.closest("[data-db]");
+    const here = list && list.dataset.db === database && button.dataset.name === collection;
+    button.classList.toggle("here", Boolean(here));
+  }
+}
+
+function openTab(spec) {
+  snapshot();
+  let index = tabs.findIndex((tab) => tab.key === spec.key);
+  if (index < 0) {
+    tabs.push(Object.assign({
+      rows: [],
+      documentId: "",
+      documentText: "",
+      loadedText: "",
+      pending: null,
+      dirty: false,
+      page: 0,
+      total: null,
+      ms: "",
+      range: "",
+      totalText: ""
+    }, spec));
+    index = tabs.length - 1;
+  }
+  tabIndex = index;
+  applyTab(tabs[index]);
+  renderTabs();
+  return tabs[index];
+}
+
+for (const select of document.querySelectorAll(".theme")) {
+  select.addEventListener("change", () => applyTheme(select.value));
+}
+try { applyTheme(localStorage.getItem("kova.theme") || "system"); } catch (err) { applyTheme("system"); }
+
+function formValues() {
+  return {
+    id: connectionId,
+    name: document.getElementById("name").value,
     host: document.getElementById("host").value,
     port: document.getElementById("port").value,
     user: document.getElementById("user").value,
     password: document.getElementById("password").value
+  };
+}
+
+function fillForm(connection) {
+  connectionId = connection ? connection.id : "";
+  document.getElementById("name").value = connection ? connection.name : "";
+  document.getElementById("host").value = connection ? connection.host : "127.0.0.1";
+  document.getElementById("port").value = connection ? connection.port : "27018";
+  document.getElementById("user").value = connection ? (connection.user || "") : "";
+  document.getElementById("password").value = connection ? (connection.password || "") : "";
+}
+
+function when(seconds) {
+  if (!seconds) return "";
+  return new Date(seconds * 1000).toLocaleString();
+}
+
+function paintConnections() {
+  const body = document.getElementById("saved");
+  body.replaceChildren();
+  for (const connection of connections) {
+    const row = document.createElement("tr");
+    if (connection.id === connectionId) row.className = "here";
+    for (const text of [
+      connection.name,
+      connection.host + ":" + connection.port,
+      connection.user || "",
+      when(connection.lastConnected)
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.appendChild(cell);
+    }
+    row.addEventListener("click", () => {
+      fillForm(connection);
+      paintConnections();
+    });
+    row.addEventListener("dblclick", () => {
+      fillForm(connection);
+      connect();
+    });
+    body.appendChild(row);
+  }
+}
+
+async function loadConnections() {
+  const answer = await post({ op: "connections" });
+  if (!answer.ok) {
+    showError(document.getElementById("connect-error"), answer.error);
+    return;
+  }
+  connections = answer.connections || [];
+  document.getElementById("connections-path").textContent = answer.path || "";
+  paintConnections();
+}
+
+document.getElementById("new-connection").addEventListener("click", () => {
+  fillForm(null);
+  paintConnections();
+  document.getElementById("name").focus();
+});
+
+document.getElementById("duplicate").addEventListener("click", () => {
+  const current = formValues();
+  if (!current.name) return;
+  connectionId = "";
+  document.getElementById("name").value = current.name + " copy";
+  paintConnections();
+});
+
+document.getElementById("editor-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const answer = await post(Object.assign({ op: "saveConnection" }, formValues()));
+  if (!answer.ok) {
+    showError(document.getElementById("connect-error"), answer.error);
+    return;
+  }
+  showError(document.getElementById("connect-error"), "");
+  connectionId = answer.connection.id;
+  await loadConnections();
+});
+
+document.getElementById("delete-connection").addEventListener("click", async () => {
+  if (!connectionId) return;
+  const answer = await post({ op: "deleteConnection", id: connectionId });
+  if (!answer.ok) {
+    showError(document.getElementById("connect-error"), answer.error);
+    return;
+  }
+  fillForm(null);
+  await loadConnections();
+});
+
+document.getElementById("connect-button").addEventListener("click", connect);
+
+async function connect() {
+  const values = formValues();
+  const answer = await post({
+    op: "connect",
+    id: values.id,
+    host: values.host,
+    port: values.port,
+    user: values.user,
+    password: values.password
   });
   if (!answer.ok) {
     showError(document.getElementById("connect-error"), answer.error);
     return;
   }
-  document.getElementById("connect").classList.add("hidden");
+  showError(document.getElementById("connect-error"), "");
+  linkLabel = values.name || values.host;
+  feedAfter = 0;
+  const feedList = document.getElementById("feed-list");
+  if (feedList) feedList.replaceChildren();
+  document.getElementById("who").textContent = linkLabel + "  " + values.host + ":" + values.port;
+  document.getElementById("manager").classList.add("hidden");
   document.getElementById("work").classList.remove("hidden");
+  database = "";
+  collection = "";
+  writable = false;
+  source = "";
   await loadDatabases();
+}
+
+document.getElementById("disconnect").addEventListener("click", async () => {
+  stopServer();
+  feedAfter = 0;
+  document.getElementById("feed-list").replaceChildren();
+  document.getElementById("work").classList.add("hidden");
+  document.getElementById("manager").classList.remove("hidden");
+  await loadConnections();
 });
 
 async function loadDatabases() {
@@ -225,105 +746,815 @@ async function loadDatabases() {
     tree.textContent = answer.error;
     return;
   }
-  for (const name of answer.names) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "db";
-    button.textContent = name;
-    button.addEventListener("click", () => openDatabase(name, button));
-    tree.appendChild(button);
-    const list = document.createElement("div");
-    list.dataset.db = name;
-    tree.appendChild(list);
+  tree.appendChild(connectionNode(answer.names));
+  showServer();
+}
+
+function connectionNode(names) {
+  const wrap = document.createElement("div");
+  const node = document.createElement("div");
+  node.className = "node";
+  const twist = document.createElement("button");
+  twist.type = "button";
+  twist.className = "twist";
+  twist.textContent = "▾";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "conn";
+  button.title = "connection";
+  button.append(kindMark(), nameText(linkLabel || "connection"));
+  const list = document.createElement("div");
+  list.className = "conn-list";
+  for (const name of names) list.appendChild(databaseNode(name));
+  twist.addEventListener("click", () => {
+    const closed = list.classList.toggle("hidden");
+    twist.textContent = closed ? "▸" : "▾";
+  });
+  button.addEventListener("click", () => showServer(button));
+  node.append(twist, button);
+  wrap.append(node, list);
+  return wrap;
+}
+
+function showServer(button) {
+  const main = document.getElementById("main");
+  main.classList.add("server-on");
+  document.getElementById("server").classList.remove("hidden");
+  for (const node of document.querySelectorAll(".db, .coll")) node.classList.remove("here");
+  for (const node of document.querySelectorAll(".conn")) node.classList.remove("here");
+  (button || document.querySelector(".conn"))?.classList.add("here");
+  refreshServer();
+  if (!serverTimer) serverTimer = setInterval(refreshServer, 2000);
+}
+
+function showQuery() {
+  document.getElementById("main").classList.remove("server-on");
+  document.getElementById("server").classList.add("hidden");
+  document.querySelector(".conn")?.classList.remove("here");
+  stopServer();
+}
+
+function stopServer() {
+  if (serverTimer) clearInterval(serverTimer);
+  if (feedTimer) clearInterval(feedTimer);
+  serverTimer = 0;
+  feedTimer = 0;
+}
+
+async function refreshServer() {
+  if (!document.getElementById("main").classList.contains("server-on")) return;
+  const answer = await post({ op: "status" });
+  if (!answer.ok) {
+    document.getElementById("stats").textContent = answer.error;
+    return;
+  }
+  paintStats(answer);
+  const feed = answer.feed || {};
+  const note = document.getElementById("feed-note");
+  if (!feed.enabled) {
+    note.textContent = "off";
+    if (feedTimer) {
+      clearInterval(feedTimer);
+      feedTimer = 0;
+    }
+    return;
+  }
+  note.textContent = feed.linked
+    ? feed.address + "  " + feed.stream + "/" + feed.topic
+    : "waiting for iggy  " + feed.address;
+  if (!feedTimer) {
+    pullFeed();
+    feedTimer = setInterval(pullFeed, 1000);
   }
 }
 
-async function openDatabase(name, button) {
+function paintStats(answer) {
+  const cards = [
+    ["version", answer.version],
+    ["host", answer.system || answer.host],
+    ["uptime", uptime(answer.uptime)],
+    ["memory", bytes(answer.memory)],
+    ["disk", bytes(answer.disk)],
+    ["data", answer.diskPath],
+    ["connections", answer.connectionsActive + " / " + answer.connectionsTotal],
+    ["queries", answer.queries],
+    ["inserts", answer.inserts],
+    ["updates", answer.updates],
+    ["deletes", answer.deletes],
+    ["bytes in", bytes(answer.bytesIn)],
+    ["bytes out", bytes(answer.bytesOut)],
+    ["wal writes", answer.walWrites]
+  ];
+  const stats = document.getElementById("stats");
+  stats.replaceChildren();
+  for (const [name, value] of cards) {
+    const card = document.createElement("div");
+    card.className = "stat";
+    const k = document.createElement("div");
+    k.className = "k";
+    k.textContent = name;
+    const v = document.createElement("div");
+    v.className = "v";
+    v.textContent = value == null ? "" : String(value);
+    v.title = v.textContent;
+    card.append(k, v);
+    stats.appendChild(card);
+  }
+}
+
+function bytes(value) {
+  const n = Number(value) || 0;
+  if (n < 1024) return n + " B";
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = n / 1024;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return (size >= 10 ? size.toFixed(0) : size.toFixed(1)) + " " + units[unit];
+}
+
+function uptime(seconds) {
+  const n = Number(seconds) || 0;
+  const hours = Math.floor(n / 3600);
+  const minutes = Math.floor((n % 3600) / 60);
+  const rest = n % 60;
+  if (hours) return hours + "h " + minutes + "m";
+  if (minutes) return minutes + "m " + rest + "s";
+  return rest + "s";
+}
+
+async function pullFeed() {
+  if (!document.getElementById("main").classList.contains("server-on")) return;
+  const answer = await post({ op: "feed", after: feedAfter });
+  if (!answer.ok) return;
+  const list = document.getElementById("feed-list");
+  for (const event of answer.events || []) {
+    feedAfter = Math.max(feedAfter, Number(event.seq) || 0);
+    const row = document.createElement("div");
+    row.className = "feed-row";
+    const op = document.createElement("span");
+    op.className = "op";
+    op.textContent = event.op;
+    const rest = document.createElement("span");
+    rest.className = "rest";
+    const body = event.after || event.before || "";
+    rest.textContent = event.ns + (event.id ? "  " + event.id : "") + (body ? "  " + body : "");
+    rest.title = rest.textContent;
+    row.append(op, rest);
+    list.appendChild(row);
+  }
+  while (list.children.length > 200) list.removeChild(list.firstChild);
+  if (answer.events && answer.events.length) list.scrollTop = list.scrollHeight;
+}
+
+function databaseNode(name) {
+  const wrap = document.createElement("div");
+  const node = document.createElement("div");
+  node.className = "node";
+  const twist = document.createElement("button");
+  twist.type = "button";
+  twist.className = "twist";
+  twist.textContent = "▸";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "db";
+  button.title = "database";
+  button.append(kindMark(), nameText(name));
+  const list = document.createElement("div");
+  list.className = "hidden";
+  list.dataset.db = name;
+  twist.addEventListener("click", () => toggleDatabase(name, twist, list, button));
+  button.addEventListener("click", () => {
+    if (list.classList.contains("hidden")) toggleDatabase(name, twist, list, button);
+    else selectDatabase(name, button);
+  });
+  node.appendChild(twist);
+  node.appendChild(button);
+  wrap.appendChild(node);
+  wrap.appendChild(list);
+  return wrap;
+}
+
+function selectDatabase(name, button) {
   database = name;
-  collection = "";
-  for (const node of document.querySelectorAll(".db, .coll")) node.classList.remove("here");
+  for (const node of document.querySelectorAll(".db")) node.classList.remove("here");
   button.classList.add("here");
+}
+
+async function toggleDatabase(name, twist, list, button) {
+  const closed = list.classList.contains("hidden");
+  selectDatabase(name, button);
+  if (!closed) {
+    list.classList.add("hidden");
+    twist.textContent = "▸";
+    return;
+  }
+  list.classList.remove("hidden");
+  twist.textContent = "▾";
+  if (!list.dataset.loaded) await loadDatabase(name, list);
+}
+
+async function loadDatabase(name, list) {
   const answer = await post({ op: "collections", db: name });
-  const list = document.querySelector(`[data-db="${CSS.escape(name)}"]`);
   list.replaceChildren();
+  list.dataset.loaded = "1";
   if (!answer.ok) {
     list.textContent = answer.error;
     return;
   }
-  for (const coll of answer.names) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "coll";
-    item.textContent = coll;
-    item.addEventListener("click", () => openCollection(coll, item));
-    list.appendChild(item);
+  const items = answer.items || answer.names.map((item) => ({ name: item, type: "collection" }));
+  const collections = items.filter((item) => item.type !== "view");
+  const views = items.filter((item) => item.type === "view");
+  list.appendChild(group("collections", collections, name));
+  list.appendChild(group("views", views, name));
+}
+
+function kindMark() {
+  const mark = document.createElement("span");
+  mark.className = "glyph";
+  mark.setAttribute("aria-hidden", "true");
+  return mark;
+}
+
+function nameText(name) {
+  const text = document.createElement("span");
+  text.textContent = name;
+  return text;
+}
+
+function group(label, items, db) {
+  const section = document.createElement("div");
+  section.className = "section";
+  const node = document.createElement("div");
+  node.className = "node";
+  const twist = document.createElement("button");
+  twist.type = "button";
+  twist.className = "twist";
+  twist.textContent = "▾";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "group";
+  const text = document.createElement("span");
+  text.textContent = label;
+  const n = document.createElement("span");
+  n.className = "n";
+  n.textContent = String(items.length);
+  button.append(text, n);
+  const body = document.createElement("div");
+  for (const item of items) body.appendChild(entry(db, item));
+  const toggle = () => {
+    const closed = body.classList.toggle("hidden");
+    twist.textContent = closed ? "▸" : "▾";
+  };
+  twist.addEventListener("click", toggle);
+  button.addEventListener("click", toggle);
+  node.append(twist, button);
+  section.append(node, body);
+  return section;
+}
+
+function entry(db, item) {
+  const wrap = document.createElement("div");
+  wrap.className = item.type === "view" ? "branch view" : "branch";
+  const node = document.createElement("div");
+  node.className = "node";
+  const twist = document.createElement("button");
+  twist.type = "button";
+  twist.className = "twist";
+  twist.textContent = "▸";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = item.type === "view" ? "coll view" : "coll";
+  button.dataset.name = item.name;
+  button.title = item.type === "view" ? "view" : "collection";
+  button.append(kindMark(), nameText(item.name));
+  const detail = document.createElement("div");
+  detail.className = "hidden";
+  const fields = nestedFolder("fields");
+  const indexes = nestedFolder("indexes");
+  detail.append(fields.section, indexes.section);
+  twist.addEventListener("click", () => toggleDetail(db, item.name, twist, detail, fields, indexes));
+  button.addEventListener("click", () => openCollection(db, item, button, twist, detail, fields, indexes));
+  node.appendChild(twist);
+  node.appendChild(button);
+  wrap.appendChild(node);
+  wrap.appendChild(detail);
+  return wrap;
+}
+
+function nestedFolder(label) {
+  const section = document.createElement("div");
+  section.className = "section nested";
+  const node = document.createElement("div");
+  node.className = "node";
+  const twist = document.createElement("button");
+  twist.type = "button";
+  twist.className = "twist";
+  twist.textContent = "▾";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "group";
+  const text = document.createElement("span");
+  text.textContent = label;
+  const count = document.createElement("span");
+  count.className = "n";
+  button.append(text, count);
+  const body = document.createElement("div");
+  const toggle = () => {
+    const closed = body.classList.toggle("hidden");
+    twist.textContent = closed ? "▸" : "▾";
+  };
+  twist.addEventListener("click", toggle);
+  button.addEventListener("click", toggle);
+  node.append(twist, button);
+  section.append(node, body);
+  return { section, count, body };
+}
+
+async function toggleDetail(db, name, twist, detail, fields, indexes) {
+  const open = detail.classList.contains("hidden");
+  detail.classList.toggle("hidden", !open);
+  twist.textContent = open ? "▾" : "▸";
+  if (open && !detail.dataset.loaded) await loadDetail(db, name, detail, fields, indexes);
+}
+
+async function loadDetail(db, name, detail, fields, indexes) {
+  detail.dataset.loaded = "1";
+  await loadFields(db, name, fields);
+  await loadIndexes(db, name, indexes);
+}
+
+async function loadFields(db, name, folder) {
+  const answer = await post({ op: "fields", db: db, collection: name });
+  folder.body.replaceChildren();
+  if (!answer.ok) {
+    folder.count.textContent = "";
+    folder.body.appendChild(noteRow(answer.error));
+    return;
+  }
+  folder.count.textContent = String(answer.fields.length);
+  for (const field of answer.fields) {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.className = "field";
+    node.title = "field";
+    node.append(kindMark(), nameText(field));
+    node.addEventListener("click", () => focusColumn(field));
+    folder.body.appendChild(node);
   }
 }
 
-async function openCollection(name, button) {
-  collection = name;
+async function loadIndexes(db, name, folder) {
+  const answer = await post({ op: "indexes", db: db, collection: name });
+  folder.body.replaceChildren();
+  if (!answer.ok) {
+    folder.count.textContent = "";
+    folder.body.appendChild(noteRow(answer.error));
+    return;
+  }
+  const indexes = answer.indexes || [];
+  folder.count.textContent = String(indexes.length);
+  for (const index of indexes) folder.body.appendChild(indexRow(index));
+}
+
+function noteRow(text) {
+  const note = document.createElement("div");
+  note.className = "field";
+  note.textContent = text;
+  return note;
+}
+
+function indexRow(index) {
+  const node = document.createElement("div");
+  node.className = "field index";
+  node.title = "index";
+  const key = document.createElement("span");
+  key.className = "key";
+  key.textContent = index.unique ? index.key + "  unique" : index.key;
+  node.append(kindMark(), nameText(index.name), key);
+  return node;
+}
+
+async function openCollection(db, item, button, twist, detail, fields, indexes) {
+  showQuery();
+  const fresh = !tabs.some((tab) => tab.key === db + "." + item.name);
+  const tab = openTab({
+    key: db + "." + item.name,
+    title: db + "." + item.name,
+    database: db,
+    collection: item.name,
+    source: item.type === "view" ? "view" : "collection",
+    writable: item.type !== "view",
+    mode: "mql",
+    query: 'db.getCollection("' + item.name.replace(/"/g, '\\"') + '").find({})',
+    crumb: db + "." + item.name + (item.type === "view" ? "  view" : "")
+  });
+  if (fresh) {
+    tab.page = 0;
+    tab.total = null;
+    page = 0;
+    total = null;
+    document.getElementById("mode").value = "mql";
+    document.getElementById("query").value = tab.query;
+    paintQuery();
+    document.getElementById("crumb").textContent = tab.crumb;
+  }
   for (const node of document.querySelectorAll(".coll")) node.classList.remove("here");
   button.classList.add("here");
-  document.getElementById("filter").value = "{}";
-  await runFind();
+  detail.classList.remove("hidden");
+  twist.textContent = "▾";
+  if (!detail.dataset.loaded) await loadDetail(db, item.name, detail, fields, indexes);
+  if (fresh || !tab.rows.length) await runQuery();
+}
+
+function focusColumn(field) {
+  const head = document.querySelector('[data-col="' + CSS.escape(field) + '"]');
+  if (head) head.scrollIntoView({ inline: "center", block: "nearest" });
+}
+
+function cellOf(row, field) {
+  return (row.cells || []).find((cell) => cell.field === field) || { field: field, text: "", kind: "missing" };
 }
 
 function paint(rows) {
-  const docs = document.getElementById("docs");
-  docs.replaceChildren();
-  selectedId = "";
-  document.getElementById("editor").value = "";
+  resultRows = rows;
+  editing = false;
+  const keep = documentId;
+  const columns = [];
+  const seen = new Set();
   for (const row of rows) {
-    const block = document.createElement("pre");
-    block.textContent = row.text;
-    block.addEventListener("click", () => {
-      for (const node of docs.querySelectorAll("pre")) node.classList.remove("here");
-      block.classList.add("here");
-      selectedId = row.id;
-      document.getElementById("editor").value = row.text;
-      showError(document.getElementById("edit-error"), "");
+    for (const cell of row.cells || []) {
+      if (!seen.has(cell.field)) {
+        seen.add(cell.field);
+        columns.push(cell.field);
+      }
+    }
+  }
+  columns.sort((left, right) => {
+    if (left === "_id") return -1;
+    if (right === "_id") return 1;
+    return left.localeCompare(right);
+  });
+  const grid = document.getElementById("grid");
+  grid.replaceChildren();
+  document.getElementById("count").textContent = rows.length + (rows.length === 1 ? " on this page" : " on this page");
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "No documents";
+    grid.appendChild(empty);
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "grid";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const field of columns) {
+    const cell = document.createElement("th");
+    cell.textContent = field;
+    cell.dataset.col = field;
+    headRow.appendChild(cell);
+  }
+  head.appendChild(headRow);
+  table.appendChild(head);
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const line = document.createElement("tr");
+    if (row.id === keep) line.className = "here";
+    line.addEventListener("click", () => selectRow(row));
+    for (const field of columns) {
+      const value = cellOf(row, field);
+      const cell = document.createElement("td");
+      fillCell(cell, value);
+      cell.addEventListener("dblclick", (event) => {
+        event.stopPropagation();
+        beginEdit(row, value, cell);
+      });
+      line.appendChild(cell);
+    }
+    body.appendChild(line);
+  }
+  table.appendChild(body);
+  grid.appendChild(table);
+  if (keepEditor) return;
+  const kept = rows.find((row) => row.id === keep);
+  if (kept) {
+    documentId = keep;
+    document.getElementById("document").value = kept.text;
+    if (tabIndex >= 0) tabs[tabIndex].loadedText = kept.text;
+  }
+}
+
+function fillCell(cell, value) {
+  cell.replaceChildren();
+  cell.title = value.text;
+  if (value.kind === "oid" || value.kind === "date") {
+    const box = document.createElement("span");
+    box.className = "cell";
+    box.appendChild(kindIcon(value.kind));
+    const text = document.createElement("span");
+    text.textContent = value.text;
+    box.appendChild(text);
+    cell.appendChild(box);
+    return;
+  }
+  cell.textContent = value.text;
+}
+
+function kindIcon(kind) {
+  const holder = document.createElement("span");
+  holder.innerHTML = kind === "date"
+    ? '<svg class="kind" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><rect x="1.5" y="2.5" width="9" height="8" rx="1" fill="none" stroke="currentColor"/><path d="M1.5 5h9M4 1.2v2M8 1.2v2" stroke="currentColor" fill="none"/></svg>'
+    : '<svg class="kind" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><rect x="1" y="2" width="10" height="8" rx="1" fill="none" stroke="currentColor"/><path d="M3 6h4M3 8h2" stroke="currentColor"/></svg>';
+  return holder.firstChild;
+}
+
+function selectRow(row) {
+  if (editing) return;
+  documentId = row.id;
+  document.getElementById("document").value = row.text;
+  showError(document.getElementById("edit-error"), "");
+  const lines = document.querySelectorAll(".grid tbody tr");
+  const index = resultRows.indexOf(row);
+  for (const line of lines) line.classList.remove("here");
+  if (lines[index]) lines[index].classList.add("here");
+}
+
+function beginEdit(row, value, cell) {
+  if (source !== "collection") {
+    showError(document.getElementById("edit-error"), source === "view" ? "a view is read-only" : "this result cannot be edited");
+    return;
+  }
+  if (!row.id || row.id === "null" || value.field === "_id" || value.kind === "oid" || value.kind === "other") {
+    showError(document.getElementById("edit-error"), "this field cannot be edited");
+    return;
+  }
+  if (editing) return;
+  editing = true;
+  showError(document.getElementById("edit-error"), "");
+  const input = document.createElement("input");
+  input.value = value.text;
+  input.spellcheck = false;
+  cell.classList.add("editing");
+  cell.textContent = "";
+  cell.appendChild(input);
+  input.focus();
+  input.select();
+  if (tabIndex >= 0) {
+    tabs[tabIndex].pending = { id: row.id, field: value.field, kind: value.kind, text: input.value };
+    tabs[tabIndex].dirty = true;
+    renderTabs();
+  }
+  input.addEventListener("input", () => {
+    if (tabIndex < 0) return;
+    tabs[tabIndex].pending = { id: row.id, field: value.field, kind: value.kind, text: input.value };
+  });
+  let closed = false;
+  const cancel = () => {
+    if (closed) return;
+    closed = true;
+    editing = false;
+    if (tabIndex >= 0) tabs[tabIndex].pending = null;
+    cell.classList.remove("editing");
+    fillCell(cell, value);
+    snapshot();
+    renderTabs();
+  };
+  const commit = async () => {
+    if (closed) return;
+    closed = true;
+    const answer = await post({
+      op: "patch",
+      db: database,
+      collection: collection,
+      id: row.id,
+      field: value.field,
+      text: input.value,
+      kind: value.kind
     });
-    docs.appendChild(block);
-  }
+    editing = false;
+    if (!answer.ok) {
+      showError(document.getElementById("edit-error"), answer.error);
+      cell.classList.remove("editing");
+      fillCell(cell, { text: input.value, kind: value.kind });
+      return;
+    }
+    showError(document.getElementById("edit-error"), "");
+    await runQuery();
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancel();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      commit();
+    }
+  });
+  input.addEventListener("blur", () => commit());
 }
 
-async function runFind() {
-  const answer = await post({
-    op: "find",
-    db: database,
-    collection: collection,
-    filter: document.getElementById("filter").value
-  });
+function paintQuery() {
+  const query = document.getElementById("query");
+  const highlight = document.getElementById("highlight");
+  highlight.innerHTML = highlightQuery(query.value, document.getElementById("mode").value);
+  highlight.scrollTop = query.scrollTop;
+  highlight.scrollLeft = query.scrollLeft;
+}
+
+function highlightQuery(text, mode) {
+  const word = mode === "sql"
+    ? /^(select|from|where|and|or|join|left|right|inner|outer|on|group|by|order|limit|offset|as|insert|into|update|set|delete|values|create|table|view|distinct|count|sum|avg|min|max|having|union|not|in|is|null|like|between|desc|asc|true|false)\b/i
+    : /^(db|find|getCollection|insertOne|updateOne|deleteOne|true|false|null)\b/;
+  let html = "";
+  let index = 0;
+  while (index < text.length) {
+    const rest = text.slice(index);
+    if (rest[0] === '"') {
+      const token = rest.match(/^"(?:\\.|[^"\\])*"?/)[0];
+      html += '<span class="syn-str">' + escapeHtml(token) + "</span>";
+      index += token.length;
+      continue;
+    }
+    if (mode === "mql" && rest[0] === "$") {
+      const token = rest.match(/^\$[A-Za-z_][A-Za-z0-9_]*/);
+      if (token) {
+        html += '<span class="syn-key">' + escapeHtml(token[0]) + "</span>";
+        index += token[0].length;
+        continue;
+      }
+    }
+    if (rest[0] === "-" || (rest[0] >= "0" && rest[0] <= "9")) {
+      const token = rest.match(/^-?\d+(?:\.\d+)?/);
+      if (token && (index === 0 || /[\s:,\[\(\{]/.test(text[index - 1]))) {
+        html += '<span class="syn-num">' + token[0] + "</span>";
+        index += token[0].length;
+        continue;
+      }
+    }
+    const key = rest.match(word);
+    if (key && (index === 0 || /[^A-Za-z0-9_]/.test(text[index - 1]))) {
+      html += '<span class="syn-key">' + escapeHtml(key[0]) + "</span>";
+      index += key[0].length;
+      continue;
+    }
+    html += escapeHtml(rest[0]);
+    index += 1;
+  }
+  return html + "\n";
+}
+
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+}
+
+async function runQuery() {
+  const mode = document.getElementById("mode").value;
+  const text = document.getElementById("query").value;
+  const skip = page * pageSize();
+  const limit = pageSize();
+  let answer;
+  if (mode === "sql") {
+    if (!database) {
+      showError(document.getElementById("edit-error"), "select a database");
+      return;
+    }
+    source = "sql";
+    writable = false;
+    answer = await post({ op: "sql", db: database, sql: text, skip: skip, limit: limit });
+    if (answer.ok) document.getElementById("crumb").textContent = database + "  sql";
+  } else {
+    if (!database) {
+      showError(document.getElementById("edit-error"), "select a database");
+      return;
+    }
+    answer = await post({ op: "mql", db: database, mql: text, skip: skip, limit: limit });
+    if (answer.ok && answer.collection && answer.collection !== collection) {
+      collection = answer.collection;
+      source = "collection";
+      writable = true;
+    }
+  }
   if (!answer.ok) {
     showError(document.getElementById("edit-error"), answer.error);
     return;
   }
   showError(document.getElementById("edit-error"), "");
+  document.getElementById("ms").textContent = (answer.ms || 0) + " ms";
+  const from = answer.rows.length ? skip + 1 : 0;
+  document.getElementById("range").textContent = from + "–" + (skip + answer.rows.length);
+  document.getElementById("prev").disabled = page === 0;
+  document.getElementById("first").disabled = page === 0;
+  document.getElementById("next").disabled = answer.rows.length < limit;
+  document.getElementById("last").disabled = total == null;
   paint(answer.rows);
+  if (tabIndex >= 0) {
+    tabs[tabIndex].loadedText = document.getElementById("document").value;
+    tabs[tabIndex].pending = null;
+    tabs[tabIndex].dirty = false;
+    snapshot();
+    renderTabs();
+  }
 }
 
-document.getElementById("find").addEventListener("click", runFind);
-document.getElementById("run-sql").addEventListener("click", async () => {
+document.getElementById("query").addEventListener("input", () => {
+  total = null;
+  document.getElementById("total").textContent = "";
+  paintQuery();
+});
+document.getElementById("query").addEventListener("scroll", paintQuery);
+document.getElementById("query").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    page = 0;
+    runQuery();
+  }
+});
+document.getElementById("mode").addEventListener("change", paintQuery);
+document.getElementById("run").addEventListener("click", () => {
+  page = 0;
+  runQuery();
+});
+document.getElementById("page-size").addEventListener("change", () => {
+  page = 0;
+  total = null;
+  runQuery();
+});
+document.getElementById("first").addEventListener("click", () => { page = 0; runQuery(); });
+document.getElementById("prev").addEventListener("click", () => { if (page > 0) { page -= 1; runQuery(); } });
+document.getElementById("next").addEventListener("click", () => { page += 1; runQuery(); });
+document.getElementById("last").addEventListener("click", () => {
+  if (total == null) return;
+  page = Math.floor(Math.max(total - 1, 0) / pageSize());
+  runQuery();
+});
+document.getElementById("count-docs").addEventListener("click", async () => {
+  if (document.getElementById("mode").value !== "mql") {
+    showError(document.getElementById("edit-error"), "count runs on a find");
+    return;
+  }
   const answer = await post({
-    op: "sql",
+    op: "count",
     db: database,
-    sql: document.getElementById("sql").value
+    mql: document.getElementById("query").value
   });
   if (!answer.ok) {
     showError(document.getElementById("edit-error"), answer.error);
     return;
   }
+  total = answer.n;
+  document.getElementById("total").textContent = total + (total === 1 ? " document" : " documents");
+  document.getElementById("ms").textContent = (answer.ms || 0) + " ms";
+  document.getElementById("last").disabled = false;
   showError(document.getElementById("edit-error"), "");
-  paint(answer.rows);
+});
+document.getElementById("csv").addEventListener("click", async () => {
+  const columns = [...document.querySelectorAll(".grid th")].map((cell) => cell.dataset.col);
+  if (!columns.length) return;
+  const lines = [columns.map(csvCell).join(",")];
+  for (const row of resultRows) {
+    lines.push(columns.map((field) => csvCell(cellOf(row, field).text)).join(","));
+  }
+  const answer = await post({
+    op: "export",
+    name: collection || "query",
+    csv: lines.join("\n") + "\n"
+  });
+  if (!answer.ok) {
+    showError(document.getElementById("edit-error"), answer.error);
+    return;
+  }
+  document.getElementById("status").textContent = answer.path;
+});
+
+function csvCell(text) {
+  const value = text == null ? "" : String(text);
+  if (/[",\n]/.test(value)) return '"' + value.replace(/"/g, '""') + '"';
+  return value;
+}
+
+paintQuery();
+
+document.getElementById("document").addEventListener("input", () => {
+  if (tabIndex < 0) return;
+  tabs[tabIndex].documentText = document.getElementById("document").value;
+  tabs[tabIndex].dirty = tabs[tabIndex].documentText !== tabs[tabIndex].loadedText || Boolean(tabs[tabIndex].pending);
+  renderTabs();
 });
 
 document.getElementById("save").addEventListener("click", async () => {
-  const editor = document.getElementById("editor");
+  if (!documentId) {
+    showError(document.getElementById("edit-error"), "select a document");
+    return;
+  }
+  const editor = document.getElementById("document");
   const answer = await post({
     op: "save",
     db: database,
     collection: collection,
-    id: selectedId,
+    id: documentId,
     document: editor.value
   });
   if (!answer.ok) {
@@ -331,8 +1562,109 @@ document.getElementById("save").addEventListener("click", async () => {
     return;
   }
   showError(document.getElementById("edit-error"), "");
-  await runFind();
+  await runQuery();
 });
+
+function requestCloseTab(index) {
+  snapshot();
+  if (tabs[index] && tabs[index].dirty) {
+    leaveMode = "tab";
+    leaveIndex = index;
+    document.getElementById("leave").classList.remove("hidden");
+    return;
+  }
+  dropTab(index);
+}
+
+function dropTab(index) {
+  tabs.splice(index, 1);
+  if (!tabs.length) {
+    tabIndex = -1;
+    resultRows = [];
+    documentId = "";
+    document.getElementById("document").value = "";
+    document.getElementById("grid").replaceChildren();
+    renderTabs();
+    return;
+  }
+  tabIndex = Math.min(index, tabs.length - 1);
+  applyTab(tabs[tabIndex]);
+  renderTabs();
+}
+
+function signal(op) {
+  window.ipc.postMessage(JSON.stringify({ op: op }));
+}
+
+async function saveOpenEdits(onlyIndex) {
+  snapshot();
+  const chosen = onlyIndex == null ? tabs : [tabs[onlyIndex]].filter(Boolean);
+  for (const tab of chosen) {
+    if (!tab.dirty || tab.source !== "collection") continue;
+    if (tab.pending) {
+      const cell = await post({
+        op: "patch",
+        db: tab.database,
+        collection: tab.collection,
+        id: tab.pending.id,
+        field: tab.pending.field,
+        text: tab.pending.text,
+        kind: tab.pending.kind
+      });
+      if (!cell.ok) {
+        showError(document.getElementById("edit-error"), cell.error);
+        return false;
+      }
+      tab.pending = null;
+    }
+    if (tab.documentId && tab.documentText !== tab.loadedText) {
+      const saved = await post({
+        op: "save",
+        db: tab.database,
+        collection: tab.collection,
+        id: tab.documentId,
+        document: tab.documentText
+      });
+      if (!saved.ok) {
+        showError(document.getElementById("edit-error"), saved.error);
+        return false;
+      }
+      tab.loadedText = tab.documentText;
+    }
+    tab.dirty = false;
+  }
+  return true;
+}
+
+window.kovaClose = function () {
+  snapshot();
+  if (!tabs.some((tab) => tab.dirty)) {
+    signal("quit");
+    return;
+  }
+  leaveMode = "app";
+  document.getElementById("leave").classList.remove("hidden");
+};
+
+document.getElementById("leave-cancel").addEventListener("click", () => {
+  document.getElementById("leave").classList.add("hidden");
+  signal("stay");
+});
+document.getElementById("leave-drop").addEventListener("click", () => {
+  document.getElementById("leave").classList.add("hidden");
+  if (leaveMode === "tab") dropTab(leaveIndex);
+  else signal("quit");
+});
+document.getElementById("leave-save").addEventListener("click", async () => {
+  const saved = await saveOpenEdits(leaveMode === "tab" ? leaveIndex : null);
+  if (!saved) return;
+  document.getElementById("leave").classList.add("hidden");
+  renderTabs();
+  if (leaveMode === "tab") dropTab(leaveIndex);
+  else signal("quit");
+});
+
+loadConnections();
 </script>
 </body>
 </html>

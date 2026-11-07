@@ -1244,6 +1244,14 @@ pub fn special_command(command: &Document) -> Option<Document> {
         return Some(server_status_reply());
     }
 
+    if command.contains_key("kovaStatus") {
+        return Some(kova_status_reply());
+    }
+
+    if command.contains_key("feedTail") {
+        return Some(feed_tail_reply(command));
+    }
+
     if command.contains_key("ping") {
         return Some(doc! { "ok": 1.0 });
     }
@@ -1340,6 +1348,124 @@ fn server_status_reply() -> Document {
         "transactionsCommitted": n(sample.transactions_committed),
         "transactionsAborted": n(sample.transactions_aborted),
     }
+}
+
+/// Process memory, the data directory on disk, and whether the feed is on.
+fn kova_status_reply() -> Document {
+    let sample = crate::metrics::METRICS.snapshot();
+    let config = &crate::config::CONFIG;
+    let n = |value: u64| bson::Bson::Int64(value as i64);
+    let path = std::path::Path::new(&config.storage.data_dir);
+    doc! {
+        "ok": 1.0,
+        "version": env!("CARGO_PKG_VERSION"),
+        "host": std::env::consts::OS,
+        "system": format!("{}/{}", std::env::consts::ARCH, std::env::consts::OS),
+        "uptime": sample.uptime_secs as i64,
+        "memory": resident_bytes() as i64,
+        "disk": directory_bytes(path) as i64,
+        "diskPath": config.storage.data_dir.clone(),
+        "connectionsActive": n(sample.connections_active),
+        "connectionsTotal": n(sample.connections_total),
+        "queries": n(sample.queries),
+        "inserts": n(sample.inserts),
+        "updates": n(sample.updates),
+        "deletes": n(sample.deletes),
+        "bytesIn": n(sample.bytes_in),
+        "bytesOut": n(sample.bytes_out),
+        "walWrites": n(sample.wal_writes),
+        "feed": {
+            "enabled": config.feed.enabled,
+            "linked": crate::feed::linked(),
+            "address": config.feed.address.clone(),
+            "stream": config.feed.stream.clone(),
+            "topic": config.feed.topic.clone(),
+        },
+    }
+}
+
+fn feed_tail_reply(command: &Document) -> Document {
+    let after = match command.get("after") {
+        Some(bson::Bson::Int32(value)) if *value > 0 => *value as u64,
+        Some(bson::Bson::Int64(value)) if *value > 0 => *value as u64,
+        Some(bson::Bson::Double(value)) if *value > 0.0 => *value as u64,
+        _ => 0,
+    };
+    let config = &crate::config::CONFIG;
+    let mut records = bson::Array::new();
+    for (seq, record) in crate::feed::since(after) {
+        records.push(bson::Bson::Document(doc! {
+            "seq": seq as i64,
+            "op": record.op,
+            "ns": record.ns,
+            "id": record.id,
+            "lsn": record.lsn as i64,
+            "before": brief_json(&record.before),
+            "after": brief_json(&record.after),
+        }));
+    }
+    doc! {
+        "ok": 1.0,
+        "enabled": config.feed.enabled,
+        "linked": crate::feed::linked(),
+        "records": records,
+    }
+}
+
+fn brief_json(value: &serde_json::Value) -> String {
+    if value.as_object().is_some_and(|object| object.is_empty()) {
+        return String::new();
+    }
+    let text = serde_json::to_string(value).unwrap_or_default();
+    if text.len() <= 80 {
+        return text;
+    }
+    let mut end = 80;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+/// Resident set, from `/proc/self/status` on Linux.
+fn resident_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(text) = std::fs::read_to_string("/proc/self/status") {
+            for line in text.lines() {
+                let Some(rest) = line.strip_prefix("VmRSS:") else {
+                    continue;
+                };
+                let kb: u64 = rest.split_whitespace().next().unwrap_or("0").parse().unwrap_or(0);
+                return kb.saturating_mul(1024);
+            }
+        }
+    }
+    0
+}
+
+fn directory_bytes(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
 }
 
 /// Builds the reply to a `buildInfo` request.
@@ -2537,6 +2663,37 @@ mod tests {
             special_command(&doc! { "atlasVersion": 1.0 }).is_some(),
             "atlasVersion is metadata"
         );
+    }
+
+    #[test]
+    fn test_kova_status_omits_the_feed_secret() {
+        let reply = special_command(&doc! { "kovaStatus": 1i32 }).expect("kovaStatus");
+        assert_eq!(reply.get_f64("ok").unwrap(), 1.0);
+        assert!(!reply.contains_key("password"));
+        let feed = reply.get_document("feed").unwrap();
+        assert!(feed.get("password").is_none());
+        assert!(feed.get("username").is_none());
+        assert!(!reply.get_str("version").unwrap().is_empty());
+        assert!(reply.get_i64("disk").unwrap() >= 0);
+    }
+
+    #[test]
+    fn test_feed_tail_returns_a_remembered_record() {
+        crate::feed::remember(&[crate::feed::Record::new(
+            "insert",
+            "shop.orders",
+            "abc",
+            crate::feed::empty_document(),
+            serde_json::json!({ "sku": 9 }),
+            9,
+        )]);
+        let reply = special_command(&doc! { "feedTail": 1i32, "after": 0i64 }).expect("feedTail");
+        let records = reply.get_array("records").unwrap();
+        assert!(records.iter().any(|value| {
+            value
+                .as_document()
+                .is_some_and(|document| document.get_str("ns") == Ok("shop.orders"))
+        }));
     }
 
     #[test]

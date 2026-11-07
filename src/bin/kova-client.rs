@@ -88,26 +88,38 @@ fn open_window() -> Result<(), String> {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(UserEvent::Ipc(body)) => {
-                let answer = ui.dispatch(&body);
-                let id = serde_json::from_str::<serde_json::Value>(&body)
-                    .ok()
-                    .and_then(|value| value.get("id").cloned())
+                let request = serde_json::from_str::<serde_json::Value>(&body)
                     .unwrap_or(serde_json::Value::Null);
-                let mut payload: serde_json::Value =
-                    serde_json::from_str(&answer).unwrap_or(serde_json::json!({
-                        "ok": false,
-                        "error": "bad answer"
-                    }));
-                if let Some(object) = payload.as_object_mut() {
-                    object.insert("id".into(), id);
+                let op = request
+                    .get("op")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                if op == "quit" {
+                    *control_flow = ControlFlow::Exit;
+                } else if op != "stay" {
+                    let answer = ui.dispatch(&body);
+                    let req = request
+                        .get("req")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let mut payload: serde_json::Value =
+                        serde_json::from_str(&answer).unwrap_or(serde_json::json!({
+                            "ok": false,
+                            "error": "bad answer"
+                        }));
+                    if let Some(object) = payload.as_object_mut() {
+                        object.insert("req".into(), req);
+                    }
+                    let script = format!("window.kovaAnswer({payload})");
+                    let _ = webview.evaluate_script(&script);
                 }
-                let script = format!("window.kovaAnswer({payload})");
-                let _ = webview.evaluate_script(&script);
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => *control_flow = ControlFlow::Exit,
+            } => {
+                let _ = webview.evaluate_script("if (window.kovaClose) window.kovaClose()");
+            }
             _ => {}
         }
     });

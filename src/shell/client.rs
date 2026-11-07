@@ -14,6 +14,50 @@ pub struct Client {
     next_id: i32,
 }
 
+pub struct CollectionInfo {
+    pub name: String,
+    pub kind: String,
+}
+
+pub struct IndexInfo {
+    pub name: String,
+    pub key: String,
+    pub unique: bool,
+}
+
+pub struct ServerStatus {
+    pub version: String,
+    pub host: String,
+    pub system: String,
+    pub uptime: i64,
+    pub memory: i64,
+    pub disk: i64,
+    pub disk_path: String,
+    pub connections_active: i64,
+    pub connections_total: i64,
+    pub queries: i64,
+    pub inserts: i64,
+    pub updates: i64,
+    pub deletes: i64,
+    pub bytes_in: i64,
+    pub bytes_out: i64,
+    pub wal_writes: i64,
+    pub feed_enabled: bool,
+    pub feed_linked: bool,
+    pub feed_address: String,
+    pub feed_stream: String,
+    pub feed_topic: String,
+}
+
+pub struct FeedEvent {
+    pub seq: i64,
+    pub op: String,
+    pub ns: String,
+    pub id: String,
+    pub before: String,
+    pub after: String,
+}
+
 impl Client {
     pub fn connect(
         host: &str,
@@ -69,10 +113,75 @@ impl Client {
     }
 
     pub fn list_collections(&mut self, database: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .list_collection_info(database)?
+            .into_iter()
+            .map(|info| info.name)
+            .collect())
+    }
+
+    /// Collections and views. `kind` is `collection` or `view`.
+    pub fn list_collection_info(&mut self, database: &str) -> Result<Vec<CollectionInfo>, String> {
         let reply = self.command(doc! { "listCollections": 1i32, "$db": database })?;
-        let mut names = names_in_cursor(&reply)?;
-        names.sort();
+        let mut infos = Vec::new();
+        for document in cursor_batch(&reply)? {
+            let Some(name) = document.get_str("name").ok() else {
+                continue;
+            };
+            if infos.iter().any(|info: &CollectionInfo| info.name == name) {
+                continue;
+            }
+            let kind = document.get_str("type").unwrap_or("collection").to_string();
+            infos.push(CollectionInfo {
+                name: name.to_string(),
+                kind,
+            });
+        }
+        infos.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(infos)
+    }
+
+    /// Field names present in the first batch of documents.
+    pub fn field_names(&mut self, database: &str, collection: &str) -> Result<Vec<String>, String> {
+        let documents = self.find_page(database, collection, Document::new(), 0, Some(200))?;
+        let mut names = std::collections::BTreeSet::new();
+        for document in &documents {
+            for key in document.keys() {
+                names.insert(key.to_string());
+            }
+        }
+        let mut names: Vec<String> = names.into_iter().collect();
+        if let Some(position) = names.iter().position(|name| name == "_id") {
+            let id = names.remove(position);
+            names.insert(0, id);
+        }
         Ok(names)
+    }
+
+    /// Indexes declared on a collection, including the mandatory `_id_`.
+    pub fn list_indexes(
+        &mut self,
+        database: &str,
+        collection: &str,
+    ) -> Result<Vec<IndexInfo>, String> {
+        let reply = self.command(doc! { "listIndexes": collection, "$db": database })?;
+        let mut infos = Vec::new();
+        for document in cursor_batch(&reply)? {
+            let Ok(name) = document.get_str("name") else {
+                continue;
+            };
+            let key = document
+                .get_document("key")
+                .map(key_label)
+                .unwrap_or_default();
+            let unique = matches!(document.get("unique"), Some(Bson::Boolean(true)));
+            infos.push(IndexInfo {
+                name: name.to_string(),
+                key,
+                unique,
+            });
+        }
+        Ok(infos)
     }
 
     pub fn find(
@@ -81,12 +190,45 @@ impl Client {
         collection: &str,
         filter: Document,
     ) -> Result<Vec<Document>, String> {
-        let reply = self.command(doc! {
+        self.find_page(database, collection, filter, 0, None)
+    }
+
+    pub fn find_page(
+        &mut self,
+        database: &str,
+        collection: &str,
+        filter: Document,
+        skip: u64,
+        limit: Option<u64>,
+    ) -> Result<Vec<Document>, String> {
+        let mut command = doc! {
             "find": collection,
             "filter": filter,
             "$db": database,
-        })?;
+        };
+        if skip > 0 {
+            command.insert("skip", skip as i64);
+        }
+        if let Some(limit) = limit {
+            command.insert("limit", limit as i64);
+        }
+        let reply = self.command(command)?;
         cursor_batch(&reply)
+    }
+
+    pub fn count(
+        &mut self,
+        database: &str,
+        collection: &str,
+        filter: Document,
+    ) -> Result<i64, String> {
+        let reply = self.command(doc! {
+            "count": collection,
+            "query": filter,
+            "$db": database,
+        })?;
+        ensure_ok(&reply)?;
+        Ok(count_of(&reply))
     }
 
     pub fn insert_one(
@@ -133,6 +275,71 @@ impl Client {
         })?;
         ensure_ok(&reply)?;
         Ok(count_of(&reply))
+    }
+
+    pub fn status(&mut self) -> Result<ServerStatus, String> {
+        let reply = self.command(doc! { "kovaStatus": 1i32, "$db": "admin" })?;
+        ensure_ok(&reply)?;
+        let feed = reply.get_document("feed").ok();
+        Ok(ServerStatus {
+            version: reply.get_str("version").unwrap_or("").to_string(),
+            host: reply.get_str("host").unwrap_or("").to_string(),
+            system: reply.get_str("system").unwrap_or("").to_string(),
+            uptime: number_field(&reply, "uptime"),
+            memory: number_field(&reply, "memory"),
+            disk: number_field(&reply, "disk"),
+            disk_path: reply.get_str("diskPath").unwrap_or("").to_string(),
+            connections_active: number_field(&reply, "connectionsActive"),
+            connections_total: number_field(&reply, "connectionsTotal"),
+            queries: number_field(&reply, "queries"),
+            inserts: number_field(&reply, "inserts"),
+            updates: number_field(&reply, "updates"),
+            deletes: number_field(&reply, "deletes"),
+            bytes_in: number_field(&reply, "bytesIn"),
+            bytes_out: number_field(&reply, "bytesOut"),
+            wal_writes: number_field(&reply, "walWrites"),
+            feed_enabled: feed
+                .and_then(|document| document.get_bool("enabled").ok())
+                .unwrap_or(false),
+            feed_linked: feed
+                .and_then(|document| document.get_bool("linked").ok())
+                .unwrap_or(false),
+            feed_address: feed
+                .and_then(|document| document.get_str("address").ok())
+                .unwrap_or("")
+                .to_string(),
+            feed_stream: feed
+                .and_then(|document| document.get_str("stream").ok())
+                .unwrap_or("")
+                .to_string(),
+            feed_topic: feed
+                .and_then(|document| document.get_str("topic").ok())
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
+    pub fn feed_tail(&mut self, after: i64) -> Result<Vec<FeedEvent>, String> {
+        let reply = self.command(doc! { "feedTail": 1i32, "after": after, "$db": "admin" })?;
+        ensure_ok(&reply)?;
+        let values = reply
+            .get_array("records")
+            .map_err(|_| "feed has no records".to_string())?;
+        let mut events = Vec::new();
+        for value in values {
+            let Some(document) = value.as_document() else {
+                continue;
+            };
+            events.push(FeedEvent {
+                seq: number_field(document, "seq"),
+                op: document.get_str("op").unwrap_or("").to_string(),
+                ns: document.get_str("ns").unwrap_or("").to_string(),
+                id: document.get_str("id").unwrap_or("").to_string(),
+                before: document.get_str("before").unwrap_or("").to_string(),
+                after: document.get_str("after").unwrap_or("").to_string(),
+            });
+        }
+        Ok(events)
     }
 
     pub fn sql(&mut self, database: &str, statement: &str) -> Result<Vec<Document>, String> {
@@ -212,12 +419,35 @@ fn ensure_ok(reply: &Document) -> Result<(), String> {
 }
 
 fn count_of(reply: &Document) -> i64 {
-    match reply.get("n") {
+    number_field(reply, "n")
+}
+
+fn number_field(document: &Document, key: &str) -> i64 {
+    match document.get(key) {
         Some(Bson::Int32(value)) => i64::from(*value),
         Some(Bson::Int64(value)) => *value,
         Some(Bson::Double(value)) => *value as i64,
         _ => 0,
     }
+}
+
+fn key_label(key: &Document) -> String {
+    key.iter()
+        .map(|(name, value)| {
+            let descending = match value {
+                Bson::Int32(number) => *number == -1,
+                Bson::Int64(number) => *number == -1,
+                Bson::Double(number) => *number == -1.0,
+                _ => false,
+            };
+            if descending {
+                format!("{name}: -1")
+            } else {
+                name.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn cursor_batch(reply: &Document) -> Result<Vec<Document>, String> {
@@ -237,11 +467,4 @@ fn cursor_batch(reply: &Document) -> Result<Vec<Document>, String> {
                 .ok_or_else(|| "cursor row is not a document".to_string())
         })
         .collect()
-}
-
-fn names_in_cursor(reply: &Document) -> Result<Vec<String>, String> {
-    Ok(cursor_batch(reply)?
-        .into_iter()
-        .filter_map(|document| document.get_str("name").ok().map(str::to_string))
-        .collect())
 }

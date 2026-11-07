@@ -298,6 +298,185 @@ fn a_wrong_password_on_the_window_is_refused() {
 }
 
 #[test]
+fn the_window_saves_a_connection_lists_fields_and_edits_a_cell() {
+    let server = Server::start(false);
+    let file = server.dir.join("connections.json");
+    std::env::set_var("KOVA_CONNECTIONS", &file);
+    let mut ui = Ui::new();
+    let saved: Value = serde_json::from_str(&ui.dispatch(&format!(
+        r#"{{"op":"saveConnection","name":"KOVA","host":"127.0.0.1","port":{},"user":"","password":""}}"#,
+        server.port
+    )))
+    .unwrap();
+    assert!(saved["ok"].as_bool().unwrap_or(false), "{saved}");
+    let id = saved["connection"]["id"].as_str().unwrap();
+    let listed: Value = serde_json::from_str(&ui.dispatch(r#"{"op":"connections"}"#)).unwrap();
+    assert!(
+        listed["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "KOVA"),
+        "{listed}"
+    );
+
+    let connect: Value = serde_json::from_str(&ui.dispatch(&format!(
+        r#"{{"op":"connect","id":"{id}","host":"127.0.0.1","port":{},"user":"","password":""}}"#,
+        server.port
+    )))
+    .unwrap();
+    assert!(connect["ok"].as_bool().unwrap_or(false), "{connect}");
+    let seeded = shell(
+        server.port,
+        &[],
+        "use shop\ndb.orders.insertOne({ sku: 9, qty: 1 })\n",
+    );
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+
+    let collections: Value =
+        serde_json::from_str(&ui.dispatch(r#"{"op":"collections","db":"shop"}"#)).unwrap();
+    let orders = collections["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "orders")
+        .unwrap();
+    assert_eq!(orders["type"], "collection");
+
+    let status: Value = serde_json::from_str(&ui.dispatch(r#"{"op":"status"}"#)).unwrap();
+    assert!(status["ok"].as_bool().unwrap_or(false), "{status}");
+    assert!(status["memory"].as_i64().unwrap_or(-1) > 0, "{status}");
+    assert!(status["disk"].as_i64().unwrap_or(-1) >= 0, "{status}");
+    assert_eq!(status["feed"]["enabled"], false, "{status}");
+    assert!(status.get("password").is_none(), "{status}");
+
+    let fields: Value =
+        serde_json::from_str(&ui.dispatch(r#"{"op":"fields","db":"shop","collection":"orders"}"#))
+            .unwrap();
+    let names = fields["fields"].as_array().unwrap();
+    assert_eq!(names[0], Value::from("_id"));
+    assert!(names.contains(&Value::from("sku")), "{fields}");
+    assert!(names.contains(&Value::from("qty")), "{fields}");
+
+    let indexes: Value = serde_json::from_str(
+        &ui.dispatch(r#"{"op":"indexes","db":"shop","collection":"orders"}"#),
+    )
+    .unwrap();
+    assert!(indexes["ok"].as_bool().unwrap_or(false), "{indexes}");
+    assert!(
+        indexes["indexes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "_id_" && item["key"] == "_id"),
+        "{indexes}"
+    );
+
+    let found: Value = serde_json::from_str(
+        &ui.dispatch(r#"{"op":"find","db":"shop","collection":"orders","filter":"{ sku: 9 }"}"#),
+    )
+    .unwrap();
+    let row = &found["rows"][0];
+    let qty = row["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|cell| cell["field"] == "qty")
+        .unwrap();
+    assert_eq!(qty["kind"], "int");
+    assert_eq!(qty["text"], "1");
+    let id_cell = row["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|cell| cell["field"] == "_id")
+        .unwrap();
+    assert_eq!(id_cell["kind"], "oid");
+    let hex = id_cell["text"].as_str().unwrap();
+    assert_eq!(hex.len(), 24, "{id_cell}");
+    assert!(!hex.contains('$'), "{id_cell}");
+
+    let page: Value = serde_json::from_str(&ui.dispatch(
+        r#"{"op":"mql","db":"shop","mql":"db.getCollection(\"orders\").find({})","limit":1}"#,
+    ))
+    .unwrap();
+    assert!(page["ok"].as_bool().unwrap_or(false), "{page}");
+    assert_eq!(page["rows"].as_array().unwrap().len(), 1, "{page}");
+    assert!(page["ms"].as_u64().is_some(), "{page}");
+    let counted: Value = serde_json::from_str(
+        &ui.dispatch(r#"{"op":"count","db":"shop","mql":"db.orders.find({})"}"#),
+    )
+    .unwrap();
+    assert!(counted["ok"].as_bool().unwrap_or(false), "{counted}");
+    assert_eq!(counted["n"].as_i64(), Some(1), "{counted}");
+    std::env::set_var("KOVA_DOWNLOADS", &server.dir);
+    let exported: Value = serde_json::from_str(
+        &ui.dispatch(r#"{"op":"export","name":"orders","csv":"_id,qty\nabc,1\n"}"#),
+    )
+    .unwrap();
+    assert!(exported["ok"].as_bool().unwrap_or(false), "{exported}");
+    let csv_path = exported["path"].as_str().unwrap();
+    assert!(
+        std::fs::read_to_string(csv_path).unwrap().contains("qty"),
+        "{exported}"
+    );
+    let patch = format!(
+        r#"{{"op":"patch","db":"shop","collection":"orders","id":{},"field":"qty","text":"3","kind":"int"}}"#,
+        serde_json::to_string(row["id"].as_str().unwrap()).unwrap(),
+    );
+    let patched: Value = serde_json::from_str(&ui.dispatch(&patch)).unwrap();
+    assert!(patched["ok"].as_bool().unwrap_or(false), "{patched}");
+    let again: Value = serde_json::from_str(
+        &ui.dispatch(r#"{"op":"find","db":"shop","collection":"orders","filter":"{ sku: 9 }"}"#),
+    )
+    .unwrap();
+    let qty = again["rows"][0]["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|cell| cell["field"] == "qty")
+        .unwrap();
+    assert_eq!(qty["text"], "3", "{again}");
+
+    let refused = format!(
+        r#"{{"op":"patch","db":"shop","collection":"orders","id":{},"field":"qty","text":"nope","kind":"int"}}"#,
+        serde_json::to_string(row["id"].as_str().unwrap()).unwrap(),
+    );
+    let refused: Value = serde_json::from_str(&ui.dispatch(&refused)).unwrap();
+    assert!(!refused["ok"].as_bool().unwrap_or(true), "{refused}");
+    assert!(refused["keep"].as_bool().unwrap_or(false), "{refused}");
+    let still: Value = serde_json::from_str(
+        &ui.dispatch(r#"{"op":"find","db":"shop","collection":"orders","filter":"{ sku: 9 }"}"#),
+    )
+    .unwrap();
+    let qty = still["rows"][0]["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|cell| cell["field"] == "qty")
+        .unwrap();
+    assert_eq!(qty["text"], "3", "{still}");
+
+    let deleted: Value =
+        serde_json::from_str(&ui.dispatch(&format!(r#"{{"op":"deleteConnection","id":"{id}"}}"#)))
+            .unwrap();
+    assert!(deleted["ok"].as_bool().unwrap_or(false), "{deleted}");
+    let empty: Value = serde_json::from_str(&ui.dispatch(r#"{"op":"connections"}"#)).unwrap();
+    assert!(
+        !empty["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "KOVA"),
+        "{empty}"
+    );
+}
+
+#[test]
 fn without_a_display_the_client_names_the_shell() {
     let output = Command::new(bin("kova-client"))
         .env_remove("DISPLAY")

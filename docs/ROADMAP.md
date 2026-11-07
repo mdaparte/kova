@@ -1012,13 +1012,13 @@ The connection code this phase adds is the one Phase 30 calls. The window does n
 
 ## Phase 30 - Graphical client ✅ Complete
 
-`kova-client` is the window. It lists databases and collections, shows documents, runs a find and a SQL statement, and saves an edit of one document. It calls the Phase 29 connection. It does not speak `OP_MSG` on its own, and it does not add a server command.
+`kova-client` is the window. It saves connections on this machine, lists databases, collections, their fields, and views, shows documents in a grid, runs a find and a SQL statement, and saves an edit of one document or one cell. It calls the Phase 29 connection. It does not speak `OP_MSG` on its own, and it does not add a server command.
 
 The window is drawn with the system web view, so it can use the site as it stands. Linux, Windows, and Mac each use the view that system provides. A machine without a display runs `kova-shell`.
 
-- Connect asks for the host, the port, the user, and the password. The host suggestion is `127.0.0.1` and the port suggestion is `27018`. The user and the password are both filled, or both empty. A wrong password is refused with `authentication failed`.
-- The left side lists databases and opens each one into its collections.
-- The center lists the documents of the selected collection.
+- Connect asks for the host, the port, the user, and the password. The host suggestion is `127.0.0.1` and the port suggestion is `27018`. The user and the password are both filled, or both empty. A wrong password is refused with `authentication failed`. A connection can be saved, opened again, duplicated, and deleted. The file stays on this machine.
+- The left side lists databases. A database opens into its collections and its views. A collection and a view open into the fields those documents have.
+- The center lists the documents of the selected collection in a grid. A double click edits one cell. Enter saves that field. Escape puts the old text back. A view and a SQL result are not edited in the grid. An object id and a date show as themselves, with a small mark. The query is one editor, MQL or SQL. The grid pages, counts, and can be saved as CSV. Light and dark can follow the system or be chosen.
 - One box runs a find filter. Another runs a SQL statement. The rows or documents replace what the center shows.
 - Choosing a document opens its text. Saving sends the edit of that `_id`. A document the server refuses keeps the text on screen and shows the error.
 
@@ -1031,7 +1031,7 @@ The binary ships in the same three packages as `kova-shell`. Intel Mac, Windows 
 ### Phase 30 - Sub-tasks
 
 - [x] `kova-client` calls the Phase 29 connection. It does not open its own protocol.
-- [x] The window lists databases and collections, shows the documents of the selected collection, runs a find filter and a SQL statement, and saves an edit of one document by `_id`. A refused edit keeps the text and shows the error.
+- [x] The window lists databases, collections, fields, and views, shows the documents of the selected collection in a grid, runs a find filter and a SQL statement, saves an edit of one document by `_id`, and saves one cell on a double click. A refused edit keeps the text and shows the error.
 - [x] Connect defaults to `127.0.0.1` and `27018`. User and password are both set, or both empty. A wrong password is refused with `authentication failed`.
 - [x] The window uses the site mark, oxide `#c2461b`, granite `#17191c`, feldspar `#eceeeb`, Archivo, IBM Plex Sans, and IBM Plex Mono. Light and dark follow the system.
 - [x] The window is the system web view. Without a display, `kova-shell` is the path.

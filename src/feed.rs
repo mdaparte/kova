@@ -156,12 +156,15 @@ impl Feed {
                 if !allow {
                     return;
                 }
+                let mut queued = Vec::new();
                 for record in records {
                     let bytes = serde_json::to_vec(&record).unwrap_or_default();
                     if live.tx.send(bytes).is_ok() {
                         live.accepted.fetch_add(1, Ordering::Relaxed);
+                        queued.push(record);
                     }
                 }
+                remember(&queued);
             }
         }
     }
@@ -231,8 +234,9 @@ async fn publish_loop(config: FeedConfig, rx: crossbeam_channel::Receiver<Vec<u8
         }
         CONNECTS.fetch_add(1, Ordering::Relaxed);
         match iggy_session(&config, &mut pending).await {
-            Ok(()) => {}
+            Ok(()) => set_linked(true),
             Err(message) => {
+                set_linked(false);
                 LOGGER.warn(format!("feed publish failed: {message}"));
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -241,6 +245,62 @@ async fn publish_loop(config: FeedConfig, rx: crossbeam_channel::Receiver<Vec<u8
 }
 
 static CONNECTS: AtomicU64 = AtomicU64::new(0);
+
+const TAIL_LIMIT: usize = 200;
+
+struct Kept {
+    seq: u64,
+    record: Record,
+}
+
+struct Tail {
+    next: u64,
+    records: VecDeque<Kept>,
+    linked: bool,
+}
+
+static TAIL: Mutex<Tail> = Mutex::new(Tail {
+    next: 0,
+    records: VecDeque::new(),
+    linked: false,
+});
+
+/// Keeps the latest records so a client can follow the feed.
+pub fn remember(records: &[Record]) {
+    if records.is_empty() {
+        return;
+    }
+    let mut tail = TAIL.lock().expect("feed tail");
+    for record in records {
+        tail.next = tail.next.saturating_add(1);
+        let seq = tail.next;
+        tail.records.push_back(Kept {
+            seq,
+            record: record.clone(),
+        });
+    }
+    while tail.records.len() > TAIL_LIMIT {
+        tail.records.pop_front();
+    }
+}
+
+/// Records whose sequence is greater than `after`, oldest first.
+pub fn since(after: u64) -> Vec<(u64, Record)> {
+    let tail = TAIL.lock().expect("feed tail");
+    tail.records
+        .iter()
+        .filter(|kept| kept.seq > after)
+        .map(|kept| (kept.seq, kept.record.clone()))
+        .collect()
+}
+
+pub fn set_linked(linked: bool) {
+    TAIL.lock().expect("feed tail").linked = linked;
+}
+
+pub fn linked() -> bool {
+    TAIL.lock().expect("feed tail").linked
+}
 
 /// How many times this process has tried to open Iggy. Stays at 0 when
 /// the feed is off.

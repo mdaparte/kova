@@ -193,6 +193,8 @@ fn action_for(command: &Document) -> Action {
         || command.contains_key("listIndexes")
         || command.contains_key("listDatabases")
         || command.contains_key("serverStatus")
+        || command.contains_key("kovaStatus")
+        || command.contains_key("feedTail")
     {
         return Action::ViewStatus;
     }

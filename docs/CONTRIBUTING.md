@@ -226,9 +226,9 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   `show dbs`, `use`, `show collections`, `find`, `insertOne`, `updateOne`,
   `deleteOne`, and `sql` as commands. A line is not JavaScript. ✅ Complete.
 - **Phase 30 - Graphical client:** `kova-client` uses that same connection.
-  It lists databases and collections, runs a find and a SQL statement, and
-  saves an edit of one document. The window uses the site's mark and colors.
-  ✅ Complete.
+  It saves connections, lists databases, collections, fields, and views,
+  runs a find and a SQL statement, and saves a document or one cell.
+  The window uses the site's mark and colors. ✅ Complete.
 - **Phase 31 - Steps behind MongoDB:** the five-pass benchmark steps whose
   mean is slower than MongoDB by more than the standard deviation of the
   paired differences. Similar steps stay as they are. ⚪ Planned.

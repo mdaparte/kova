@@ -4,6 +4,7 @@
 //! the window and calls the same [`Client`]. Neither one adds a server command.
 
 mod client;
+mod connections;
 mod dispatch;
 mod edit;
 mod parse;
@@ -12,7 +13,7 @@ mod window;
 pub use client::{pair, Client};
 pub use dispatch::Ui;
 pub use edit::{complete_collection, read_loop, Recall};
-pub use parse::{parse_bson, parse_command, parse_document, Command};
+pub use parse::{parse_bson, parse_cell, parse_command, parse_document, Command};
 
 use std::sync::{Arc, Mutex};
 
@@ -203,5 +204,17 @@ mod tests {
         assert!(page.contains("IBM Plex Mono"));
         assert!(page.contains("prefers-color-scheme: dark"));
         assert!(page.contains("width=\"4\" height=\"16\""));
+        assert!(page.contains("New connection"));
+        assert!(page.contains("views"));
+        assert!(page.contains("indexes"));
+        assert!(page.contains("memory"));
+        assert!(page.contains("dblclick"));
+        assert!(page.contains(">MQL<") || page.contains("MQL"));
+        assert!(page.contains("data-theme"));
+        assert!(page.contains(">CSV<") || page.contains("CSV"));
+        assert!(page.contains("Count"));
+        assert!(page.contains(">Light<"));
+        assert!(page.contains(">Dark<"));
+        assert!(page.contains("before closing"));
     }
 }

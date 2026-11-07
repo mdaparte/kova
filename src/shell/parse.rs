@@ -55,6 +55,10 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
     let Some(rest) = line.strip_prefix("db.") else {
         return Err(unknown());
     };
+    if let Some(after) = rest.strip_prefix("getCollection") {
+        let (name, after) = collection_name(after).map_err(|_| unknown())?;
+        return parse_call(name, after);
+    }
     if let Some(after) = rest.strip_prefix("runCommand") {
         let args = call_args(after).ok_or_else(unknown)?;
         if args.len() != 1 {
@@ -77,6 +81,26 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
     if !is_name(collection) {
         return Err(unknown());
     }
+    parse_call(collection.to_string(), after)
+}
+
+fn collection_name(after: &str) -> Result<(String, &str), String> {
+    let after = after.trim_start();
+    let (inner, rest) = take_call(after)?;
+    let args = split_args(inner)?;
+    if args.len() != 1 {
+        return Err("getCollection requires a name".into());
+    }
+    match parse_bson(&args[0])? {
+        Bson::String(name) if !name.is_empty() && !name.contains('.') => Ok((name, rest)),
+        _ => Err("getCollection requires a name".into()),
+    }
+}
+
+fn parse_call(collection: String, after: &str) -> Result<Command, String> {
+    let unknown = || format!("unknown command: db.{collection}.{after}");
+    let after = after.trim_start();
+    let after = after.strip_prefix('.').unwrap_or(after);
     let Some((method, args_src)) = after.split_once('(') else {
         return Err(unknown());
     };
@@ -123,6 +147,45 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         },
         _ => Err(unknown()),
     }
+}
+
+fn take_call(src: &str) -> Result<(&str, &str), String> {
+    let src = src.trim_start();
+    if !src.starts_with('(') {
+        return Err("expected '('".into());
+    }
+    let mut depth = 0i32;
+    let mut quote = false;
+    let mut escape = false;
+    for (index, ch) in src.char_indices() {
+        if quote {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == '"' {
+                quote = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => quote = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = index + ch.len_utf8();
+                    return Ok((&src[1..index], &src[end..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("expected ')'".into())
 }
 
 fn call_args(after_name: &str) -> Option<Vec<String>> {
@@ -218,6 +281,57 @@ pub fn is_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// One grid cell. A string stays a string. A number stays a number.
+/// An empty cell, or a null cell with new text, takes whatever the text is.
+pub fn parse_cell(text: &str, kind: &str) -> Result<Bson, String> {
+    match kind {
+        "string" => Ok(Bson::String(text.to_string())),
+        "int" => parse_int(text.trim()),
+        "long" => text
+            .trim()
+            .parse::<i64>()
+            .map(Bson::Int64)
+            .map_err(|_| "expected a number".to_string()),
+        "double" => text
+            .trim()
+            .parse::<f64>()
+            .map(Bson::Double)
+            .map_err(|_| "expected a number".to_string()),
+        "bool" => match text.trim() {
+            "true" => Ok(Bson::Boolean(true)),
+            "false" => Ok(Bson::Boolean(false)),
+            _ => Err("expected true or false".into()),
+        },
+        "object" => parse_document(text).map(Bson::Document),
+        "array" => match parse_bson(text)? {
+            value @ Bson::Array(_) => Ok(value),
+            _ => Err("expected an array".into()),
+        },
+        "date" => bson::DateTime::parse_rfc3339_str(text.trim())
+            .map(Bson::DateTime)
+            .map_err(|_| "expected a date".to_string()),
+        "null" | "missing" | "" => parse_loose(text),
+        _ => Err("this field cannot be edited".into()),
+    }
+}
+
+fn parse_int(text: &str) -> Result<Bson, String> {
+    if let Ok(number) = text.parse::<i32>() {
+        return Ok(Bson::Int32(number));
+    }
+    text.parse::<i64>()
+        .map(Bson::Int64)
+        .map_err(|_| "expected a number".to_string())
+}
+
+fn parse_loose(text: &str) -> Result<Bson, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return Ok(Bson::Null);
+    }
+    parse_bson(trimmed).or_else(|_| Ok(Bson::String(text.to_string())))
 }
 
 pub fn parse_document(text: &str) -> Result<Document, String> {
@@ -504,6 +618,33 @@ mod tests {
     fn an_unknown_line_names_itself() {
         let err = parse_command("please delete everything").unwrap_err();
         assert_eq!(err, "unknown command: please delete everything");
+    }
+
+    #[test]
+    fn a_cell_keeps_its_kind() {
+        assert_eq!(
+            parse_cell("ALLEN", "string").unwrap(),
+            Bson::String("ALLEN".into())
+        );
+        assert_eq!(parse_cell("1600", "int").unwrap(), Bson::Int32(1600));
+        assert_eq!(parse_cell("true", "bool").unwrap(), Bson::Boolean(true));
+        assert!(parse_cell("nope", "int").is_err());
+        assert_eq!(
+            parse_cell("WARD", "missing").unwrap(),
+            Bson::String("WARD".into())
+        );
+        assert_eq!(parse_cell("", "null").unwrap(), Bson::Null);
+        assert_eq!(
+            parse_cell("1970-01-01T00:00:00.000Z", "date").unwrap(),
+            Bson::DateTime(bson::DateTime::from_millis(0))
+        );
+        match parse_command(r#"db.getCollection("orders").find({ sku: 1 })"#).unwrap() {
+            Command::Find { collection, filter } => {
+                assert_eq!(collection, "orders");
+                assert_eq!(filter.get_i32("sku").unwrap(), 1);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
