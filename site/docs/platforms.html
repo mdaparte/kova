@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script>
+try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}
+</script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Operating systems - KOVA</title>
+  <meta name="description" content="Linux, Windows, and Mac ship the same Kova server. The package, the service, the ODBC driver, and one detail of iggy-server follow the operating system.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/site.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="k-micro" viewBox="0 0 16 16">
+        <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+        <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+        <rect x="5" y="6" width="7" height="4" style="fill:var(--core,#C2461B)"/>
+        <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+  <header class="bar">
+    <a class="brand" href="/"><svg class="mark" width="16" height="16"><use href="#k-micro"/></svg>KOVA</a>
+    <nav>
+      <a href="/docs">Docs</a>
+      <a href="/docs/getting-started">Start</a>
+      <a href="/#list">Email</a>
+      <button type="button" class="theme" data-theme-toggle>Light</button>
+    </nav>
+  </header>
+  <div class="doc-shell">
+    <nav class="side" aria-label="Documentation">
+      <div><h2>Start</h2><a href="/docs">Welcome</a><a href="/docs/getting-started">Getting started</a><a href="/docs/platforms" class="here">Operating systems</a><a href="/docs/concepts">How data is stored</a></div>
+<div><h2>Work with data</h2><a href="/docs/documents">Documents</a><a href="/docs/queries">Find and aggregate</a><a href="/docs/indexes">Indexes</a><a href="/docs/search">Text search</a><a href="/docs/views">Views</a><a href="/docs/map">Map</a><a href="/docs/counters">Autoincrement</a><a href="/docs/transactions">Transactions</a><a href="/docs/catalog">Catalog</a></div>
+<div><h2>SQL and clients</h2><a href="/docs/sql">SQL</a><a href="/docs/odbc">ODBC</a></div>
+<div><h2>Run the server</h2><a href="/docs/configuration">Configuration</a><a href="/docs/security">Security</a><a href="/docs/status">Status</a><a href="/docs/benchmark">Benchmark</a><a href="/docs/backup">Backup and restore</a><a href="/docs/replication">Replica sets</a><a href="/docs/sharding">Sharding</a><a href="/docs/feed">Feed</a></div>
+<div><h2>About</h2><a href="/docs/faq">FAQ</a><a href="/docs/powered-by">Powered by</a></div>
+
+    </nav>
+    <article class="doc">
+      <div class="eyebrow"><span class="slab"></span><span>Docs</span></div>
+      <h1>Operating systems</h1>
+      <p class="lede">Linux, Windows, and Mac ship the same Kova server. The package, the service, the ODBC driver, and one detail of the bundled Iggy binary follow the operating system.</p>
+
+<p>A merge into <code>main</code> publishes four builds. Linux is an x86_64 archive and the container image. Windows is an x64 installer. Mac is an Apple silicon disk image. There is no Intel Mac build, no Windows on ARM, and no Linux on ARM. Documents, port <code>27018</code>, and the MongoDB wire do not change with the machine. Install steps are on <a href="/docs/getting-started">Getting started</a>.</p>
+
+<h2 id="same">What stays the same</h2>
+<p><code>kova</code> and <code>kovadump</code> are the same program. A client uses <code>127.0.0.1</code> and port <code>27018</code> on each system. Kova does not start <code>iggy-server</code>. The setup can install a service that starts it. The bundled binary is Apache Iggy tag <code>server-0.5.0</code>, the server that matches the Iggy client 0.7 inside Kova. It listens on <code>127.0.0.1:8090</code>. The feed record is the same JSON. The feed stays off until <code>[feed]</code> is enabled. The record is on <a href="/docs/feed">Feed</a>.</p>
+
+<h2 id="linux">Linux</h2>
+<p>The archive is <code>kova-x86_64-unknown-linux-gnu.tar.gz</code>. <code>install.sh</code> puts <code>kova</code>, <code>kovadump</code>, and <code>iggy-server</code> on <code>PATH</code>, and <code>libkova.so</code> beside them. That library is the ODBC driver. unixODBC loads it. A service from the setup window is a systemd unit. The container image <code>ghcr.io/mdaparte/kova</code> is this Linux build.</p>
+<p><code>iggy-server</code> on Linux is the tag as Apache publishes it. When it opens a messages file it calls <code>posix_fadvise</code>. That asks the kernel to expect sequential reads. The call does not change the bytes in the file, and it is not part of the protocol.</p>
+
+<h2 id="windows">Windows</h2>
+<p>Run <code>Kova-x64-setup.exe</code>. It is not signed. Windows SmartScreen asks for confirmation. The installer puts <code>kova.exe</code>, <code>kova-setup.exe</code>, <code>kovadump.exe</code>, <code>kova.dll</code>, and <code>iggy-server.exe</code> in <code>C:\Program Files\Kova</code>. <code>kova.dll</code> is the 64-bit ODBC driver named <code>Kova</code>. A 32-bit program does not see it. The setup window can install the Windows services <code>Kova</code> and, when the bundled Iggy is chosen, <code>KovaIggy</code>. Starting <code>KovaIggy</code> needs Python 3.11 or newer on <code>Path</code>, because the helper reads <code>kova.toml</code> with <code>tomllib</code>.</p>
+<div class="note"><p><code>iggy-server.exe</code> is still tag <code>server-0.5.0</code>. That tag refuses to compile on Windows, and its segment readers call two Unix-only functions. The Windows build applies <code>packaging/windows/iggy-server-0.5.0-windows.patch</code> before compiling. The patch removes the line that stops the compile. It reads a segment with <code>seek_read</code> and keeps reading until the buffer is full. On Linux and Mac that fill is <code>read_exact_at</code>. Both calls return the same bytes from the same file offset. The patch does not call <code>posix_fadvise</code>. Mac already skips that call. A feed client that speaks Iggy 0.7 can use the Windows binary, the Mac binary, or the Linux binary.</p></div>
+
+<h2 id="mac">Mac</h2>
+<p><code>Kova-aarch64.dmg</code> is for Apple silicon. Open it and drag Kova to Applications. The disk image is not notarized. The first open is a right-click, then Open. There is no ODBC driver in the Mac build. The setup window can install a login item. <code>iggy-server</code> is inside the app and is the tag as Apache publishes it. The tag already skips <code>posix_fadvise</code> on macOS, which is the same omission the Windows patch makes.</p>
+
+<h2 id="paths">Where the files land</h2>
+<table class="grid">
+  <thead><tr><th></th><th>Linux</th><th>Windows</th><th>Mac</th></tr></thead>
+  <tbody>
+    <tr><td>Package</td><td><code>kova-x86_64-unknown-linux-gnu.tar.gz</code></td><td><code>Kova-x64-setup.exe</code></td><td><code>Kova-aarch64.dmg</code></td></tr>
+    <tr><td>Programs</td><td><code>~/.local/bin</code></td><td><code>C:\Program Files\Kova</code></td><td><code>/Applications/Kova.app</code></td></tr>
+    <tr><td>ODBC</td><td><code>libkova.so</code>, unixODBC</td><td><code>kova.dll</code>, 64-bit only</td><td>none</td></tr>
+    <tr><td>Service</td><td>systemd</td><td><code>Kova</code>, and <code>KovaIggy</code> when chosen</td><td>login item</td></tr>
+    <tr><td>Suggested data</td><td><code>data/</code> in the directory you start from</td><td><code>%LOCALAPPDATA%\Kova</code></td><td><code>~/Library/Application Support/Kova</code></td></tr>
+    <tr><td><code>iggy-server</code></td><td>tag <code>server-0.5.0</code>, with <code>posix_fadvise</code></td><td>the same tag, read with <code>seek_read</code>, no <code>posix_fadvise</code></td><td>the same tag, no <code>posix_fadvise</code></td></tr>
+  </tbody>
+</table>
+<p>The ODBC connection string is the same on Linux and Windows. It is on <a href="/docs/odbc">ODBC</a>.</p>
+
+      <nav class="pager"><a href="/docs/getting-started"><span>Previous</span>Getting started</a><a class="next" href="/docs/concepts"><span>Next</span>How data is stored</a></nav>
+    </article>
+    <nav class="onpage"><h2>On this page</h2><a href="#same">What stays the same</a><a href="#linux">Linux</a><a href="#windows">Windows</a><a href="#mac">Mac</a><a href="#paths">Where the files land</a></nav>
+  </div>
+  <footer>
+    <span>KOVA</span>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/docs/getting-started">Getting started</a>
+      <a href="/license">License</a>
+    </nav>
+  </footer>
+  <script src="/js/code.js"></script>
+  <script src="/js/theme.js"></script>
+</body>
+</html>
