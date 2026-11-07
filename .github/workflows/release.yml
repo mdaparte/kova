@@ -24,8 +24,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install the web view headers
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features window
 
       - name: Build iggy-server
         run: packaging/fetch-iggy-server.sh "$RUNNER_TEMP/iggy-server"
@@ -36,14 +39,14 @@ jobs:
           name=kova-x86_64-unknown-linux-gnu
           stage="$RUNNER_TEMP/$name"
           mkdir -p "$stage" dist
-          cp target/release/kova target/release/kovadump target/release/libkova.so "$stage/"
+          cp target/release/kova target/release/kovadump target/release/kova-shell target/release/kova-client target/release/libkova.so "$stage/"
           cp "$RUNNER_TEMP/iggy-server/iggy-server" "$stage/"
           cp "$RUNNER_TEMP/iggy-server/NOTICE-iggy" "$RUNNER_TEMP/iggy-server/LICENSE-iggy" "$stage/"
           if [ -f "$RUNNER_TEMP/iggy-server/DEPENDENCIES-iggy" ]; then
             cp "$RUNNER_TEMP/iggy-server/DEPENDENCIES-iggy" "$stage/"
           fi
           cp kova.toml scripts/seed-oracle.js packaging/install.sh LICENSE NOTICE "$stage/"
-          chmod 755 "$stage/kova" "$stage/kovadump" "$stage/iggy-server" "$stage/libkova.so" "$stage/install.sh"
+          chmod 755 "$stage/kova" "$stage/kovadump" "$stage/kova-shell" "$stage/kova-client" "$stage/iggy-server" "$stage/libkova.so" "$stage/install.sh"
           tar -C "$RUNNER_TEMP" -czf "dist/$name.tar.gz" "$name"
           sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
           cp packaging/get.sh dist/install.sh
@@ -93,7 +96,8 @@ jobs:
           body: |
             Optimized build of this commit.
 
-            Linux: `install.sh` puts `kova`, `kovadump`, `iggy-server`, and `libkova.so` under `$HOME/.local`.
+            Linux: `install.sh` puts `kova`, `kovadump`, `kova-shell`, `kova-client`, `iggy-server`, and `libkova.so` under `$HOME/.local`.
+            `kova-client` on Linux needs WebKitGTK 4.1. The container image is the server and does not include the shell or the window.
             `iggy-server` is Apache Iggy tag server-0.5.0. Kova does not start it. It listens on 127.0.0.1:8090.
             Windows: run `Kova-x64-setup.exe`. It is not signed.
             Mac: open `Kova-aarch64.dmg` and drag Kova to Applications. The disk image is not notarized.
@@ -114,7 +118,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features window
 
       - name: Build iggy-server
         run: packaging/fetch-iggy-server.sh "$RUNNER_TEMP/iggy-server"
@@ -124,7 +128,7 @@ jobs:
           set -eu
           stage="$RUNNER_TEMP/mac-bins"
           mkdir -p "$stage" dist
-          cp target/release/kova target/release/kova-setup target/release/kovadump "$stage/"
+          cp target/release/kova target/release/kova-setup target/release/kovadump target/release/kova-shell target/release/kova-client "$stage/"
           cp "$RUNNER_TEMP/iggy-server/iggy-server" "$stage/"
           cp "$RUNNER_TEMP/iggy-server/NOTICE-iggy" "$RUNNER_TEMP/iggy-server/LICENSE-iggy" "$stage/"
           if [ -f "$RUNNER_TEMP/iggy-server/DEPENDENCIES-iggy" ]; then
@@ -155,7 +159,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features window
 
       - name: Build iggy-server
         shell: bash
@@ -169,7 +173,7 @@ jobs:
         run: |
           $stage = Join-Path $env:RUNNER_TEMP 'win-bins'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item target\release\kova.exe, target\release\kova-setup.exe, target\release\kovadump.exe, target\release\kova.dll $stage
+          Copy-Item target\release\kova.exe, target\release\kova-setup.exe, target\release\kovadump.exe, target\release\kova-shell.exe, target\release\kova-client.exe, target\release\kova.dll $stage
           Copy-Item "$env:RUNNER_TEMP\iggy-server\iggy-server.exe" $stage
           foreach ($extra in @('LICENSE-iggy', 'NOTICE-iggy', 'DEPENDENCIES-iggy')) {
             $path = Join-Path "$env:RUNNER_TEMP\iggy-server" $extra

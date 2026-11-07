@@ -37,7 +37,7 @@ endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release iggy-server run-iggy setup setup-window test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug seed indexes server-status views security demos dump restore benchmark doc site mac-dmg win-setup clean
+.PHONY: help build release iggy-server run-iggy setup setup-window test test-sql test-one check fmt fmt-check clippy lint run run-release run-debug run-dump run-dump-debug run-shell run-client seed indexes server-status views security demos dump restore benchmark doc site mac-dmg win-setup clean
 
 help:
 	@printf '%s\n' \
@@ -61,6 +61,8 @@ help:
 		'  run-debug    database engine with KOVA_LOG_LEVEL=debug' \
 		'  run-dump     kovadump; ARGS="backup --db db db.kdmp"' \
 		'  run-dump-debug  kovadump with KOVA_LOG_LEVEL=debug' \
+		'  run-shell    kova-shell, the terminal client' \
+		'  run-client   open the kova-client window' \
 		'  seed         Oracle sample, emp indexes, and views into database db' \
 		'  indexes      index tour over the seeded emp collection' \
 		'  server-status  serverStatus counters' \
@@ -72,7 +74,7 @@ help:
 		'  restore      restore DUMP into database db (default db.kdmp)' \
 		'  doc          cargo doc --no-deps --open' \
 		'  site         static site at http://127.0.0.1:4173' \
-		'  mac-dmg      Mac disk image. BINS=dir with kova, kova-setup, kovadump, iggy-server' \
+		'  mac-dmg      Mac disk image. BINS=dir with kova, kova-setup, kovadump, kova-shell, kova-client, iggy-server' \
 		'  win-setup    Windows installer. Run on Windows, with Inno Setup 6' \
 		'  clean        cargo clean' \
 		'' \
@@ -144,6 +146,18 @@ run-dump:
 run-dump-debug:
 	KOVA_LOG_LEVEL=debug $(CARGO) run --bin kovadump -- $(if $(ARGS),$(ARGS),--help)
 
+run-shell:
+	$(CARGO) run --bin kova-shell -- $(ARGS)
+
+run-client:
+	@set -eu; \
+	export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1; \
+	if [ "$$(uname)" = Linux ] && ! pkg-config --exists webkit2gtk-4.1 gtk+-3.0; then \
+		test -x target/debug/kova-client; \
+		exec ./target/debug/kova-client $(ARGS); \
+	fi; \
+	exec $(CARGO) run --features window --bin kova-client -- $(ARGS)
+
 # Reloads the Oracle Scott sample into database `db`, then creates the
 # five emp indexes and the well_paid / emp_search views. Drops that
 # database first. The server must already be listening.
@@ -212,8 +226,9 @@ SITE_PORT ?= 4173
 site:
 	python3 scripts/serve-site.py $(SITE_PORT)
 
-# Apple silicon disk image. BINS is the directory that holds the four
-# Mach-O files. Without it the image still has the icon and the launcher.
+# Apple silicon disk image. BINS holds kova, kova-setup, kovadump,
+# kova-shell, kova-client, and iggy-server. Without it the image still
+# has the icon and the launcher.
 #   make mac-dmg BINS=target/release
 BINS ?=
 OUT ?= dist/Kova.dmg
@@ -221,7 +236,9 @@ OUT ?= dist/Kova.dmg
 mac-dmg:
 	BINS="$(BINS)" OUT="$(OUT)" packaging/macos/build-dmg.sh
 
-# Windows installer. Inno Setup 6 compiles it. BINS holds the four .exe files.
+# Windows installer. Inno Setup 6 compiles it. BINS holds kova.exe,
+# kova-setup.exe, kovadump.exe, kova-shell.exe, kova-client.exe, kova.dll,
+# and iggy-server.exe.
 #   make win-setup BINS=target/release
 win-setup:
 	BINS="$(BINS)" powershell.exe -NoProfile -ExecutionPolicy Bypass -File packaging/windows/build-setup.ps1

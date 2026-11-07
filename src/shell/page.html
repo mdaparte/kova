@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KOVA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --k-granito: #17191c;
+    --k-basalto: #2b2f33;
+    --k-ardosia: #5b636b;
+    --k-xisto: #9aa1a6;
+    --k-calcario: #d3d7d6;
+    --k-feldspato: #eceeeb;
+    --k-oxido: #c2461b;
+    --k-oxido-prof: #a33a14;
+    --k-oxido-claro: #e8703f;
+    --bg: var(--k-feldspato);
+    --surface: #f6f7f5;
+    --fg: var(--k-granito);
+    --muted: var(--k-ardosia);
+    --line: var(--k-calcario);
+    --accent: var(--k-oxido-prof);
+    --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --f-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+    --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: var(--k-granito);
+      --surface: #1f2225;
+      --fg: var(--k-feldspato);
+      --muted: var(--k-xisto);
+      --line: var(--k-basalto);
+      --accent: var(--k-oxido-claro);
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--f-body);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+  }
+  .wordmark {
+    font-family: var(--f-display);
+    font-weight: 800;
+    font-stretch: 125%;
+    letter-spacing: 0.08em;
+    font-size: 15px;
+  }
+  button, input, textarea {
+    font: inherit;
+    color: inherit;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 2px;
+  }
+  button {
+    padding: 6px 12px;
+    cursor: pointer;
+    font-family: var(--f-mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  input, textarea { padding: 8px 10px; }
+  textarea { width: 100%; min-height: 160px; font-family: var(--f-mono); font-size: 13px; }
+  .connect {
+    max-width: 420px;
+    margin: 48px auto;
+    display: grid;
+    gap: 10px;
+    padding: 0 18px;
+  }
+  .connect label { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
+  .error { color: var(--k-oxido); min-height: 1.4em; font-family: var(--f-mono); font-size: 12px; }
+  .work { display: grid; grid-template-columns: 240px 1fr; height: calc(100% - 49px); }
+  .tree {
+    border-right: 1px solid var(--line);
+    overflow: auto;
+    padding: 8px 0;
+  }
+  .db, .coll {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    padding: 6px 16px;
+    letter-spacing: 0;
+    text-transform: none;
+    font-family: var(--f-body);
+    font-size: 14px;
+  }
+  .coll { padding-left: 28px; color: var(--muted); font-family: var(--f-mono); font-size: 13px; }
+  .db.here, .coll.here { color: var(--accent); }
+  .main { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; }
+  .bars { display: grid; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; font-family: var(--f-mono); font-size: 13px; }
+  .docs { overflow: auto; padding: 12px; }
+  pre {
+    margin: 0 0 10px;
+    padding: 10px 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    font-family: var(--f-mono);
+    font-size: 13px;
+    white-space: pre-wrap;
+    cursor: pointer;
+  }
+  pre.here { border-color: var(--accent); }
+  .edit { padding: 12px; border-top: 1px solid var(--line); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <svg class="mark" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+    <rect x="0" y="0" width="4" height="16" fill="currentColor"/>
+    <rect x="9" y="0" width="7" height="4" fill="currentColor"/>
+    <rect x="5" y="6" width="7" height="4" fill="#c2461b"/>
+    <rect x="9" y="12" width="7" height="4" fill="currentColor"/>
+  </svg>
+  <span class="wordmark">KOVA</span>
+</header>
+<form class="connect" id="connect">
+  <label>Host<input id="host" value="127.0.0.1" autocomplete="off"></label>
+  <label>Port<input id="port" value="27018" inputmode="numeric" autocomplete="off"></label>
+  <label>User<input id="user" autocomplete="off"></label>
+  <label>Password<input id="password" type="password" autocomplete="off"></label>
+  <button type="submit">Connect</button>
+  <div class="error" id="connect-error"></div>
+</form>
+<div class="work hidden" id="work">
+  <nav class="tree" id="tree" aria-label="Databases"></nav>
+  <div class="main">
+    <div class="bars">
+      <div class="row">
+        <input id="filter" value="{}" spellcheck="false" aria-label="Find filter">
+        <button type="button" id="find">Find</button>
+      </div>
+      <div class="row">
+        <input id="sql" placeholder="select sku from orders" spellcheck="false" aria-label="SQL">
+        <button type="button" id="run-sql">SQL</button>
+      </div>
+    </div>
+    <div class="docs" id="docs"></div>
+    <div class="edit">
+      <textarea id="editor" spellcheck="false" aria-label="Document"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button type="button" id="save">Save</button>
+        <div class="error" id="edit-error"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+let seq = 0;
+const pending = new Map();
+let database = "";
+let collection = "";
+let selectedId = "";
+
+function post(body) {
+  return new Promise((resolve) => {
+    const id = ++seq;
+    body.id = id;
+    pending.set(id, resolve);
+    window.ipc.postMessage(JSON.stringify(body));
+  });
+}
+window.kovaAnswer = function (message) {
+  const resolve = pending.get(message.id);
+  if (resolve) {
+    pending.delete(message.id);
+    resolve(message);
+  }
+};
+
+function showError(node, message) {
+  node.textContent = message || "";
+}
+
+document.getElementById("connect").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const answer = await post({
+    op: "connect",
+    host: document.getElementById("host").value,
+    port: document.getElementById("port").value,
+    user: document.getElementById("user").value,
+    password: document.getElementById("password").value
+  });
+  if (!answer.ok) {
+    showError(document.getElementById("connect-error"), answer.error);
+    return;
+  }
+  document.getElementById("connect").classList.add("hidden");
+  document.getElementById("work").classList.remove("hidden");
+  await loadDatabases();
+});
+
+async function loadDatabases() {
+  const answer = await post({ op: "databases" });
+  const tree = document.getElementById("tree");
+  tree.replaceChildren();
+  if (!answer.ok) {
+    tree.textContent = answer.error;
+    return;
+  }
+  for (const name of answer.names) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "db";
+    button.textContent = name;
+    button.addEventListener("click", () => openDatabase(name, button));
+    tree.appendChild(button);
+    const list = document.createElement("div");
+    list.dataset.db = name;
+    tree.appendChild(list);
+  }
+}
+
+async function openDatabase(name, button) {
+  database = name;
+  collection = "";
+  for (const node of document.querySelectorAll(".db, .coll")) node.classList.remove("here");
+  button.classList.add("here");
+  const answer = await post({ op: "collections", db: name });
+  const list = document.querySelector(`[data-db="${CSS.escape(name)}"]`);
+  list.replaceChildren();
+  if (!answer.ok) {
+    list.textContent = answer.error;
+    return;
+  }
+  for (const coll of answer.names) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "coll";
+    item.textContent = coll;
+    item.addEventListener("click", () => openCollection(coll, item));
+    list.appendChild(item);
+  }
+}
+
+async function openCollection(name, button) {
+  collection = name;
+  for (const node of document.querySelectorAll(".coll")) node.classList.remove("here");
+  button.classList.add("here");
+  document.getElementById("filter").value = "{}";
+  await runFind();
+}
+
+function paint(rows) {
+  const docs = document.getElementById("docs");
+  docs.replaceChildren();
+  selectedId = "";
+  document.getElementById("editor").value = "";
+  for (const row of rows) {
+    const block = document.createElement("pre");
+    block.textContent = row.text;
+    block.addEventListener("click", () => {
+      for (const node of docs.querySelectorAll("pre")) node.classList.remove("here");
+      block.classList.add("here");
+      selectedId = row.id;
+      document.getElementById("editor").value = row.text;
+      showError(document.getElementById("edit-error"), "");
+    });
+    docs.appendChild(block);
+  }
+}
+
+async function runFind() {
+  const answer = await post({
+    op: "find",
+    db: database,
+    collection: collection,
+    filter: document.getElementById("filter").value
+  });
+  if (!answer.ok) {
+    showError(document.getElementById("edit-error"), answer.error);
+    return;
+  }
+  showError(document.getElementById("edit-error"), "");
+  paint(answer.rows);
+}
+
+document.getElementById("find").addEventListener("click", runFind);
+document.getElementById("run-sql").addEventListener("click", async () => {
+  const answer = await post({
+    op: "sql",
+    db: database,
+    sql: document.getElementById("sql").value
+  });
+  if (!answer.ok) {
+    showError(document.getElementById("edit-error"), answer.error);
+    return;
+  }
+  showError(document.getElementById("edit-error"), "");
+  paint(answer.rows);
+});
+
+document.getElementById("save").addEventListener("click", async () => {
+  const editor = document.getElementById("editor");
+  const answer = await post({
+    op: "save",
+    db: database,
+    collection: collection,
+    id: selectedId,
+    document: editor.value
+  });
+  if (!answer.ok) {
+    showError(document.getElementById("edit-error"), answer.error);
+    return;
+  }
+  showError(document.getElementById("edit-error"), "");
+  await runFind();
+});
+</script>
+</body>
+</html>

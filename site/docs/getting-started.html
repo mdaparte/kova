@@ -62,6 +62,8 @@ sh install.sh</code></pre>
 <pre><code class="lang-out">Installed into /home/ada/.local
   /home/ada/.local/bin/kova
   /home/ada/.local/bin/kovadump
+  /home/ada/.local/bin/kova-shell
+  /home/ada/.local/bin/kova-client
   /home/ada/.local/bin/iggy-server
   /home/ada/.local/lib/libkova.so
   /home/ada/.local/share/kova/kova.toml
@@ -70,7 +72,7 @@ Start from a directory you want to keep. Pages and the log go to data/ there:
   KOVA_CONFIG=/home/ada/.local/share/kova/kova.toml kova
 iggy-server is Apache Iggy. It listens on 127.0.0.1:8090. Kova does not start it.</code></pre>
 </div>
-<p><code>kova</code>, <code>kovadump</code>, and <code>iggy-server</code> land in <code>~/.local/bin</code>. <code>libkova.so</code> lands in <code>~/.local/lib</code>. The config and the sample script land in <code>~/.local/share/kova</code>. If <code>~/.local/bin</code> is not on <code>PATH</code>, the script prints the line to add. <code>iggy-server</code> is Apache Iggy. It listens on <code>127.0.0.1:8090</code>. Kova does not start it. From a checkout, <code>make iggy-server</code> builds that binary and <code>make run-iggy</code> starts it from <code>[feed.server]</code> in <code>kova.toml</code>.</p>
+<p><code>kova</code>, <code>kovadump</code>, <code>kova-shell</code>, <code>kova-client</code>, and <code>iggy-server</code> land in <code>~/.local/bin</code>. <code>libkova.so</code> lands in <code>~/.local/lib</code>. The config and the sample script land in <code>~/.local/share/kova</code>. If <code>~/.local/bin</code> is not on <code>PATH</code>, the script prints the line to add. <code>kova-shell</code> is the terminal client. <code>kova-client</code> is the window. Both talk to a server that is already running. A machine without a display uses <code>kova-shell</code>. On Linux the window needs WebKitGTK 4.1. <code>iggy-server</code> is Apache Iggy. It listens on <code>127.0.0.1:8090</code>. Kova does not start it. From a checkout, <code>make iggy-server</code> builds that binary and <code>make run-iggy</code> starts it from <code>[feed.server]</code> in <code>kova.toml</code>.</p>
 <p>To put the files somewhere else, download the archive and run its installer with <code>PREFIX</code> set:</p>
 <div class="ex">
 <div class="ex-label">Shell</div>
@@ -81,6 +83,8 @@ PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</code></pre>
 <pre><code class="lang-out">Installed into /opt/kova
   /opt/kova/bin/kova
   /opt/kova/bin/kovadump
+  /opt/kova/bin/kova-shell
+  /opt/kova/bin/kova-client
   /opt/kova/bin/iggy-server
   /opt/kova/lib/libkova.so
   /opt/kova/share/kova/kova.toml</code></pre>
@@ -92,12 +96,12 @@ PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</code></pre>
 <p>A Linux runner builds the optimized binaries, packs <code>kova-x86_64-unknown-linux-gnu.tar.gz</code>, pushes the container image, and opens the GitHub release for that commit. The tag is <code>v0.1.0-</code> plus the commit id. A Windows runner and a Mac runner then build their own binaries and attach them to that same release. Windows attaches <code>Kova-x64-setup.exe</code>. Mac attaches <code>Kova-aarch64.dmg</code>. Those two files show up after the Linux archive, once their runners finish. Each download has a <code>.sha256</code> file next to it.</p>
 
 <h2 id="windows">Windows</h2>
-<p>Run <code>Kova-x64-setup.exe</code>. It installs <code>kova.exe</code>, <code>kova-setup.exe</code>, <code>kovadump.exe</code>, <code>kova.dll</code>, and <code>iggy-server.exe</code> under <code>C:\Program Files\Kova</code> and adds that folder to the system Path. It registers <code>kova.dll</code> as the 64-bit ODBC driver <code>Kova</code> and a system data source of the same name. The last page of the installer runs <code>kova-setup --window</code>. That window writes <code>kova.toml</code> and can install a service that starts with Windows. The suggested data directory is <code>%LOCALAPPDATA%\Kova</code>. The service scripts go to <code>%ProgramData%\Kova</code>. The service name is <code>Kova</code>. When the window is told to run the bundled Iggy server, it also installs a service named <code>KovaIggy</code>. Kova does not start that server itself. <code>iggy-server</code> listens on <code>127.0.0.1:8090</code>.</p>
+<p>Run <code>Kova-x64-setup.exe</code>. It installs <code>kova.exe</code>, <code>kova-setup.exe</code>, <code>kovadump.exe</code>, <code>kova-shell.exe</code>, <code>kova-client.exe</code>, <code>kova.dll</code>, and <code>iggy-server.exe</code> under <code>C:\Program Files\Kova</code> and adds that folder to the system Path. It registers <code>kova.dll</code> as the 64-bit ODBC driver <code>Kova</code> and a system data source of the same name. The last page of the installer runs <code>kova-setup --window</code>. The Start menu shortcut Kova Client opens <code>kova-client.exe</code>. That setup window writes <code>kova.toml</code> and can install a service that starts with Windows. The suggested data directory is <code>%LOCALAPPDATA%\Kova</code>. The service scripts go to <code>%ProgramData%\Kova</code>. The service name is <code>Kova</code>. When the window is told to run the bundled Iggy server, it also installs a service named <code>KovaIggy</code>. Kova does not start that server itself. <code>iggy-server</code> listens on <code>127.0.0.1:8090</code>.</p>
 <p>The setup window needs Python 3 on Path, as <code>python3</code> or <code>python</code>, with Tk. Starting the bundled Iggy server from the service needs Python 3.11 or newer, because the helper reads <code>kova.toml</code> with <code>tomllib</code>. Uninstalling Kova stops those services and removes the program files. It leaves the data directory in place.</p>
 <p>The installer is not signed. Windows SmartScreen asks for confirmation. Choose More info, then Run anyway. Open a new terminal before typing <code>kova</code>. The Path change is picked up by programs started after the installer exits. <code>iggy-server.exe</code> is Apache Iggy tag <code>server-0.5.0</code>, the same tag Linux and Mac ship. The Windows build of that tag is on <a href="/docs/platforms#windows">Operating systems</a>.</p>
 
 <h2 id="mac">Mac</h2>
-<p>The same release has <code>Kova-aarch64.dmg</code> for Apple silicon. Open the disk image and drag Kova onto Applications. Opening Kova runs the setup window. That window can install a login item that starts the server. The suggested data directory is <code>~/Library/Application Support/Kova</code>. <code>iggy-server</code> is inside the app. Kova does not start it. The setup window starts it when that option is on.</p>
+<p>The same release has <code>Kova-aarch64.dmg</code> for Apple silicon. Open the disk image and drag Kova onto Applications. Opening Kova runs the setup window. That window can install a login item that starts the server. The suggested data directory is <code>~/Library/Application Support/Kova</code>. <code>kova-shell</code>, <code>kova-client</code>, and <code>iggy-server</code> are inside the app. Kova does not start <code>iggy-server</code>. The setup window starts it when that option is on.</p>
 <p>The disk image is not notarized. The first open asks you to right-click Kova and choose Open.</p>
 
 <h2 id="docker">Docker</h2>
@@ -109,7 +113,7 @@ PREFIX=/opt/kova ./kova-x86_64-unknown-linux-gnu/install.sh</code></pre>
 <pre><code class="lang-out">[Kova] 2026-10-27 08:50:01.000 INFO - Kova engine starting (port 27018, log level info, data_dir data, wal_fsync=true, warn_on_non_mongo_queries=true)
 [Kova] 2026-10-27 08:50:01.012 INFO - Network server started on port 27018 (max_connections 128, idle_ms 0)</code></pre>
 </div>
-<p>The listener inside the container is on port 27018, published on the same port of the machine. <code>-e KOVA_PORT=27019</code> changes the port inside the container. Publish that port with <code>-p 27019:27019</code>. The rest of this page talks to <code>127.0.0.1:27018</code> either way.</p>
+<p>The image is the server. It does not include <code>kova-shell</code> or <code>kova-client</code>. The listener inside the container is on port 27018, published on the same port of the machine. <code>-e KOVA_PORT=27019</code> changes the port inside the container. Publish that port with <code>-p 27019:27019</code>. The rest of this page talks to <code>127.0.0.1:27018</code> either way.</p>
 <p>The image also has <code>iggy-server</code>. The default command stays <code>kova</code>. To run the feed server, publish port 8090 and tell Iggy to listen on every interface inside the container:</p>
 <div class="ex">
 <div class="ex-label">Shell</div>
@@ -234,7 +238,7 @@ FORD    ANALYST   3000</code></pre>
 <p><code>well_paid</code> is the employees with <code>sal</code> above 2000. <code>emp_search</code> is every employee, with a text index on disk. Both are covered on the <a href="/docs/views">Views</a> and <a href="/docs/search">Text search</a> pages.</p>
 
 <h2 id="crate">Rust crate</h2>
-<p>The crates.io package name is <code>kovadb</code>. The library name stays <code>kova</code>. After version 0.1.0 is published, <code>cargo install kovadb</code> installs the <code>kova</code> and <code>kovadump</code> binaries. A program that embeds the server depends on the package and calls <code>kova::serve()</code>.</p>
+<p>The crates.io package name is <code>kovadb</code>. The library name stays <code>kova</code>. After version 0.1.0 is published, <code>cargo install kovadb</code> installs <code>kova</code>, <code>kovadump</code>, <code>kova-setup</code>, and <code>kova-shell</code>. <code>cargo install kovadb --features window</code> also installs <code>kova-client</code>. On Linux that feature needs the WebKitGTK 4.1 and GTK 3 development packages. A program that embeds the server depends on the package and calls <code>kova::serve()</code>.</p>
 <p>That version is published from GitHub Actions when a merge into <code>main</code> changes the crate sources. It is not on crates.io yet.</p>
 <div class="ex">
 <div class="ex-label">Config</div>
@@ -246,7 +250,9 @@ FORD    ANALYST   3000</code></pre>
 <div class="ex-label">Output</div>
 <pre><code class="lang-out">Installed package `kovadb v0.1.0`
 binary: kova
-binary: kovadump</code></pre>
+binary: kovadump
+binary: kova-setup
+binary: kova-shell</code></pre>
 </div>
 <div class="ex">
 <div class="ex-label">Rust</div>
@@ -256,6 +262,22 @@ async fn main() {
 }</code></pre>
 </div>
 <p>The dependency uses the package name <code>kovadb</code>. The code uses the library name <code>kova</code>. <code>serve</code> is the same process the <code>kova</code> binary starts.</p>
+
+<h2 id="shell">Shell and window</h2>
+<p><code>kova-shell</code> sends commands to a server that is already running. A line is not JavaScript. <code>mongosh</code> still works against the same port.</p>
+<div class="ex">
+<div class="ex-label">Shell</div>
+<pre><code class="lang-sh">kova-shell --host 127.0.0.1 --port 27018</code></pre>
+<div class="ex-label">Session</div>
+<pre><code class="lang-out">KOVA
+&gt; use shop
+shop&gt; show collections
+orders
+shop&gt; db.orders.find({ sku: "kettle" })
+shop&gt; db.runCommand({ sql: "select sku from orders" })</code></pre>
+</div>
+<p><code>--host</code> defaults to <code>127.0.0.1</code> and <code>--port</code> to <code>27018</code>. <code>--user</code> and <code>--password</code> are both set, or both omitted. A wrong password is refused with <code>authentication failed</code>. The up arrow recalls a line. Tab completes a collection name after <code>use</code>.</p>
+<p><code>kova-client</code> is the same conversation in a window. The left side lists databases and collections. One box runs a find filter. Another runs SQL. Saving a document replaces that <code>_id</code>. A refused edit keeps the text and shows the error. On Linux the window needs WebKitGTK 4.1. A machine without a display is told to use <code>kova-shell</code>. Opening the Mac app still runs the setup window. The two programs are inside <code>Kova.app/Contents/MacOS</code>.</p>
 
 <h2 id="next">What to open next</h2>
 <div class="cards">
@@ -267,7 +289,7 @@ async fn main() {
 
       <nav class="pager"><a href="/docs"><span>Previous</span>Welcome</a><a class="next" href="/docs/platforms"><span>Next</span>Operating systems</a></nav>
     </article>
-    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#release">What a merge publishes</a><a href="#windows">Windows</a><a href="#mac">Mac</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#crate">Rust crate</a><a href="#next">What to open next</a></nav>
+    <nav class="onpage"><h2>On this page</h2><a href="#install">Install</a><a href="#release">What a merge publishes</a><a href="#windows">Windows</a><a href="#mac">Mac</a><a href="#docker">Docker</a><a href="#start">Start the server</a><a href="#first-document">Write the first document</a><a href="#restart">Stop, start, read again</a><a href="#sample">Load the sample</a><a href="#crate">Rust crate</a><a href="#shell">Shell and window</a><a href="#next">What to open next</a></nav>
   </div>
   <footer>
     <span>KOVA</span>

@@ -3,7 +3,7 @@
 ; The image is not signed.
 
 #ifndef BinDir
-  #error Pass /DBinDir= with kova.exe, kova-setup.exe, kovadump.exe, kova.dll, and iggy-server.exe
+  #error Pass /DBinDir= with kova.exe, kova-setup.exe, kovadump.exe, kova-shell.exe, kova-client.exe, kova.dll, and iggy-server.exe
 #endif
 
 #define AppVersion "0.1.1"
@@ -39,6 +39,8 @@ Name: desktopicon; Description: "Add a desktop shortcut"; GroupDescription: "Sho
 Source: "{#BinDir}\kova.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\kova-setup.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\kovadump.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\kova-shell.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\kova-client.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\kova.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\iggy-server.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\LICENSE-iggy"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
@@ -65,6 +67,7 @@ Root: HKLM; Subkey: "SOFTWARE\ODBC\ODBC.INI\Kova"; ValueType: string; ValueName:
 
 [Icons]
 Name: "{autoprograms}\Kova"; Filename: "{app}\kova-setup.exe"; Parameters: "--window"; IconFilename: "{app}\kova.ico"
+Name: "{autoprograms}\Kova Client"; Filename: "{app}\kova-client.exe"; IconFilename: "{app}\kova.ico"
 Name: "{autodesktop}\Kova"; Filename: "{app}\kova-setup.exe"; Parameters: "--window"; IconFilename: "{app}\kova.ico"; Tasks: desktopicon
 
 [Run]

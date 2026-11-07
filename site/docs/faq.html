@@ -62,7 +62,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
 <p>Security is off in the default <code>kova.toml</code>. Any client that can reach the port can read and write. Turn on <code>[security]</code> when you want a user and a password. Both must be sent. One of them alone is refused. See <a href="/docs/security">Security</a>.</p>
 
 <h3 id="crate">How do I use the crates.io crate?</h3>
-<p>The package name is <code>kovadb</code>. The library name is <code>kova</code>. After 0.1.0 is published, <code>cargo install kovadb</code> installs the binaries <code>kova</code> and <code>kovadump</code>. A program that embeds the server depends on the package and calls the library:</p>
+<p>The package name is <code>kovadb</code>. The library name is <code>kova</code>. After 0.1.0 is published, <code>cargo install kovadb</code> installs <code>kova</code>, <code>kovadump</code>, <code>kova-setup</code>, and <code>kova-shell</code>. <code>cargo install kovadb --features window</code> also installs <code>kova-client</code>. On Linux that feature needs the WebKitGTK 4.1 and GTK 3 development packages. A program that embeds the server depends on the package and calls the library:</p>
 <div class="ex">
 <div class="ex-label">Config</div>
 <pre><code class="lang-cfg">kovadb = "0.1"</code></pre>

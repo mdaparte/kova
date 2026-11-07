@@ -1,5 +1,5 @@
-# Runtime image. The build context is the staged release directory:
-# kova, kovadump, iggy-server, libkova.so, kova.toml, seed-oracle.js, LICENSE, NOTICE.
+# Runtime image. The build context is the staged release directory.
+# This image copies the server. kova-shell and kova-client stay in the archive.
 FROM debian:bookworm-slim
 
 RUN useradd --system --uid 10001 --home-dir /var/lib/kova --create-home kova

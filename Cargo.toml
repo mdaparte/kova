@@ -26,6 +26,18 @@ path = "src/bin/kovadump.rs"
 name = "kova-setup"
 path = "src/bin/kova-setup.rs"
 
+[[bin]]
+name = "kova-shell"
+path = "src/bin/kova-shell.rs"
+
+[[bin]]
+name = "kova-client"
+path = "src/bin/kova-client.rs"
+required-features = ["window"]
+
+[features]
+window = ["dep:tao", "dep:wry"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
@@ -46,6 +58,9 @@ aes-gcm = "0.10"
 iggy = "0.7"
 getrandom = "0.2"
 toml_edit = "0.22"
+crossterm = "0.28"
+tao = { version = "0.34", optional = true }
+wry = { version = "0.53", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

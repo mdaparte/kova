@@ -74,6 +74,7 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <tr><td>Commit several writes together</td><td><code>beginTransaction</code>. <a href="/docs/transactions">Transactions</a>.</td></tr>
     <tr><td>Require a user and a password</td><td><code>[security]</code>. <a href="/docs/security">Security</a>.</td></tr>
     <tr><td>Copy the database to a file</td><td><code>kovadump</code>. <a href="/docs/backup">Backup and restore</a>.</td></tr>
+    <tr><td>List databases and edit a document from the terminal or a window</td><td><code>kova-shell</code> and <code>kova-client</code>. Both talk to a server that is already running. <a href="/docs/getting-started#shell">Getting started</a>.</td></tr>
     <tr><td>Open the data from a SQL client</td><td>The ODBC driver. <a href="/docs/odbc">ODBC</a>.</td></tr>
     <tr><td>Keep a copy if a machine dies</td><td>A replica set. <a href="/docs/replication">Replica sets</a>.</td></tr>
     <tr><td>Split one collection across machines</td><td>Shards and a router. <a href="/docs/sharding">Sharding</a>.</td></tr>
@@ -97,9 +98,11 @@ try{var t=localStorage.getItem("kova-theme");if(t!=="light"&&t!=="dark")t=matchM
     <tr><td><code>data/</code></td><td>Pages, the write-ahead log, and replica logs for this process.</td></tr>
     <tr><td><code>~/.local/bin/kova</code></td><td>The server, after the install.</td></tr>
     <tr><td><code>~/.local/bin/kovadump</code></td><td>Backup and restore. It talks to a server that is already running.</td></tr>
+    <tr><td><code>~/.local/bin/kova-shell</code></td><td>The terminal client. A line is a command, not JavaScript.</td></tr>
+    <tr><td><code>~/.local/bin/kova-client</code></td><td>The window. Without a display, use <code>kova-shell</code>.</td></tr>
     <tr><td><code>~/.local/bin/iggy-server</code></td><td>Apache Iggy, for the feed. It listens on <code>127.0.0.1:8090</code>. Kova does not start it.</td></tr>
     <tr><td><code>~/.local/lib/libkova.so</code></td><td>The ODBC driver on Linux.</td></tr>
-    <tr><td><code>kovadb</code> on crates.io</td><td>The package. The library name is <code>kova</code>. <code>cargo install kovadb</code> installs <code>kova</code> and <code>kovadump</code> after 0.1.0 is published. It is not on crates.io yet. <a href="/docs/getting-started#crate">The dependency line</a>.</td></tr>
+    <tr><td><code>kovadb</code> on crates.io</td><td>The package. The library name is <code>kova</code>. <code>cargo install kovadb</code> installs <code>kova</code>, <code>kovadump</code>, <code>kova-setup</code>, and <code>kova-shell</code> after 0.1.0 is published. <code>--features window</code> also installs <code>kova-client</code>. It is not on crates.io yet. <a href="/docs/getting-started#crate">The dependency line</a>.</td></tr>
   </tbody>
 </table>
 <p>Those paths are the Linux install. Windows and Mac put the same programs in different places, and the Windows <code>iggy-server</code> is the same Apache tag with the read path on <a href="/docs/platforms">Operating systems</a>.</p>

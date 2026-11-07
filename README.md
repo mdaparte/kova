@@ -30,9 +30,11 @@ The end-user guide is the static site in [`site/`](site/index.html). Start at [G
 
 `kovadump backup --db db db.kdmp` writes a backup of a running server. `kovadump restore --db db db.kdmp` reads it back.
 
+`kova-shell` is the terminal client. `kova-client` is the window. Both talk to a Kova that is already running, on `127.0.0.1` and port `27018` unless you say otherwise. A machine without a display uses `kova-shell`. The container image is the server. It does not include those two programs.
+
 People changing Kova build from this repository with the Makefile (`make release`, `make test`). `make doc` builds the API reference.
 
-The crates.io package name is `kovadb`. The library name stays `kova`. After 0.1.0 is published, `cargo install kovadb` installs the `kova` and `kovadump` binaries. A Rust project depends on the package and calls the library:
+The crates.io package name is `kovadb`. The library name stays `kova`. After 0.1.0 is published, `cargo install kovadb` installs `kova`, `kovadump`, `kova-setup`, and `kova-shell`. `cargo install kovadb --features window` also installs `kova-client`. On Linux that feature needs the WebKitGTK 4.1 and GTK 3 development packages. A Rust project depends on the package and calls the library:
 
 ```toml
 kovadb = "0.1"

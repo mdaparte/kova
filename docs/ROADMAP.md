@@ -42,8 +42,8 @@ replication, and multi-model indexing.
 | 26 | Feed (Apache Iggy) | ✅ Complete |
 | 27 | User guide | ✅ Complete |
 | 28 | Read path and scale | ✅ Complete |
-| 29 | Kova shell (`kova-shell`) | ⚪ Planned |
-| 30 | Graphical client (`kova-client`) | ⚪ Planned |
+| 29 | Kova shell (`kova-shell`) | ✅ Complete |
+| 30 | Graphical client (`kova-client`) | ✅ Complete |
 | 31 | Steps behind MongoDB | ⚪ Planned |
 | 32 | Configuration (walkthrough, window, service, logs) | ✅ Complete |
 
@@ -967,7 +967,7 @@ A transaction can write every collection that hashes to the partition that opene
 - [x] One transaction can write every collection on the partition that opened it, as one log record. A transaction across partitions, shards, or replica-set members is refused.
 - [x] Test: a selective `IXSCAN` on a collection larger than the buffer pool does not read every page. After a restart, the index pages are opened and documents are not scanned to rebuild them. A `$group` through the router matches a `$group` on one process that holds the whole collection. Adding a shard moves a document whose `_id` changed arc, and a find returns it once.
 
-## Phase 29 - Kova shell ⚪ Planned
+## Phase 29 - Kova shell ✅ Complete
 
 `kova-shell` is a terminal program shipped next to `kova` and `kovadump`. It talks to a running Kova over the MongoDB port. It does not change the server. `mongosh` stays a valid client. This program is the same conversation with the Kova mark on it.
 
@@ -1003,14 +1003,14 @@ The connection code this phase adds is the one Phase 30 calls. The window does n
 
 ### Phase 29 - Sub-tasks
 
-- [ ] `kova-shell` speaks `OP_MSG` to `--host` and `--port`, defaulting to `127.0.0.1` and `27018`. `--user` and `--password` are both sent, or neither is. A wrong password is refused with `authentication failed`.
-- [ ] `show dbs`, `use`, `show collections`, `find`, `insertOne`, `updateOne`, `deleteOne`, and `sql` are commands sent as the wire commands the server already answers. A line is not JavaScript. An unknown line names itself in the error.
-- [ ] Results print as indented documents. The up arrow recalls a line. Tab completes a collection name.
-- [ ] The banner reads `KOVA`. A color terminal uses oxide `#c2461b` on granite `#17191c`. A terminal without color prints the same text.
-- [ ] `kova-shell` ships in the Linux archive, the Windows installer, and the Mac disk image, next to `kova` and `kovadump`.
-- [ ] Test: against a running server, `show dbs` lists a database, `use` and `show collections` list a collection, `find` prints a document, `updateOne` changes it, and `sql` prints a row. A wrong password is refused. The session runs in a terminal, with no window.
+- [x] `kova-shell` speaks `OP_MSG` to `--host` and `--port`, defaulting to `127.0.0.1` and `27018`. `--user` and `--password` are both sent, or neither is. A wrong password is refused with `authentication failed`.
+- [x] `show dbs`, `use`, `show collections`, `find`, `insertOne`, `updateOne`, `deleteOne`, and `sql` are commands sent as the wire commands the server already answers. A line is not JavaScript. An unknown line names itself in the error.
+- [x] Results print as indented documents. The up arrow recalls a line. Tab completes a collection name.
+- [x] The banner reads `KOVA`. A color terminal uses oxide `#c2461b` on granite `#17191c`. A terminal without color prints the same text.
+- [x] `kova-shell` ships in the Linux archive, the Windows installer, and the Mac disk image, next to `kova` and `kovadump`.
+- [x] Test: against a running server, `show dbs` lists a database, `use` and `show collections` list a collection, `find` prints a document, `updateOne` changes it, and `sql` prints a row. A wrong password is refused. The session runs in a terminal, with no window.
 
-## Phase 30 - Graphical client ⚪ Planned
+## Phase 30 - Graphical client ✅ Complete
 
 `kova-client` is the window. It lists databases and collections, shows documents, runs a find and a SQL statement, and saves an edit of one document. It calls the Phase 29 connection. It does not speak `OP_MSG` on its own, and it does not add a server command.
 
@@ -1030,13 +1030,13 @@ The binary ships in the same three packages as `kova-shell`. Intel Mac, Windows 
 
 ### Phase 30 - Sub-tasks
 
-- [ ] `kova-client` calls the Phase 29 connection. It does not open its own protocol.
-- [ ] The window lists databases and collections, shows the documents of the selected collection, runs a find filter and a SQL statement, and saves an edit of one document by `_id`. A refused edit keeps the text and shows the error.
-- [ ] Connect defaults to `127.0.0.1` and `27018`. User and password are both set, or both empty. A wrong password is refused with `authentication failed`.
-- [ ] The window uses the site mark, oxide `#c2461b`, granite `#17191c`, feldspar `#eceeeb`, Archivo, IBM Plex Sans, and IBM Plex Mono. Light and dark follow the system.
-- [ ] The window is the system web view. Without a display, `kova-shell` is the path.
-- [ ] `kova-client` ships in the Linux archive, the Windows installer, and the Mac disk image.
-- [ ] Test: connect, and the tree shows a database and a collection. A find shows a document. An edit saves, and a later find returns the new value. A wrong password is refused. The same three packages each open the window.
+- [x] `kova-client` calls the Phase 29 connection. It does not open its own protocol.
+- [x] The window lists databases and collections, shows the documents of the selected collection, runs a find filter and a SQL statement, and saves an edit of one document by `_id`. A refused edit keeps the text and shows the error.
+- [x] Connect defaults to `127.0.0.1` and `27018`. User and password are both set, or both empty. A wrong password is refused with `authentication failed`.
+- [x] The window uses the site mark, oxide `#c2461b`, granite `#17191c`, feldspar `#eceeeb`, Archivo, IBM Plex Sans, and IBM Plex Mono. Light and dark follow the system.
+- [x] The window is the system web view. Without a display, `kova-shell` is the path.
+- [x] `kova-client` ships in the Linux archive, the Windows installer, and the Mac disk image.
+- [x] Test: connect, and the tree shows a database and a collection. A find shows a document. An edit saves, and a later find returns the new value. A refused edit keeps the stored document. A wrong password is refused. Without a display, the program names `kova-shell`. The Linux archive, the Windows installer, and the Mac disk image each contain the binary.
 
 ## Phase 31 - Steps behind MongoDB ⚪ Planned
 
@@ -1053,7 +1053,7 @@ On the run in `site/docs/benchmark-result.json`, these MQL steps are behind:
 - `$group` by `job`
 - `$lookup` of `dept`
 
-This waits until the shell and the client. The next pass on the engine picks it up. A new benchmark run replaces the list above when the means move.
+The shell and the client are in. The next pass on the engine picks this up. A new benchmark run replaces the list above when the means move.
 
 ### Phase 31 - Sub-tasks
 
@@ -1208,4 +1208,4 @@ Main entry point: `src/main.rs`.
 
 ---
 
-*Phases 1-28 and 32 are complete. Still open: the Kova shell (Phase 29), the graphical client (Phase 30), and the steps behind MongoDB (Phase 31).*
+*Phases 1-30 and 32 are complete. Still open: the steps behind MongoDB (Phase 31).*

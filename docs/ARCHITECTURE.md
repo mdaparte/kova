@@ -330,7 +330,11 @@ about and ignored.
 | 25 | Autoincrement: `admin.counters.last` is the last value handed out. `create` declares the field. A hand update of the row changes the next insert |
 | 26 | Feed: a committed write can publish `before` and `after` to Apache Iggy. The listener applies its own condition. Off unless `[feed]` is enabled |
 | 27 | User guide: `site/docs/` for the running server, from Getting started through backup, ODBC, replica sets, and sharding. The home page asks for an email. The engineering documents stay as they are |
-| 30 | Configuration: `kova-setup` writes `kova.toml` and opens again. A window asks the same questions. systemd, a Windows service, and launchd. Log rotation by date, size, or both |
+| 28 | Read path and scale: an index hit reads the recorded page, index pages live in the buffer pool, a scan can use more than one core, the router merges `$group` and equality `$lookup` |
+| 29 | `kova-shell`: terminal commands for `show dbs`, `use`, `show collections`, `find`, `insertOne`, `updateOne`, `deleteOne`, and `sql`. A line is not JavaScript |
+| 30 | `kova-client`: a system web view that calls the shell connection. Lists databases and collections, runs a find and SQL, and saves one document |
+| 31 | Steps behind MongoDB: five-pass means that are slower than MongoDB by more than the sample standard deviation of the paired differences |
+| 32 | Configuration: `kova-setup` writes `kova.toml` and opens again. A window asks the same questions. systemd, a Windows service, and launchd. Log rotation by date, size, or both |
 
 ---
 

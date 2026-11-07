@@ -4,7 +4,7 @@
 #   BINS=target/release packaging/macos/build-dmg.sh
 #   OUT=dist/Kova-aarch64.dmg
 #
-# BINS holds kova, kova-setup, kovadump, and iggy-server. Without BINS the
+# BINS holds kova, kova-setup, kovadump, kova-shell, kova-client, and iggy-server. Without BINS the
 # image still has the icon and the launcher. On macOS this uses hdiutil.
 # On Linux it writes an HFS+ hybrid and wraps that as UDZO.
 # The image is not signed and not notarized.
@@ -28,7 +28,7 @@ printf 'APPL????' > "$app/Contents/PkgInfo"
 chmod 755 "$app/Contents/MacOS/kova-launch" "$app/Contents/MacOS/packaging/iggy-server-config.py"
 
 if [ -n "${BINS:-}" ]; then
-  for name in kova kova-setup kovadump iggy-server; do
+  for name in kova kova-setup kovadump kova-shell kova-client iggy-server; do
     if [ ! -f "$BINS/$name" ]; then
       printf '%s\n' "missing $BINS/$name" >&2
       exit 1

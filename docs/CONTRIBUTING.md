@@ -25,6 +25,9 @@ parser + optimizer), Tantivy (full-text search).
 | Path | Responsibility |
 |---|---|
 | `src/main.rs` | Application entry point, Tokio runtime bootstrap, engine orchestration |
+| `src/shell/` | `kova-shell` commands and the page the window shows. The server build does not need a web view |
+| `src/bin/kova-shell.rs` | Terminal client. A line is a command, not JavaScript |
+| `src/bin/kova-client.rs` | Window. Without a display it names `kova-shell` |
 | `src/network/mod.rs` | TCP server, Wire Protocol framing, client tasks, SQL command routing |
 | `src/protocol/mod.rs` | Message types, opcodes, payload parsing, BSON enumerations, reply building |
 | `src/types/mod.rs` | `PartitionCommand`, document model, query model, shared types |
@@ -221,11 +224,11 @@ Phases are tracked in `docs/ROADMAP.md` and aligned with `draft.md`.
   partition can commit more than one collection in one log record. ✅ Complete.
 - **Phase 29 - Kova shell:** `kova-shell` talks to port `27018` and runs
   `show dbs`, `use`, `show collections`, `find`, `insertOne`, `updateOne`,
-  `deleteOne`, and `sql` as commands. A line is not JavaScript. ⚪ Planned.
+  `deleteOne`, and `sql` as commands. A line is not JavaScript. ✅ Complete.
 - **Phase 30 - Graphical client:** `kova-client` uses that same connection.
   It lists databases and collections, runs a find and a SQL statement, and
   saves an edit of one document. The window uses the site's mark and colors.
-  ⚪ Planned.
+  ✅ Complete.
 - **Phase 31 - Steps behind MongoDB:** the five-pass benchmark steps whose
   mean is slower than MongoDB by more than the standard deviation of the
   paired differences. Similar steps stay as they are. ⚪ Planned.

@@ -18,6 +18,7 @@ mod search;
 mod security;
 pub mod setup;
 mod shard;
+pub mod shell;
 mod storage;
 mod types;
 
