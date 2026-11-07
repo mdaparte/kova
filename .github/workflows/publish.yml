@@ -5,8 +5,9 @@ name: Publish crate
 # workflow. crates.io keeps every version, so a version already published
 # is left as it is: bump the version in Cargo.toml to publish again.
 #
-# The job reads the Actions secret CARGO_REGISTRY_TOKEN. Create the token
-# at https://crates.io/settings/tokens and store it on this repository.
+# The job waits for approval on the crates-io environment, then reads
+# CARGO_REGISTRY_TOKEN from that environment. Create the token at
+# https://crates.io/settings/tokens and store it on the environment.
 on:
   push:
     branches: [main]
@@ -27,6 +28,7 @@ jobs:
   publish:
     if: github.repository == 'mdaparte/kova'
     runs-on: ubuntu-latest
+    environment: crates-io
     steps:
       - uses: actions/checkout@v4
 
