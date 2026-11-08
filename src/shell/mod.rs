@@ -208,6 +208,12 @@ mod tests {
         assert!(page.contains("views"));
         assert!(page.contains("indexes"));
         assert!(page.contains("memory"));
+        assert!(page.contains("id=\"dashboard\""));
+        assert!(page.contains("createIndex"));
+        assert!(page.contains(">Search<") || page.contains("Search"));
+        assert!(page.contains("inverted"));
+        assert!(page.contains("distribution"));
+        assert!(page.contains("filled"));
         assert!(page.contains("dblclick"));
         assert!(page.contains(">MQL<") || page.contains("MQL"));
         assert!(page.contains("data-theme"));

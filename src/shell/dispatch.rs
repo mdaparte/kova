@@ -49,6 +49,8 @@ impl Ui {
             "saveConnection" => self.save_connection(&value),
             "deleteConnection" => self.delete_connection(&value),
             "status" => self.status(),
+            "dashboard" => self.dashboard(&value),
+            "profile" => self.profile(&value),
             "feed" => self.feed(&value),
             other => error(&format!("unknown request {other}")),
         }
@@ -122,6 +124,107 @@ impl Ui {
         }
     }
 
+    fn dashboard(&mut self, value: &Value) -> String {
+        let Some(database) = value.get("db").and_then(Value::as_str) else {
+            return error("missing database");
+        };
+        let Some(client) = self.client.as_mut() else {
+            return error("not connected");
+        };
+        match client.dashboard(database) {
+            Ok(board) => {
+                let tables: Vec<Value> = board
+                    .tables
+                    .iter()
+                    .map(|table| {
+                        json!({
+                            "name": table.name,
+                            "type": table.kind,
+                            "inverted": table.inverted,
+                            "count": table.count,
+                            "size": table.size,
+                            "avg": table.avg,
+                            "indexes": table.indexes,
+                        })
+                    })
+                    .collect();
+                ok(json!({
+                    "name": database,
+                    "collections": board.collections,
+                    "views": board.views,
+                    "documents": board.documents,
+                    "dataSize": board.data_size,
+                    "indexes": board.indexes,
+                    "tables": tables,
+                }))
+            }
+            Err(err) => error(&err),
+        }
+    }
+
+    fn profile(&mut self, value: &Value) -> String {
+        let Some(database) = value.get("db").and_then(Value::as_str) else {
+            return error("missing database");
+        };
+        let Some(collection) = value.get("collection").and_then(Value::as_str) else {
+            return error("missing collection");
+        };
+        let field = value
+            .get("field")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty());
+        let filter = value.get("filter").and_then(Value::as_str).unwrap_or("{}");
+        let filter = match parse_document(filter) {
+            Ok(filter) => filter,
+            Err(err) => return error(&err),
+        };
+        let Some(client) = self.client.as_mut() else {
+            return error("not connected");
+        };
+        match client.profile(database, collection, filter, field) {
+            Ok(profile) => {
+                let fields: Vec<Value> = profile
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        json!({
+                            "name": field.name,
+                            "present": field.present,
+                            "missing": field.missing,
+                            "nulls": field.nulls,
+                            "fill": field.fill,
+                            "kind": field.kind,
+                            "distinct": field.distinct,
+                            "numeric": field.numeric.as_ref().map(|numeric| json!({
+                                "min": numeric.min,
+                                "q1": numeric.q1,
+                                "median": numeric.median,
+                                "q3": numeric.q3,
+                                "max": numeric.max,
+                                "mean": numeric.mean,
+                                "sd": numeric.sd,
+                                "whiskerLow": numeric.whisker_low,
+                                "whiskerHigh": numeric.whisker_high,
+                                "outliers": numeric.outliers,
+                                "bins": numeric.bins.iter().map(|bin| json!({
+                                    "start": bin.start,
+                                    "end": bin.end,
+                                    "n": bin.n,
+                                })).collect::<Vec<_>>(),
+                            })),
+                        })
+                    })
+                    .collect();
+                ok(json!({
+                    "documents": profile.documents,
+                    "scanned": profile.scanned,
+                    "fields": fields,
+                }))
+            }
+            Err(err) => error(&err),
+        }
+    }
+
     fn feed(&mut self, value: &Value) -> String {
         let after = value.get("after").and_then(Value::as_i64).unwrap_or(0);
         let Some(client) = self.client.as_mut() else {
@@ -170,7 +273,14 @@ impl Ui {
                 let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
                 let items: Vec<Value> = items
                     .iter()
-                    .map(|item| json!({ "name": item.name, "type": item.kind }))
+                    .map(|item| {
+                        json!({
+                            "name": item.name,
+                            "type": item.kind,
+                            "inverted": item.inverted,
+                            "options": item.options,
+                        })
+                    })
                     .collect();
                 ok(json!({ "names": names, "items": items }))
             }
@@ -213,6 +323,8 @@ impl Ui {
                             "name": index.name,
                             "key": index.key,
                             "unique": index.unique,
+                            "sparse": index.sparse,
+                            "parts": index.parts,
                         })
                     })
                     .collect();

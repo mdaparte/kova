@@ -347,6 +347,33 @@ fn the_window_saves_a_connection_lists_fields_and_edits_a_cell() {
         .unwrap();
     assert_eq!(orders["type"], "collection");
 
+    let board: Value =
+        serde_json::from_str(&ui.dispatch(r#"{"op":"dashboard","db":"shop"}"#)).unwrap();
+    assert!(board["ok"].as_bool().unwrap_or(false), "{board}");
+    let orders_row = board["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "orders")
+        .unwrap();
+    assert_eq!(orders_row["count"].as_i64(), Some(1), "{board}");
+    assert!(orders_row["size"].as_i64().unwrap_or(0) > 0, "{board}");
+
+    let profile: Value = serde_json::from_str(&ui.dispatch(
+        r#"{"op":"profile","db":"shop","collection":"orders","filter":"{}"}"#,
+    ))
+    .unwrap();
+    assert!(profile["ok"].as_bool().unwrap_or(false), "{profile}");
+    assert_eq!(profile["documents"].as_i64(), Some(1), "{profile}");
+    let qty = profile["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["name"] == "qty")
+        .unwrap();
+    assert_eq!(qty["fill"].as_f64(), Some(1.0), "{qty}");
+    assert_eq!(qty["numeric"]["median"].as_f64(), Some(1.0), "{qty}");
+
     let status: Value = serde_json::from_str(&ui.dispatch(r#"{"op":"status"}"#)).unwrap();
     assert!(status["ok"].as_bool().unwrap_or(false), "{status}");
     assert!(status["memory"].as_i64().unwrap_or(-1) > 0, "{status}");
@@ -372,7 +399,12 @@ fn the_window_saves_a_connection_lists_fields_and_edits_a_cell() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|item| item["name"] == "_id_" && item["key"] == "_id"),
+            .any(|item| {
+                item["name"] == "_id_"
+                    && item["key"] == "_id"
+                    && item["parts"][0]["field"] == "_id"
+                    && item["parts"][0]["order"] == 1
+            }),
         "{indexes}"
     );
 
