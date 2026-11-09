@@ -409,13 +409,49 @@
   .theme-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
   .modal { position: fixed; inset: 0; background: rgba(23, 25, 28, 0.55); display: grid; place-items: center; }
   .dialog { width: min(420px, 92vw); background: var(--surface); border: 1px solid var(--line); padding: 16px; display: grid; gap: 12px; }
+  .dialog label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+  .dialog input { width: 100%; font-family: var(--f-mono); }
+  #export-modal .dialog { width: min(560px, 94vw); }
   .dialog p { margin: 0; }
-  .bars { display: grid; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .bars { position: relative; display: grid; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .busy-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
+    transition: opacity 180ms ease;
+  }
+  .main.busy .busy-line { opacity: 1; }
+  .busy-line span {
+    display: block;
+    height: 100%;
+    width: 36%;
+    background: var(--accent);
+    animation: sweep 900ms ease-in-out infinite;
+  }
+  @keyframes sweep {
+    from { transform: translateX(-120%); }
+    to { transform: translateX(340%); }
+  }
+  .grid-wrap { transition: opacity 200ms ease; }
+  .main.busy .grid-wrap { opacity: 0.5; }
+  .main.busy #ms { color: var(--accent); }
+  .main.busy #run { box-shadow: 0 0 0 3px color-mix(in srgb, var(--k-feldspato) 42%, transparent); }
+  @media (prefers-reduced-motion: reduce) {
+    .busy-line span { animation: none; width: 100%; transform: none; }
+    .grid-wrap { transition: none; }
+  }
   .crumb { font-family: var(--f-mono); font-size: 12px; color: var(--muted); }
   .row { display: flex; gap: 8px; align-items: center; }
   .row input { flex: 1; font-family: var(--f-mono); font-size: 12px; }
   .grid-wrap { overflow: auto; min-height: 0; }
   .grid { font-family: var(--f-mono); font-size: 12px; }
+  .grid th { text-transform: none; letter-spacing: 0; }
   .grid td { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .grid td.editing { overflow: visible; padding: 2px; }
   .grid td input { width: 100%; padding: 3px 6px; }
@@ -507,12 +543,14 @@
             <option value="sql">SQL</option>
           </select>
           <span class="grow"></span>
+          <button type="button" id="save-view">Save view</button>
           <button type="button" class="primary" id="run">Run</button>
         </div>
         <div class="code">
           <pre id="highlight" aria-hidden="true"></pre>
           <textarea id="query" spellcheck="false" aria-label="Query"></textarea>
         </div>
+        <div class="busy-line" aria-hidden="true"><span></span></div>
       </div>
       <div class="pager row">
         <button type="button" id="first" title="First page">|&lt;</button>
@@ -592,6 +630,29 @@
     </div>
     <textarea id="index-command" readonly spellcheck="false" aria-label="Index command"></textarea>
   </div>
+</div>
+<div class="modal hidden" id="export-modal">
+  <form class="dialog" id="export-form" role="dialog" aria-labelledby="export-title">
+    <p id="export-title">Export CSV</p>
+    <label>Folder<input id="export-dir" autocomplete="off"></label>
+    <label>File name<input id="export-name" autocomplete="off"></label>
+    <div class="row">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" id="export-cancel">Cancel</button>
+    </div>
+    <div class="error" id="export-error"></div>
+  </form>
+</div>
+<div class="modal hidden" id="view-modal">
+  <form class="dialog" id="view-form" role="dialog" aria-labelledby="view-title">
+    <p id="view-title">Save as view</p>
+    <label>Name<input id="view-name" autocomplete="off" spellcheck="false"></label>
+    <div class="row">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" id="view-cancel">Cancel</button>
+    </div>
+    <div class="error" id="view-error"></div>
+  </form>
 </div>
 <div class="modal hidden" id="leave">
   <div class="dialog" role="dialog" aria-labelledby="leave-title">
@@ -725,6 +786,14 @@ function renderTabs() {
       tabIndex = index;
       applyTab(tabs[index]);
       renderTabs();
+    });
+    button.addEventListener("mousedown", (event) => {
+      if (event.button === 1) event.preventDefault();
+    });
+    button.addEventListener("auxclick", (event) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      requestCloseTab(index);
     });
     const label = document.createElement("span");
     label.textContent = tab.title + (tab.dirty ? " •" : "");
@@ -2336,52 +2405,72 @@ function escapeHtml(text) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 }
 
+let queryToken = 0;
+
+function setQueryBusy(on) {
+  document.getElementById("main").classList.toggle("busy", on);
+  document.getElementById("grid").setAttribute("aria-busy", on ? "true" : "false");
+  document.getElementById("run").disabled = on;
+}
+
+function hold(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function runQuery() {
   const mode = document.getElementById("mode").value;
   const text = document.getElementById("query").value;
-  const skip = page * pageSize();
-  const limit = pageSize();
-  let answer;
-  if (mode === "sql") {
-    if (!database) {
-      showError(document.getElementById("edit-error"), "select a database");
-      return;
-    }
-    source = "sql";
-    writable = false;
-    answer = await post({ op: "sql", db: database, sql: text, skip: skip, limit: limit });
-    if (answer.ok) document.getElementById("crumb").textContent = database + "  sql";
-  } else {
-    if (!database) {
-      showError(document.getElementById("edit-error"), "select a database");
-      return;
-    }
-    answer = await post({ op: "mql", db: database, mql: text, skip: skip, limit: limit });
-    if (answer.ok && answer.collection && answer.collection !== collection) {
-      collection = answer.collection;
-      source = "collection";
-      writable = true;
-    }
-  }
-  if (!answer.ok) {
-    showError(document.getElementById("edit-error"), answer.error);
+  if (!database) {
+    showError(document.getElementById("edit-error"), "select a database");
     return;
   }
-  showError(document.getElementById("edit-error"), "");
-  document.getElementById("ms").textContent = (answer.ms || 0) + " ms";
-  const from = answer.rows.length ? skip + 1 : 0;
-  document.getElementById("range").textContent = from + "–" + (skip + answer.rows.length);
-  document.getElementById("prev").disabled = page === 0;
-  document.getElementById("first").disabled = page === 0;
-  document.getElementById("next").disabled = answer.rows.length < limit;
-  document.getElementById("last").disabled = total == null;
-  paint(answer.rows);
-  if (tabIndex >= 0) {
-    tabs[tabIndex].loadedText = document.getElementById("document").value;
-    tabs[tabIndex].pending = null;
-    tabs[tabIndex].dirty = false;
-    snapshot();
-    renderTabs();
+  if (document.getElementById("main").classList.contains("busy")) return;
+  const token = ++queryToken;
+  const started = performance.now();
+  setQueryBusy(true);
+  document.getElementById("ms").textContent = "…";
+  const skip = page * pageSize();
+  const limit = pageSize();
+  try {
+    let answer;
+    if (mode === "sql") {
+      source = "sql";
+      writable = false;
+      answer = await post({ op: "sql", db: database, sql: text, skip: skip, limit: limit });
+      if (answer.ok) document.getElementById("crumb").textContent = database + "  sql";
+    } else {
+      answer = await post({ op: "mql", db: database, mql: text, skip: skip, limit: limit });
+      if (answer.ok && answer.collection && answer.collection !== collection) {
+        collection = answer.collection;
+        source = "collection";
+        writable = true;
+      }
+    }
+    if (!answer.ok) {
+      showError(document.getElementById("edit-error"), answer.error);
+      document.getElementById("ms").textContent = "";
+      return;
+    }
+    showError(document.getElementById("edit-error"), "");
+    document.getElementById("ms").textContent = (answer.ms || 0) + " ms";
+    const from = answer.rows.length ? skip + 1 : 0;
+    document.getElementById("range").textContent = from + "–" + (skip + answer.rows.length);
+    document.getElementById("prev").disabled = page === 0;
+    document.getElementById("first").disabled = page === 0;
+    document.getElementById("next").disabled = answer.rows.length < limit;
+    document.getElementById("last").disabled = total == null;
+    paint(answer.rows);
+    if (tabIndex >= 0) {
+      tabs[tabIndex].loadedText = document.getElementById("document").value;
+      tabs[tabIndex].pending = null;
+      tabs[tabIndex].dirty = false;
+      snapshot();
+      renderTabs();
+    }
+  } finally {
+    const remain = 360 - (performance.now() - started);
+    if (remain > 0) await hold(remain);
+    if (token === queryToken) setQueryBusy(false);
   }
 }
 
@@ -2402,6 +2491,58 @@ document.getElementById("mode").addEventListener("change", paintQuery);
 document.getElementById("run").addEventListener("click", () => {
   page = 0;
   runQuery();
+});
+document.getElementById("save-view").addEventListener("click", () => {
+  if (!database) {
+    showError(document.getElementById("edit-error"), "select a database");
+    return;
+  }
+  const text = document.getElementById("query").value.trim();
+  if (!text) {
+    showError(document.getElementById("edit-error"), "the query is empty");
+    return;
+  }
+  const modal = document.getElementById("view-modal");
+  const form = document.getElementById("view-form");
+  const cancel = document.getElementById("view-cancel");
+  document.getElementById("view-name").value = "";
+  showError(document.getElementById("view-error"), "");
+  modal.classList.remove("hidden");
+  document.getElementById("view-name").focus();
+  const finish = () => {
+    modal.classList.add("hidden");
+    form.removeEventListener("submit", onSubmit);
+    cancel.removeEventListener("click", onCancel);
+  };
+  async function onSubmit(event) {
+    event.preventDefault();
+    const name = document.getElementById("view-name").value.trim();
+    if (!name) {
+      showError(document.getElementById("view-error"), "choose a name");
+      return;
+    }
+    const mode = document.getElementById("mode").value;
+    const body = { op: "createView", db: database, name: name };
+    if (mode === "sql" || /^(select|with|show|describe|desc)\b/i.test(text)) body.sql = text;
+    else body.mql = text;
+    const answer = await post(body);
+    if (!answer.ok) {
+      showError(document.getElementById("view-error"), answer.error);
+      return;
+    }
+    finish();
+    const list = document.querySelector('[data-db="' + CSS.escape(database) + '"]');
+    if (list) {
+      list.dataset.loaded = "";
+      if (!list.classList.contains("hidden")) await loadDatabase(database, list);
+    }
+    document.getElementById("status").textContent = "view " + answer.name;
+  }
+  function onCancel() {
+    finish();
+  }
+  form.addEventListener("submit", onSubmit);
+  cancel.addEventListener("click", onCancel);
 });
 document.getElementById("page-size").addEventListener("change", () => {
   page = 0;
@@ -2437,28 +2578,79 @@ document.getElementById("count-docs").addEventListener("click", async () => {
   showError(document.getElementById("edit-error"), "");
 });
 document.getElementById("csv").addEventListener("click", async () => {
-  const columns = [...document.querySelectorAll(".grid th")].map((cell) => cell.dataset.col);
-  if (!columns.length) return;
-  const lines = [columns.map(csvCell).join(",")];
-  for (const row of resultRows) {
-    lines.push(columns.map((field) => csvCell(cellOf(row, field).text)).join(","));
+  if (document.getElementById("main").classList.contains("busy")) return;
+  if (!database) {
+    showError(document.getElementById("edit-error"), "select a database");
+    return;
   }
-  const answer = await post({
-    op: "export",
-    name: collection || "query",
-    csv: lines.join("\n") + "\n"
-  });
+  const mode = document.getElementById("mode").value;
+  const text = document.getElementById("query").value;
+  if (!text.trim()) {
+    showError(document.getElementById("edit-error"), "the query is empty");
+    return;
+  }
+  const choice = await post({ op: "pickSave", name: (collection || "query") + ".csv" });
+  if (!choice.ok) {
+    showError(document.getElementById("edit-error"), choice.error);
+    return;
+  }
+  if (choice.cancelled) return;
+  const body = { op: "export", db: database };
+  if (choice.path) {
+    body.path = choice.path;
+  } else {
+    const picked = await askExport(choice.dir, choice.file);
+    if (!picked) return;
+    body.dir = picked.dir;
+    body.file = picked.file;
+  }
+  if (mode === "sql") body.sql = text;
+  else body.mql = text;
+  setQueryBusy(true);
+  const answer = await post(body);
+  setQueryBusy(false);
   if (!answer.ok) {
     showError(document.getElementById("edit-error"), answer.error);
     return;
   }
-  document.getElementById("status").textContent = answer.path;
+  showError(document.getElementById("edit-error"), "");
+  const count = Number(answer.n);
+  const rows = count === 1 ? "1 row" : count + " rows";
+  document.getElementById("status").textContent = rows + "  " + answer.path;
 });
 
-function csvCell(text) {
-  const value = text == null ? "" : String(text);
-  if (/[",\n]/.test(value)) return '"' + value.replace(/"/g, '""') + '"';
-  return value;
+function askExport(dir, file) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("export-modal");
+    const form = document.getElementById("export-form");
+    const cancel = document.getElementById("export-cancel");
+    document.getElementById("export-dir").value = dir || "";
+    document.getElementById("export-name").value = file || "kova.csv";
+    showError(document.getElementById("export-error"), "");
+    modal.classList.remove("hidden");
+    document.getElementById("export-name").focus();
+    const finish = (value) => {
+      modal.classList.add("hidden");
+      form.removeEventListener("submit", onSubmit);
+      cancel.removeEventListener("click", onCancel);
+      resolve(value);
+    };
+    function onSubmit(event) {
+      event.preventDefault();
+      const folder = document.getElementById("export-dir").value.trim();
+      const name = document.getElementById("export-name").value.trim();
+      if (!folder || !name) {
+        showError(document.getElementById("export-error"), "choose a folder and a file name");
+        return;
+      }
+      finish({ dir: folder, file: name });
+    }
+    function onCancel() {
+      finish(null);
+    }
+    form.addEventListener("submit", onSubmit);
+    cancel.addEventListener("click", onCancel);
+  });
 }
 
 paintQuery();

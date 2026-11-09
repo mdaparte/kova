@@ -131,6 +131,8 @@ pub enum PartitionCommand {
         sort: Option<Document>,
         skip: u64,
         limit: Option<u64>,
+        /// Foreign rows already loaded for a view `$lookup`.
+        resolved: Vec<(String, Vec<Document>)>,
     },
     /// Run an aggregation pipeline over one collection.
     ///
@@ -166,6 +168,8 @@ pub enum PartitionCommand {
     Count {
         collection: String,
         filter: Document,
+        /// Foreign rows already loaded for a view `$lookup`.
+        resolved: Vec<(String, Vec<Document>)>,
     },
     /// Remove a collection and all of its documents (`drop`).
     Drop { collection: String },
@@ -364,6 +368,7 @@ impl PartitionCommand {
             sort: None,
             skip: 0,
             limit: None,
+            resolved: Vec::new(),
         }
     }
 
@@ -484,6 +489,7 @@ mod tests {
             PartitionCommand::Count {
                 collection: "e".into(),
                 filter: doc! {},
+                resolved: Vec::new(),
             },
         ];
 

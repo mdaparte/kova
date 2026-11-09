@@ -36,7 +36,7 @@ path = "src/bin/kova-client.rs"
 required-features = ["window"]
 
 [features]
-window = ["dep:tao", "dep:wry"]
+window = ["dep:tao", "dep:wry", "dep:gtk"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -61,6 +61,9 @@ toml_edit = "0.22"
 crossterm = "0.28"
 tao = { version = "0.34", optional = true }
 wry = { version = "0.53", optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
+gtk = { version = "0.18", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

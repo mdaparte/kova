@@ -476,6 +476,7 @@ impl PartitionWorker {
                 sort,
                 skip,
                 limit,
+                resolved,
             } => {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
@@ -489,6 +490,7 @@ impl PartitionWorker {
                         skip,
                         limit,
                         touch_index,
+                        &resolved,
                     );
                 }
                 let documents = match self.planned_documents(&collection, &filter) {
@@ -533,12 +535,16 @@ impl PartitionWorker {
                 result
             }
 
-            PartitionCommand::Count { collection, filter } => {
+            PartitionCommand::Count {
+                collection,
+                filter,
+                resolved,
+            } => {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
                 }
                 if let Some(view) = self.engine.heap.view(&collection).cloned() {
-                    return self.count_view(view, &filter, touch_index);
+                    return self.count_view(view, &filter, touch_index, &resolved);
                 }
                 let count = match self.indexes.access(&collection, &filter) {
                     Access::Collection => {
@@ -1569,6 +1575,7 @@ impl PartitionWorker {
                 sort,
                 skip,
                 limit,
+                resolved: _,
             } => {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
@@ -1592,7 +1599,11 @@ impl PartitionWorker {
                     Err(message) => PartitionResult::Error { message },
                 }
             }
-            PartitionCommand::Count { collection, filter } => {
+            PartitionCommand::Count {
+                collection,
+                filter,
+                resolved: _,
+            } => {
                 if let Err(message) = validate_filter(&filter) {
                     return PartitionResult::Error { message };
                 }
@@ -2194,6 +2205,7 @@ impl PartitionWorker {
         skip: u64,
         limit: Option<u64>,
         touch_index: bool,
+        resolved: &[(String, Vec<Document>)],
     ) -> PartitionResult {
         let mut pipeline = view.pipeline;
         if !filter.is_empty() {
@@ -2211,7 +2223,7 @@ impl PartitionWorker {
         if let Some(limit) = limit {
             pipeline.push(doc! { "$limit": limit as i64 });
         }
-        let result = self.execute_aggregate(&view.source, &pipeline, &[]);
+        let result = self.execute_aggregate(&view.source, &pipeline, resolved);
         if touch_index && !matches!(result, PartitionResult::Error { .. }) {
             crate::metrics::METRICS.query();
         }
@@ -2223,12 +2235,13 @@ impl PartitionWorker {
         view: crate::storage::heap::ViewSpec,
         filter: &Document,
         touch_index: bool,
+        resolved: &[(String, Vec<Document>)],
     ) -> PartitionResult {
         let mut pipeline = view.pipeline;
         if !filter.is_empty() {
             pipeline.push(doc! { "$match": filter.clone() });
         }
-        match self.execute_aggregate(&view.source, &pipeline, &[]) {
+        match self.execute_aggregate(&view.source, &pipeline, resolved) {
             PartitionResult::Found { documents } => {
                 if touch_index {
                     crate::metrics::METRICS.query();
@@ -2750,6 +2763,7 @@ fn command_for(write: &Write) -> PartitionCommand {
         _ => PartitionCommand::Count {
             collection: write.collection.clone(),
             filter: doc! {},
+            resolved: Vec::new(),
         },
     }
 }
@@ -3929,6 +3943,7 @@ mod tests {
             .dispatch(PartitionCommand::Count {
                 collection: "todos".into(),
                 filter: doc! {},
+                resolved: Vec::new(),
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
@@ -4227,6 +4242,7 @@ mod tests {
             .dispatch(PartitionCommand::Count {
                 collection: "shop.orders".into(),
                 filter: doc! {},
+                resolved: Vec::new(),
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
@@ -4698,6 +4714,7 @@ mod tests {
             .dispatch(PartitionCommand::Count {
                 collection: "shop.orders".into(),
                 filter: doc! {},
+                resolved: Vec::new(),
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {
@@ -4744,6 +4761,7 @@ mod tests {
             .dispatch(PartitionCommand::Count {
                 collection: "kova".into(),
                 filter: doc! {},
+                resolved: Vec::new(),
             })
             .expect("worker reachable");
         match rx.await.expect("worker replied") {

@@ -446,7 +446,7 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             if source.contains('.') {
                 return Err("viewOn cannot contain '.'".to_string());
             }
-            let pipeline = match command.get("pipeline") {
+                let mut pipeline = match command.get("pipeline") {
                 None => Vec::new(),
                 Some(bson::Bson::Array(values)) => values
                     .iter()
@@ -459,6 +459,9 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
                     .collect::<Result<Vec<_>, _>>()?,
                 Some(_) => return Err("pipeline must be an array".into()),
             };
+            for stage in &mut pipeline {
+                namespace_stage(stage, db)?;
+            }
             let kova = match command.get("kova") {
                 None => doc! {},
                 Some(bson::Bson::Document(kova)) => kova.clone(),
@@ -550,6 +553,7 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
                 sort,
                 skip,
                 limit,
+                resolved: Vec::new(),
             },
         );
     }
@@ -698,6 +702,7 @@ pub fn command_from_document(command: &Document) -> Result<PartitionCommand, Str
             PartitionCommand::Count {
                 collection: namespaced(collection),
                 filter,
+                resolved: Vec::new(),
             },
         );
     }
@@ -2601,7 +2606,7 @@ mod tests {
         let command = doc! { "count": "orders", "query": { "status": "paid" } };
         let parsed = command_from_document(&command).expect("parse");
         match parsed {
-            PartitionCommand::Count { collection, filter } => {
+            PartitionCommand::Count { collection, filter, .. } => {
                 assert_eq!(collection, "orders");
                 assert_eq!(filter.get_str("status").unwrap(), "paid");
             }

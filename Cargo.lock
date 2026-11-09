@@ -3418,6 +3418,7 @@ dependencies = [
  "crossterm 0.28.1",
  "datafusion",
  "getrandom 0.2.17",
+ "gtk",
  "iggy",
  "openraft",
  "regex",

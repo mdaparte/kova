@@ -324,6 +324,26 @@ impl Client {
         Ok(infos)
     }
 
+    pub fn create_view(
+        &mut self,
+        database: &str,
+        name: &str,
+        source: &str,
+        pipeline: Vec<Document>,
+    ) -> Result<(), String> {
+        let mut command = doc! {
+            "create": name,
+            "viewOn": source,
+            "$db": database,
+        };
+        command.insert(
+            "pipeline",
+            Bson::Array(pipeline.into_iter().map(Bson::Document).collect()),
+        );
+        let reply = self.command(command)?;
+        ensure_ok(&reply)
+    }
+
     pub fn find(
         &mut self,
         database: &str,

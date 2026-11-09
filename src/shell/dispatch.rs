@@ -42,7 +42,9 @@ impl Ui {
             "mql" => self.mql(&value),
             "sql" => self.sql(&value),
             "count" => self.count(&value),
-            "export" => export_csv(&value),
+            "export" => self.export_csv(&value),
+            "createView" => self.create_view(&value),
+            "pickSave" => suggest_export(&value),
             "save" => self.save(&value),
             "patch" => self.patch(&value),
             "connections" => self.connections(),
@@ -609,12 +611,127 @@ fn positive(value: &Value, key: &str) -> Option<u64> {
     }
 }
 
-fn export_csv(value: &Value) -> String {
+fn suggest_export(value: &Value) -> String {
     let name = value.get("name").and_then(Value::as_str).unwrap_or("kova");
-    let csv = value.get("csv").and_then(Value::as_str).unwrap_or("");
-    match write_csv(name, csv) {
-        Ok(path) => ok(json!({ "path": path.display().to_string() })),
-        Err(err) => error(&err),
+    ok(json!({
+        "dir": downloads_dir().display().to_string(),
+        "file": csv_file_name(name),
+    }))
+}
+
+impl Ui {
+    fn export_csv(&mut self, value: &Value) -> String {
+        if value.get("path").is_some() || value.get("dir").is_some() {
+            return self.export_query(value);
+        }
+        let name = value.get("name").and_then(Value::as_str).unwrap_or("kova");
+        let csv = value.get("csv").and_then(Value::as_str).unwrap_or("");
+        match write_csv(name, csv) {
+            Ok(path) => ok(json!({ "path": path.display().to_string() })),
+            Err(err) => error(&err),
+        }
+    }
+
+    /// Writes every row of the current find or SQL statement, not the page on screen.
+    fn export_query(&mut self, value: &Value) -> String {
+        let Some(database) = value.get("db").and_then(Value::as_str) else {
+            return error("missing database");
+        };
+        let documents = if let Some(text) = value.get("mql").and_then(Value::as_str) {
+            let (collection, filter) = match parse_command(text) {
+                Ok(Command::Find { collection, filter }) => (collection, filter),
+                Ok(_) => return error("the editor runs a find"),
+                Err(err) => return error(&err),
+            };
+            let Some(client) = self.client.as_mut() else {
+                return error("not connected");
+            };
+            match client.find(database, &collection, filter) {
+                Ok(documents) => documents,
+                Err(err) => return error(&err),
+            }
+        } else if let Some(statement) = value.get("sql").and_then(Value::as_str) {
+            let Some(client) = self.client.as_mut() else {
+                return error("not connected");
+            };
+            match client.sql(database, statement) {
+                Ok(documents) => documents,
+                Err(err) => return error(&err),
+            }
+        } else {
+            return error("missing query");
+        };
+        let csv = match documents_to_csv(&documents) {
+            Ok(csv) => csv,
+            Err(err) => return error(&err),
+        };
+        let path = match export_destination(value) {
+            Ok(path) => path,
+            Err(err) => return error(&err),
+        };
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.is_dir() {
+                return error(&format!("folder {} does not exist", parent.display()));
+            }
+        }
+        if let Err(err) = fs::write(&path, csv) {
+            return error(&format!("save {}: {err}", path.display()));
+        }
+        ok(json!({
+            "path": path.display().to_string(),
+            "n": documents.len(),
+        }))
+    }
+
+    fn create_view(&mut self, value: &Value) -> String {
+        let Some(database) = value.get("db").and_then(Value::as_str) else {
+            return error("missing database");
+        };
+        let Some(name) = value.get("name").and_then(Value::as_str).map(str::trim) else {
+            return error("missing view name");
+        };
+        if name.is_empty() || name.contains('.') || name.contains(char::is_whitespace) {
+            return error("the view name cannot contain spaces or '.'");
+        }
+        if let Some(sql) = value
+            .get("sql")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("mql").and_then(Value::as_str).filter(|text| sql_statement(text)))
+        {
+            let (source, pipeline) = match sql_view(sql) {
+                Ok(parsed) => parsed,
+                Err(err) => return error(&err),
+            };
+            let Some(client) = self.client.as_mut() else {
+                return error("not connected");
+            };
+            return match client.create_view(database, name, &source, pipeline) {
+                Ok(()) => ok(json!({ "name": name, "viewOn": source })),
+                Err(err) => error(&err),
+            };
+        }
+        let Some(text) = value.get("mql").and_then(Value::as_str) else {
+            return error("missing query");
+        };
+        let (source, filter) = match parse_command(text) {
+            Ok(Command::Find { collection, filter }) => (collection, filter),
+            Ok(_) => return error("a view stores a find on one collection"),
+            Err(err) => return error(&err),
+        };
+        let pipeline = if filter.is_empty() {
+            Vec::new()
+        } else {
+            let mut stage = bson::Document::new();
+            stage.insert("$match", filter);
+            vec![stage]
+        };
+        let Some(client) = self.client.as_mut() else {
+            return error("not connected");
+        };
+        match client.create_view(database, name, &source, pipeline) {
+            Ok(()) => ok(json!({ "name": name, "viewOn": source })),
+            Err(err) => error(&err),
+        }
     }
 }
 
@@ -649,6 +766,81 @@ fn safe_name(name: &str) -> String {
     } else {
         safe.to_string()
     }
+}
+
+fn csv_file_name(name: &str) -> String {
+    let trimmed = name.trim();
+    let stem = trimmed
+        .strip_suffix(".csv")
+        .or_else(|| trimmed.strip_suffix(".CSV"))
+        .unwrap_or(trimmed);
+    format!("{}.csv", safe_name(stem))
+}
+
+fn export_destination(value: &Value) -> Result<PathBuf, String> {
+    let path = if let Some(path) = value.get("path").and_then(Value::as_str) {
+        if path.trim().is_empty() {
+            return Err("choose a file".to_string());
+        }
+        PathBuf::from(path)
+    } else {
+        let dir = value.get("dir").and_then(Value::as_str).unwrap_or("");
+        let file = value.get("file").and_then(Value::as_str).unwrap_or("");
+        if dir.trim().is_empty() || file.trim().is_empty() {
+            return Err("choose a folder and a file name".to_string());
+        }
+        PathBuf::from(dir).join(file)
+    };
+    Ok(with_csv_extension(path))
+}
+
+fn with_csv_extension(path: PathBuf) -> PathBuf {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("csv") => path,
+        _ => path.with_extension("csv"),
+    }
+}
+
+fn documents_to_csv(documents: &[bson::Document]) -> Result<String, String> {
+    let mut fields: Vec<String> = documents
+        .iter()
+        .flat_map(|document| document.keys().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if let Some(index) = fields.iter().position(|field| field == "_id") {
+        let id = fields.remove(index);
+        fields.insert(0, id);
+    }
+    let mut csv = String::new();
+    push_csv_row(&mut csv, &fields);
+    for document in documents {
+        let cells = fields
+            .iter()
+            .map(|field| match document.get(field) {
+                Some(value) => cell_text(value),
+                None => Ok(String::new()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        push_csv_row(&mut csv, &cells);
+    }
+    Ok(csv)
+}
+
+fn push_csv_row(csv: &mut String, cells: &[String]) {
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            csv.push(',');
+        }
+        if cell.contains([',', '"', '\n', '\r']) {
+            csv.push('"');
+            csv.push_str(&cell.replace('"', "\"\""));
+            csv.push('"');
+        } else {
+            csv.push_str(cell);
+        }
+    }
+    csv.push('\n');
 }
 
 fn downloads_dir() -> PathBuf {
@@ -761,6 +953,463 @@ fn civil_date(days: i64) -> (i32, u32, u32) {
     (year as i32, month as u32, day as u32)
 }
 
+const VIEW_SQL: &str = "a view stores a select of columns from one collection, with at most one inner join on equal fields";
+
+fn sql_statement(text: &str) -> bool {
+    let word = text
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(';');
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "select" | "with" | "show" | "describe" | "desc"
+    )
+}
+
+struct SqlWord<'a> {
+    text: &'a str,
+}
+
+/// Turns a select into the pipeline a view can store.
+///
+/// One collection, an optional inner join on one equality, and the
+/// columns to keep. Anything wider stays a query, not a view.
+fn sql_view(sql: &str) -> Result<(String, Vec<bson::Document>), String> {
+    let sql = sql.trim().trim_end_matches(';').trim();
+    if sql.is_empty() || sql.contains(['(', ')', ';']) {
+        return Err(VIEW_SQL.into());
+    }
+    let words = sql_words(sql);
+    if words.first().is_none_or(|word| !sql_kw(word.text, "select")) {
+        return Err(VIEW_SQL.into());
+    }
+    if words.iter().any(|word| {
+        matches!(
+            word.text.to_ascii_lowercase().as_str(),
+            "union"
+                | "group"
+                | "order"
+                | "limit"
+                | "having"
+                | "with"
+                | "except"
+                | "intersect"
+                | "left"
+                | "right"
+                | "full"
+                | "cross"
+                | "outer"
+                | "natural"
+        )
+    }) {
+        return Err(VIEW_SQL.into());
+    }
+    let from_at = words
+        .iter()
+        .position(|word| sql_kw(word.text, "from"))
+        .ok_or(VIEW_SQL)?;
+    let columns = sql_select(&words[1..from_at])?;
+    let (source, source_alias, mut rest) = sql_relation(&words[from_at + 1..])?;
+    let mut join: Option<SqlJoin> = None;
+    if rest.first().is_some_and(|word| sql_kw(word.text, "inner")) {
+        rest = &rest[1..];
+    }
+    if rest.first().is_some_and(|word| sql_kw(word.text, "join")) {
+        let (table, alias, after) = sql_relation(&rest[1..])?;
+        if after.first().is_none_or(|word| !sql_kw(word.text, "on")) || after.len() < 4 {
+            return Err(VIEW_SQL.into());
+        }
+        if after[2].text != "=" {
+            return Err(VIEW_SQL.into());
+        }
+        join = Some(SqlJoin {
+            table,
+            alias,
+            left: after[1].text.to_string(),
+            right: after[3].text.to_string(),
+        });
+        rest = &after[4..];
+    }
+    let mut predicate = None;
+    if rest.first().is_some_and(|word| sql_kw(word.text, "where")) {
+        predicate = Some(sql_predicate(
+            sql,
+            &source,
+            &source_alias,
+            join.as_ref().map(|item| item.alias.as_str()),
+        )?);
+        rest = &[];
+    }
+    if !rest.is_empty() {
+        return Err(VIEW_SQL.into());
+    }
+    let join_alias = join.as_ref().map(|join| join.alias.as_str());
+    let mut pipeline = Vec::new();
+    if let Some(pred) = predicate.as_ref().filter(|pred| !pred.on_join) {
+        pipeline.push(bson::doc! { "$match": pred.filter.clone() });
+    }
+    if let Some(join) = join.as_ref() {
+        let (local, foreign) = sql_join_keys(join, &source, &source_alias)?;
+        pipeline.push(bson::doc! {
+            "$lookup": {
+                "from": &join.table,
+                "localField": local,
+                "foreignField": foreign,
+                "as": &join.alias,
+            }
+        });
+        pipeline.push(bson::doc! { "$unwind": format!("${}", join.alias) });
+    }
+    if let Some(pred) = predicate.as_ref().filter(|pred| pred.on_join) {
+        pipeline.push(bson::doc! { "$match": pred.filter.clone() });
+    }
+    if let Some(project) = sql_project(&columns, &source, &source_alias, join_alias)? {
+        pipeline.push(bson::doc! { "$project": project });
+    }
+    Ok((source, pipeline))
+}
+
+struct SqlJoin {
+    table: String,
+    alias: String,
+    left: String,
+    right: String,
+}
+
+struct SqlPred {
+    on_join: bool,
+    filter: bson::Document,
+}
+
+enum SqlColumn {
+    Star,
+    Field { path: String, output: String },
+}
+
+fn sql_words(sql: &str) -> Vec<SqlWord<'_>> {
+    let mut words = Vec::new();
+    let mut index = 0;
+    while index < sql.len() {
+        let ch = sql[index..].chars().next().expect("char");
+        if ch.is_whitespace() {
+            index += ch.len_utf8();
+            continue;
+        }
+        if ch == ',' || ch == '=' {
+            words.push(SqlWord {
+                text: &sql[index..index + 1],
+            });
+            index += 1;
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            let start = index;
+            index += ch.len_utf8();
+            while index < sql.len() {
+                let next = sql[index..].chars().next().expect("char");
+                index += next.len_utf8();
+                if next == ch {
+                    break;
+                }
+            }
+            words.push(SqlWord {
+                text: &sql[start..index],
+            });
+            continue;
+        }
+        let start = index;
+        index += ch.len_utf8();
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '*' {
+            while index < sql.len() {
+                let next = sql[index..].chars().next().expect("char");
+                if next.is_ascii_alphanumeric() || next == '_' || next == '.' || next == '*' {
+                    index += next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+        }
+        words.push(SqlWord {
+            text: &sql[start..index],
+        });
+    }
+    words
+}
+
+fn sql_kw(word: &str, keyword: &str) -> bool {
+    word.eq_ignore_ascii_case(keyword)
+}
+
+fn sql_ident(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn sql_field(text: &str) -> bool {
+    !text.is_empty() && text.split('.').all(sql_ident)
+}
+
+fn sql_relation<'a>(words: &'a [SqlWord<'a>]) -> Result<(String, String, &'a [SqlWord<'a>]), String> {
+    let Some(table) = words.first() else {
+        return Err(VIEW_SQL.into());
+    };
+    if !sql_ident(table.text) {
+        return Err(VIEW_SQL.into());
+    }
+    let mut index = 1;
+    if words.get(1).is_some_and(|word| sql_kw(word.text, "as")) {
+        index = 2;
+    }
+    if let Some(alias) = words.get(index) {
+        if sql_ident(alias.text) && !sql_clause(alias.text) {
+            return Ok((
+                table.text.to_string(),
+                alias.text.to_string(),
+                &words[index + 1..],
+            ));
+        }
+    }
+    Ok((table.text.to_string(), table.text.to_string(), &words[1..]))
+}
+
+fn sql_clause(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "where" | "join" | "inner" | "on" | "select" | "from" | "as"
+    )
+}
+
+fn sql_select(words: &[SqlWord<'_>]) -> Result<Vec<SqlColumn>, String> {
+    if words.is_empty() {
+        return Err(VIEW_SQL.into());
+    }
+    if words.len() == 1 && words[0].text == "*" {
+        return Ok(vec![SqlColumn::Star]);
+    }
+    let mut columns = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        let expr = words[index].text;
+        if !sql_field(expr) {
+            return Err(VIEW_SQL.into());
+        }
+        index += 1;
+        let output = if words.get(index).is_some_and(|word| sql_kw(word.text, "as")) {
+            index += 1;
+            let alias = words.get(index).ok_or(VIEW_SQL)?;
+            if !sql_ident(alias.text) {
+                return Err(VIEW_SQL.into());
+            }
+            index += 1;
+            alias.text.to_string()
+        } else if words
+            .get(index)
+            .is_some_and(|word| word.text != "," && sql_ident(word.text))
+        {
+            let alias = words[index].text;
+            index += 1;
+            alias.to_string()
+        } else {
+            expr.rsplit('.').next().unwrap_or(expr).to_string()
+        };
+        if index < words.len() {
+            if words[index].text != "," {
+                return Err(VIEW_SQL.into());
+            }
+            index += 1;
+            if index == words.len() {
+                return Err(VIEW_SQL.into());
+            }
+        }
+        columns.push(SqlColumn::Field {
+            path: expr.to_string(),
+            output,
+        });
+    }
+    Ok(columns)
+}
+
+fn sql_predicate(
+    sql: &str,
+    source: &str,
+    source_alias: &str,
+    join_alias: Option<&str>,
+) -> Result<SqlPred, String> {
+    let Some(at) = sql.to_ascii_lowercase().rfind(" where ") else {
+        return Err(VIEW_SQL.into());
+    };
+    let pred = sql[at + 7..].trim();
+    let lower = pred.to_ascii_lowercase();
+    if lower.contains(" and ") || lower.contains(" or ") {
+        return Err(VIEW_SQL.into());
+    }
+    let (raw, rest) = split_sql_field(pred).ok_or(VIEW_SQL)?;
+    let (on_join, field) = if let Some((qual, name)) = raw.split_once('.') {
+        if qual == source_alias || qual == source {
+            (false, name.to_string())
+        } else if join_alias.is_some_and(|alias| qual == alias) {
+            (true, format!("{qual}.{name}"))
+        } else {
+            return Err(VIEW_SQL.into());
+        }
+    } else {
+        (false, raw.to_string())
+    };
+    let rest = rest.trim_start();
+    let (op, literal) = if let Some(rest) = rest.strip_prefix(">=") {
+        ("$gte", rest)
+    } else if let Some(rest) = rest.strip_prefix("<=") {
+        ("$lte", rest)
+    } else if rest.starts_with("<>") || rest.starts_with("!=") {
+        return Err(VIEW_SQL.into());
+    } else if let Some(rest) = rest.strip_prefix('>') {
+        ("$gt", rest)
+    } else if let Some(rest) = rest.strip_prefix('<') {
+        ("$lt", rest)
+    } else if let Some(rest) = rest.strip_prefix('=') {
+        ("$eq", rest)
+    } else {
+        return Err(VIEW_SQL.into());
+    };
+    let value = sql_value(literal.trim()).ok_or(VIEW_SQL)?;
+    let mut filter = bson::Document::new();
+    if op == "$eq" {
+        filter.insert(field, value);
+    } else {
+        filter.insert(field, bson::doc! { op: value });
+    }
+    Ok(SqlPred { on_join, filter })
+}
+
+fn split_sql_field(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim_start();
+    let end = text.find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))?;
+    if end == 0 {
+        return None;
+    }
+    Some((&text[..end], &text[end..]))
+}
+
+fn sql_value(text: &str) -> Option<bson::Bson> {
+    if let Some(inner) = text
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        return Some(bson::Bson::String(inner.to_string()));
+    }
+    if let Some(inner) = text
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return Some(bson::Bson::String(inner.to_string()));
+    }
+    if let Ok(number) = text.parse::<i64>() {
+        return Some(if let Ok(small) = i32::try_from(number) {
+            bson::Bson::Int32(small)
+        } else {
+            bson::Bson::Int64(number)
+        });
+    }
+    text.parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+        .map(bson::Bson::Double)
+}
+
+fn sql_join_keys(join: &SqlJoin, source: &str, source_alias: &str) -> Result<(String, String), String> {
+    let left = sql_side(&join.left, source, source_alias, &join.table, &join.alias)?;
+    let right = sql_side(&join.right, source, source_alias, &join.table, &join.alias)?;
+    match (left, right) {
+        (SqlSide::Local(local), SqlSide::Foreign(foreign))
+        | (SqlSide::Foreign(foreign), SqlSide::Local(local)) => Ok((local, foreign)),
+        _ => Err(VIEW_SQL.into()),
+    }
+}
+
+enum SqlSide {
+    Local(String),
+    Foreign(String),
+}
+
+fn sql_side(
+    text: &str,
+    source: &str,
+    source_alias: &str,
+    foreign: &str,
+    foreign_alias: &str,
+) -> Result<SqlSide, String> {
+    let Some((qual, field)) = text.split_once('.') else {
+        return Err(VIEW_SQL.into());
+    };
+    if !sql_field(field) {
+        return Err(VIEW_SQL.into());
+    }
+    if qual == source_alias || qual == source {
+        Ok(SqlSide::Local(field.to_string()))
+    } else if qual == foreign_alias || qual == foreign {
+        Ok(SqlSide::Foreign(field.to_string()))
+    } else {
+        Err(VIEW_SQL.into())
+    }
+}
+
+fn sql_project(
+    columns: &[SqlColumn],
+    source: &str,
+    source_alias: &str,
+    join_alias: Option<&str>,
+) -> Result<Option<bson::Document>, String> {
+    if columns.iter().any(|column| matches!(column, SqlColumn::Star)) {
+        return Ok(None);
+    }
+    let mut project = bson::Document::new();
+    let mut saw_id = false;
+    for column in columns {
+        let SqlColumn::Field { path, output } = column else {
+            continue;
+        };
+        if !sql_ident(output) {
+            return Err(VIEW_SQL.into());
+        }
+        if project.contains_key(output) {
+            return Err(VIEW_SQL.into());
+        }
+        let stored = sql_stored_path(path, source, source_alias, join_alias)?;
+        if output == "_id" {
+            saw_id = true;
+        }
+        project.insert(output, format!("${stored}"));
+    }
+    if !saw_id {
+        project.insert("_id", 0_i32);
+    }
+    Ok(Some(project))
+}
+
+fn sql_stored_path(
+    path: &str,
+    source: &str,
+    source_alias: &str,
+    join_alias: Option<&str>,
+) -> Result<String, String> {
+    let Some((qual, field)) = path.split_once('.') else {
+        return Ok(path.to_string());
+    };
+    if qual == source_alias || qual == source {
+        return Ok(field.to_string());
+    }
+    if join_alias.is_some_and(|alias| qual == alias) {
+        return Ok(path.to_string());
+    }
+    Err(VIEW_SQL.into())
+}
+
 fn ok(mut body: Value) -> String {
     body.as_object_mut()
         .expect("object")
@@ -774,13 +1423,35 @@ fn error(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_date;
+    use super::{format_date, sql_view};
 
     #[test]
     fn a_date_is_utc_with_milliseconds() {
         assert_eq!(format_date(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(format_date(86_400_000), "1970-01-02T00:00:00.000Z");
         assert_eq!(format_date(-1), "1969-12-31T23:59:59.999Z");
+    }
+
+    #[test]
+    fn a_sql_join_becomes_a_lookup() {
+        let (source, pipeline) = sql_view(
+            "SELECT BONU._id, BONU.sal, EMPR.ename name FROM bonus BONU INNER JOIN emp EMPR ON BONU.empno = EMPR.empno",
+        )
+        .unwrap();
+        assert_eq!(source, "bonus");
+        assert_eq!(
+            pipeline[0].get_document("$lookup").unwrap().get_str("from").unwrap(),
+            "emp"
+        );
+        assert_eq!(pipeline[1].get_str("$unwind").unwrap(), "$EMPR");
+        let project = pipeline[2].get_document("$project").unwrap();
+        assert_eq!(project.get_str("name").unwrap(), "$EMPR.ename");
+        assert_eq!(project.get_str("sal").unwrap(), "$sal");
+    }
+
+    #[test]
+    fn a_wider_sql_statement_is_refused() {
+        assert!(sql_view("SELECT sal FROM bonus UNION SELECT sal FROM emp").is_err());
     }
 }
 

@@ -1382,16 +1382,9 @@ async fn execute_command(
                 Err(message) => bson::doc! { "ok": 0.0, "errmsg": message },
             }
         }
-        Ok(partition_command) => match router.dispatch(partition_command) {
-            Some(rx) => match rx.await {
-                Ok(result) => cursor_ns(command, protocol::reply_document(&result)),
-                Err(_) => protocol::reply_document(&PartitionResult::Error {
-                    message: "partition worker dropped the request".into(),
-                }),
-            },
-            None => protocol::reply_document(&PartitionResult::Error {
-                message: "storage partition unavailable".into(),
-            }),
+        Ok(partition_command) => match dispatch_lookup(router, partition_command).await {
+            Ok(result) => cursor_ns(command, protocol::reply_document(&result)),
+            Err(message) => protocol::reply_document(&PartitionResult::Error { message }),
         },
         Err(message) => {
             LOGGER.warn(format!(
@@ -2752,6 +2745,51 @@ fn aggregate_resolved_mut(
     }
 }
 
+/// Runs a find or a count, loading `$lookup` collections that live on
+/// another partition. A view is stored on its source, and the join may not be.
+async fn dispatch_lookup(
+    router: &PartitionRouter,
+    mut command: PartitionCommand,
+) -> Result<PartitionResult, String> {
+    for _ in 0..8 {
+        let reply = match router.dispatch(command.clone()) {
+            Some(rx) => rx.await,
+            None => return Err("storage partition unavailable".into()),
+        };
+        match reply {
+            Ok(PartitionResult::NeedForeign { namespace: foreign }) => {
+                let documents = load_collection_documents(router, &foreign, &bson::doc! {})
+                    .await
+                    .map(|documents| (*documents).clone())?;
+                if !attach_foreign(&mut command, foreign.clone(), documents) {
+                    return Err(format!("lookup of '{foreign}' was not resolved"));
+                }
+            }
+            Ok(result) => return Ok(result),
+            Err(_) => return Err("partition worker dropped the request".into()),
+        }
+    }
+    Err("aggregate exceeded the lookup limit".into())
+}
+
+fn attach_foreign(
+    command: &mut PartitionCommand,
+    name: String,
+    documents: Vec<bson::Document>,
+) -> bool {
+    let resolved = match command {
+        PartitionCommand::Find { resolved, .. } | PartitionCommand::Count { resolved, .. } => {
+            resolved
+        }
+        _ => return false,
+    };
+    if resolved.iter().any(|(existing, _)| existing == &name) {
+        return false;
+    }
+    resolved.push((name, documents));
+    true
+}
+
 pub(crate) async fn execute_aggregate(
     router: &PartitionRouter,
     mut command: PartitionCommand,
@@ -3015,6 +3053,7 @@ async fn broadcast_catalog(
             sort,
             skip,
             limit,
+            resolved: _,
         } => (
             PartitionCommand::Find {
                 collection,
@@ -3023,6 +3062,7 @@ async fn broadcast_catalog(
                 sort: None,
                 skip: 0,
                 limit: None,
+                resolved: Vec::new(),
             },
             projection,
             sort,
@@ -3030,7 +3070,11 @@ async fn broadcast_catalog(
             limit,
             false,
         ),
-        PartitionCommand::Count { collection, filter } => (
+        PartitionCommand::Count {
+            collection,
+            filter,
+            resolved: _,
+        } => (
             PartitionCommand::find(collection, filter),
             None,
             None,

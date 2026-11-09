@@ -456,6 +456,111 @@ fn the_window_saves_a_connection_lists_fields_and_edits_a_cell() {
         std::fs::read_to_string(csv_path).unwrap().contains("qty"),
         "{exported}"
     );
+    let more = shell(
+        server.port,
+        &[],
+        "use shop\ndb.orders.insertOne({ sku: 8, qty: 4 })\n",
+    );
+    assert!(
+        more.status.success(),
+        "{}",
+        String::from_utf8_lossy(&more.stderr)
+    );
+    let full = serde_json::json!({
+        "op": "export",
+        "db": "shop",
+        "mql": "db.orders.find({})",
+        "path": server.dir.join("orders-full.csv"),
+    });
+    let full: Value = serde_json::from_str(&ui.dispatch(&full.to_string())).unwrap();
+    assert!(full["ok"].as_bool().unwrap_or(false), "{full}");
+    assert_eq!(full["n"].as_u64(), Some(2), "{full}");
+    let full_csv = std::fs::read_to_string(full["path"].as_str().unwrap()).unwrap();
+    assert!(full_csv.lines().count() >= 3, "{full_csv}");
+    assert!(full_csv.contains('4'), "{full_csv}");
+    let filtered = serde_json::json!({
+        "op": "export",
+        "db": "shop",
+        "mql": "db.orders.find({ sku: 8 })",
+        "path": server.dir.join("orders-sku-8.csv"),
+    });
+    let filtered: Value = serde_json::from_str(&ui.dispatch(&filtered.to_string())).unwrap();
+    assert_eq!(filtered["n"].as_u64(), Some(1), "{filtered}");
+    let filtered_csv = std::fs::read_to_string(filtered["path"].as_str().unwrap()).unwrap();
+    assert!(filtered_csv.contains('4'), "{filtered_csv}");
+    assert_eq!(filtered_csv.lines().count(), 2, "{filtered_csv}");
+    let view = serde_json::json!({
+        "op": "createView",
+        "db": "shop",
+        "name": "open_orders",
+        "mql": "db.orders.find({ sku: 9 })",
+    });
+    let view: Value = serde_json::from_str(&ui.dispatch(&view.to_string())).unwrap();
+    assert!(view["ok"].as_bool().unwrap_or(false), "{view}");
+    assert_eq!(view["viewOn"], "orders", "{view}");
+    let listed: Value =
+        serde_json::from_str(&ui.dispatch(r#"{"op":"collections","db":"shop"}"#)).unwrap();
+    let saved_view = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "open_orders")
+        .unwrap();
+    assert_eq!(saved_view["type"], "view", "{listed}");
+    let seeded = shell(
+        server.port,
+        &[],
+        "use shop\ndb.bonus.insertOne({ empno: 1, sal: 1600 })\ndb.emp.insertOne({ empno: 1, ename: \"ALLEN\" })\ndb.bonus.insertOne({ empno: 2, sal: 900 })\n",
+    );
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+    let joined = serde_json::json!({
+        "op": "createView",
+        "db": "shop",
+        "name": "bonus_inner_join",
+        "sql": "SELECT BONU._id, BONU.sal, EMPR.ename name FROM bonus BONU INNER JOIN emp EMPR ON BONU.empno = EMPR.empno",
+    });
+    let joined: Value = serde_json::from_str(&ui.dispatch(&joined.to_string())).unwrap();
+    assert!(joined["ok"].as_bool().unwrap_or(false), "{joined}");
+    assert_eq!(joined["viewOn"], "bonus", "{joined}");
+    let joined_rows: Value = serde_json::from_str(&ui.dispatch(
+        r#"{"op":"find","db":"shop","collection":"bonus_inner_join","filter":"{}"}"#,
+    ))
+    .unwrap();
+    assert!(
+        joined_rows["ok"].as_bool().unwrap_or(false),
+        "{joined_rows}"
+    );
+    assert_eq!(joined_rows["rows"].as_array().unwrap().len(), 1, "{joined_rows}");
+    let cells = joined_rows["rows"][0]["cells"].as_array().unwrap();
+    let cell = |field: &str| {
+        cells
+            .iter()
+            .find(|cell| cell["field"] == field)
+            .unwrap_or_else(|| panic!("missing {field} in {joined_rows}"))
+    };
+    assert_eq!(cell("sal")["text"], "1600", "{joined_rows}");
+    assert_eq!(cell("name")["text"], "ALLEN", "{joined_rows}");
+    let as_mql = serde_json::json!({
+        "op": "createView",
+        "db": "shop",
+        "name": "bonus_emp_view",
+        "mql": "SELECT BONU._id, BONU.sal, EMPR.ename name FROM bonus BONU INNER JOIN emp EMPR ON BONU.empno = EMPR.empno",
+    });
+    let as_mql: Value = serde_json::from_str(&ui.dispatch(&as_mql.to_string())).unwrap();
+    assert!(as_mql["ok"].as_bool().unwrap_or(false), "{as_mql}");
+    assert_eq!(as_mql["viewOn"], "bonus", "{as_mql}");
+    let refused = serde_json::json!({
+        "op": "createView",
+        "db": "shop",
+        "name": "joined",
+        "sql": "SELECT sal FROM bonus UNION SELECT sal FROM emp",
+    });
+    let refused: Value = serde_json::from_str(&ui.dispatch(&refused.to_string())).unwrap();
+    assert!(!refused["ok"].as_bool().unwrap_or(true), "{refused}");
     let patch = format!(
         r#"{{"op":"patch","db":"shop","collection":"orders","id":{},"field":"qty","text":"3","kind":"int"}}"#,
         serde_json::to_string(row["id"].as_str().unwrap()).unwrap(),
